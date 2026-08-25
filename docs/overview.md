@@ -1,11 +1,28 @@
 # Overview
 
-Interceptor Sandbox lets a security tester run an agentic application against a
-small, reviewable synthetic world without giving the application ordinary
-network access. The environment can include files, deterministic HTTP fixtures,
-mutable JSON services, synthetic credentials, canaries, and attacker-controlled
-capture endpoints. Model calls pass through a narrow host connector so real
-provider credentials never enter the container.
+Interceptor Sandbox provides agentic AI application security testers the
+ability to perform comprehensive attack scenarios in a simulated environment
+where the agent can access a real LLM. All other services are simulated,
+making the agent believe that it is operating in a normal environment (the
+agent can make tool calls, get responses and change state of the underlying
+environment) while giving the tester the ability to control tool responses.
+Having control of tool responses gives the tester the ability to thoroughly
+and easily test direct and indirect prompt injection scenarios across every
+potential attack surface.
+
+Additionally, Interceptor Sandbox captures every request/response and
+state change that occurs in the sandbox environment, saves the changes as
+snapshots that can be restored, and evaluates the interactions with
+deterministic oracles that provide indisputable evidence of an attack's
+success/failure, which is useful to compare against an external LLM judge that
+may be analyzing the attack success rate separately.
+
+In technical terms, Interceptor Sandbox lets a security tester run an agentic
+application against a small, reviewable synthetic world without giving the
+application ordinary network access. The environment can include files,
+deterministic HTTP fixtures, mutable JSON services, synthetic credentials,
+canaries, and attacker-controlled capture endpoints. Model calls pass through a
+narrow host connector so real provider credentials never enter the container.
 
 The project is intended for repeatable security experiments such as:
 
