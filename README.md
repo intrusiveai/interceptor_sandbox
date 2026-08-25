@@ -100,6 +100,14 @@ weakening containment or enabling container networking.
 
 See [`examples/`](examples/) for a reference agent and Environment Blueprint.
 
+## Documentation
+
+The user documentation starts at [`docs/`](docs/README.md), including the
+[getting-started guide](docs/getting-started.md), [Environment Blueprint
+reference](docs/environment-blueprint.md), [local API](docs/api-reference.md),
+[CLI reference](docs/cli-reference.md), and a detailed guide to [logical
+snapshots and restore](docs/snapshots-and-restore.md).
+
 ## Storage
 
 `INTERCEPTOR_DATA_DIR` overrides the platform configuration directory. Session

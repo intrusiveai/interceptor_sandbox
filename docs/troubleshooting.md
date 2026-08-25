@@ -1,0 +1,162 @@
+# Troubleshooting
+
+## Start with these checks
+
+```sh
+interceptor environment inspect <environment> --json
+interceptor app verify --environment <environment> --json
+interceptor list --json
+interceptor status <session-id> --json
+docker ps -a --filter name=interceptor-
+```
+
+For a failed startup, inspect the session's `termination_reason`, Docker logs,
+and `logs/application.stderr.log` under `INTERCEPTOR_DATA_DIR` (or the platform
+default data root).
+
+## Blueprint does not validate
+
+Common causes:
+
+- the image is tagged but not pinned as `name@sha256:<digest>`;
+- `reviewed_by` or `reviewed_at` is missing;
+- `MODEL_BASE_URL` or `application_listen` is not HTTP loopback;
+- a non-loopback `*_BASE_URL` hostname is not declared by a service;
+- a credential-looking variable lacks a matching synthetic credential entry;
+- a writable seed is outside `mutable_roots`;
+- mutable roots overlap or use a reserved system path;
+- a referenced YAML file has an unknown field or a second document;
+- a fixture rule is ambiguous at the same priority;
+- a stateful action has the wrong placeholder, `key_field`, or `patch_fields`;
+- a canary's declared file does not contain its value; or
+- an asset path, symlink, hard link, or special file violates the sealed-directory
+  boundary.
+
+Use `environment validate --json` to inspect the asset list once validation
+succeeds.
+
+## Wrapper image is missing or stale
+
+`run` requires a matching application lock. After any Blueprint, asset, or
+application-image change:
+
+```sh
+interceptor environment seal <environment>
+interceptor app build --environment <environment> --tag <wrapper-tag>
+interceptor app verify --environment <environment>
+```
+
+For a local source tag, ensure `application.image` uses the exact current value
+from `docker image inspect --format '{{.Id}}' <tag>`.
+
+## Docker is unavailable
+
+Confirm Docker Desktop or the Docker daemon is running and that the current user
+can execute `docker info`. Unit tests can run without Docker, but `app build`,
+`app verify`, `run`, and `restore` need the daemon.
+
+## Session health check times out
+
+Check that:
+
+- `launch.command` and `workdir` exist in the application image;
+- the application binds exactly to `application_listen`, not `0.0.0.0` or a
+  different port;
+- `health_path` returns 2xx without external dependencies;
+- `startup_timeout_ms` is long enough and positive;
+- the application user can read its image content and writable seed; and
+- application logs do not show an undeclared network or file dependency.
+
+## Model calls fail
+
+Verify:
+
+- `turn_timeout_ms` is positive;
+- the application calls `MODEL_BASE_URL`, not the provider directly;
+- it uses an OpenAI-compatible chat-completions path;
+- the request's `model` exactly matches one repeated `--allow-model` value;
+- `--provider-base-url` includes the intended base path but no credentials,
+  query, or fragment;
+- the selected `--model-api-key-env` is non-empty in the host shell; and
+- the provider is reachable from the host and does not redirect to another
+  origin.
+
+For local diagnosis, use the included mock provider and `reference-model` to
+separate application integration problems from upstream provider behavior.
+
+## Unix bridge fails on macOS or Docker Desktop
+
+This is expected. A Unix socket inode exposed through a Docker Desktop bind
+mount does not reliably carry the original kernel endpoint. Remove
+`--bridge-transport unix` or set `--bridge-transport spool`.
+
+Unix mode has no automatic fallback. On Linux, confirm the Docker daemon is
+local, the session directory is a native shared filesystem, and the CLI and
+container share the same kernel before selecting it.
+
+## File spool request times out
+
+Check whether the attached `run`/`restore` host process is still alive; it owns
+the relays and provider connector. Then inspect session phase and container
+state. A canceled caller may leave transient files briefly, but cancellation
+markers and orphan cleanup should remove them without replaying a mutation.
+
+If the process or machine crashed, restart from a published checkpoint rather
+than assuming an in-flight request completed. Never manually move a frame from
+`processing` back to `requests`.
+
+## Synthetic service returns `501 coverage_gap`
+
+The request did not match a sealed fixture or declared stateful/sink route. This
+is a modeling gap, not a transient upstream failure:
+
+```sh
+interceptor coverage <session-id>
+interceptor logs tail <session-id> --channel evaluation
+```
+
+Add the missing deterministic fixture or route, review the behavior, reseal,
+rebuild, and start a new session. Do not add general network as a fallback.
+
+## Snapshot returns `409 snapshot_failed`
+
+Likely causes are:
+
+- `snapshot_capable` is false or the snapshot limit is exhausted;
+- the quiesce endpoint did not return 2xx;
+- the command or signal readiness condition timed out;
+- a background writer changed a mutable root between stability scans;
+- content exceeded the blob limit; or
+- an unsupported file type appeared in a mutable root.
+
+Fix quiescence rather than retrying indefinitely. A failed request does not
+publish a checkpoint. Verify the current session logs and create a new snapshot
+only after the application reaches a known stable state.
+
+## Restore refuses a checkpoint
+
+Restore intentionally fails closed when:
+
+- the checkpoint belongs to another session;
+- the Environment directory or wrapper lock changed;
+- a journal entry, checkpoint, manifest, or blob is missing or modified;
+- the checkpoint's Interceptor version or journal schema differs from the
+  running binary; or
+- replayed files do not produce the pinned final manifest digest.
+
+Run `interceptor logs verify <source-session-id>`. Keep the original Sealed
+Environment, application lock/image, source journal, checkpoint, and referenced
+blobs together for as long as restore is required.
+
+## Evidence export is refused
+
+Exports require a `stopped` or `error` session. Stop a live session first, then:
+
+```sh
+interceptor logs verify <session-id>
+interceptor logs export <session-id> --output ./evidence.tar
+```
+
+If verification fails, preserve the data root for investigation. Do not edit the
+JSONL files or checkpoint JSON to force an export.
+
