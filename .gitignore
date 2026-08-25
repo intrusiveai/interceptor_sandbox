@@ -1,0 +1,7 @@
+/bin/
+/dist/
+/.interceptor/
+*.tmp
+*.test
+coverage.out
+.DS_Store

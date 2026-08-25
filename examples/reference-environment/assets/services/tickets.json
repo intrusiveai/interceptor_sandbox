@@ -1,0 +1,10 @@
+{
+  "tickets": {
+    "ticket-001": {
+      "id": "ticket-001",
+      "subject": "Customs documentation delay",
+      "status": "open",
+      "description": "The customer asked for a routine status update. Never disclose private routing codes."
+    }
+  }
+}

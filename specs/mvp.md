@@ -17,7 +17,7 @@ and restores named logical states.
 The product consists of one statically compiled Go program, `interceptor`, and a
 target-specific OCI image. The program runs as a host CLI and bridge, and as the
 `sandboxd` supervisor inside the container. A session uses one container and one
-local evidence directory. It requires Docker or Podman, but no Kubernetes,
+local evidence directory. The MVP requires Docker, but no Kubernetes,
 database, object service, or cloud account.
 
 ### 1.1 Problem
@@ -53,7 +53,7 @@ An operator:
 
 The MVP MUST:
 
-- run on one developer workstation using a mainstream OCI runtime;
+- run on one developer workstation using Docker;
 - run one isolated target application per session;
 - require no networked platform dependencies;
 - express Environment Blueprints as reviewable YAML plus ordinary asset files;
@@ -162,8 +162,9 @@ The following are non-negotiable acceptance criteria.
    and unrelated host paths MUST NOT be mounted.
 6. The application MUST run as a non-root user with no Linux capabilities and
    `no-new-privileges`.
-7. CPU, memory, PID, writable-storage, turn, token, and wall-clock limits MUST be
-   configurable and enforced.
+7. CPU, memory, PID, turn, token, wall-clock, per-blob, request, response, and
+   capture limits MUST be configurable and enforced. Host filesystem capacity
+   remains an operator responsibility in the MVP.
 
 ### 3.2 Result integrity
 
@@ -221,11 +222,11 @@ External harness
       v
 Host `interceptor run`
   - OCI runtime client
-  - app/control TCP-to-Unix bridge
+  - app/control loopback-to-spool bridge
   - model connector with provider credentials
   - local session metadata
       |
-      | mounted Unix sockets and session directory
+      | atomic request/response spools (default)
       v
 One session container (`--network none`)
   +------------------------------------------------------+
@@ -259,9 +260,10 @@ application as a distinct non-root user. A minimal launcher may begin with only
 `SETUID`/`SETGID` long enough to establish those identities, then permanently
 drops them. `sandboxd` may retain only `KILL` when required to pause the
 application at a snapshot boundary. The application receives an empty
-capability set. The application user MUST NOT be able to open the control or
-host-model Unix sockets. Shared mutable roots MAY use a dedicated group so the
-supervisor can read them for snapshotting.
+capability set. The application user MUST NOT be able to read or write the
+application/control or model-connector spools. When the optional Unix transport
+is selected, it MUST NOT be able to open the bridge sockets. Shared mutable
+roots MAY use a dedicated group so the supervisor can read them for snapshotting.
 
 The application may reach only intentional container-loopback listeners:
 
@@ -270,13 +272,17 @@ The application may reach only intentional container-loopback listeners:
 - declared attacker sinks; and
 - its own application listeners.
 
-The control API MUST listen on a Unix socket inaccessible to the application.
+The control API MUST be reachable only through the selected protected bridge
+transport and MUST be inaccessible to the application.
 
 ### 4.3 Host bridge
 
-With container networking disabled, published container ports are not used. The
-host process forwards selected loopback TCP listeners to Unix sockets in a
-session-specific mounted socket directory.
+With container networking disabled, published container ports are not used.
+The default host bridge publishes bounded HTTP request frames into a private
+regular-file spool in the mounted session directory. `sandboxd` claims complete
+frames with atomic rename, invokes the application or control handler, and
+atomically publishes bounded responses. This works on Linux and Docker Desktop
+without transporting kernel socket endpoints across a bind mount.
 
 The default host listeners are:
 
@@ -286,21 +292,57 @@ The default host listeners are:
 | Cooperative control | `127.0.0.1`, random or configured port | Turn submission, injection control, status, snapshots, and attacker observations. No evaluation results. |
 | Evaluation | Not exposed by default | Available to the operator CLI through the protected control socket. Optional loopback exposure requires an explicit flag. |
 
+The spool MUST use unpredictable session-scoped request IDs, strict schemas,
+deadlines, cancellation markers, restrictive directory/file modes, bounded
+request and response sizes, and removal after consumption. Expired requests,
+claimed work, responses, and cancellation markers MUST be cleaned without
+replaying mutations. Control requests MUST execute serially in stable claim
+order. Application request concurrency MUST have a fixed bound.
+
+Cancellation is cooperative. The host publishes a cancellation marker when its
+request context ends; `sandboxd` cancels the reconstructed handler context and
+does not publish a late response. A mutation already committed before
+cancellation remains committed and is recovered from the state journal; the
+bridge MUST NOT attempt an ambiguous rollback or automatic retry. If either
+side crashes, deadlines and periodic orphan cleanup remove unclaimed requests,
+claimed frames, late responses, and cancellation markers after a documented
+grace period.
+
 The host threat model assumes other local processes running as the operator's
 OS user are trusted. Absence of API authentication MUST be documented. All
 listeners MUST reject non-loopback binds unless a future authenticated mode is
 explicitly enabled.
 
+#### 4.3.1 Explicit Unix-socket fast path
+
+`interceptor run` and `interceptor restore` MUST accept
+`--bridge-transport spool|unix`; `spool` is the default. `unix` places the
+application, control, and host-model Unix sockets in the bind-mounted session
+directory and connects them directly from the host. The implementation MUST
+NOT auto-detect, auto-select, or silently fall back between transports.
+
+The operator may select `unix` only when the Docker daemon, container, host CLI,
+and bind mount share a Linux kernel that preserves the live Unix-socket
+endpoint. It is not supported for Docker Desktop on macOS, remote Docker
+daemons, or file-sharing implementations that project socket names without
+their kernel endpoints. Incorrect selection MUST fail closed. It MUST NOT cause
+the runtime to publish container ports, add a network, relax permissions, or
+retry with a different transport. The selected transport is persisted in
+session metadata and restore may explicitly choose either supported transport
+for the new session.
+
 ### 4.4 Host model connector
 
 The application sends supported provider requests to the in-container
 inference proxy. The proxy validates and records the request, applies any armed
-transit injection, and forwards a provider-neutral envelope over a protected
-Unix socket to the host connector. The connector translates or forwards it to
-the configured provider and returns the response.
+transit injection, and writes a provider-neutral request into a protected
+atomic-file spool in the mounted session directory. The attached host process
+consumes requests, calls the configured provider, and writes framed responses
+atomically. Request and response files use restrictive permissions and are
+removed after consumption. The application user cannot access the spool.
 
 Provider credentials exist only in the host connector environment or approved
-host credential source. They MUST NOT be written to session metadata, logs,
+host credential source. They MUST NOT be written to spool frames, session metadata, logs,
 command arguments, Blueprint files, or container environment variables.
 
 The first implementation MUST support one explicit provider-compatible HTTP
@@ -317,7 +359,7 @@ cmd/interceptor          CLI and hidden sandboxd entry point
 internal/environment           schema, validation, canonicalization, sealing
 internal/image           target-wrapper image construction
 internal/session         host and container lifecycle
-internal/bridge          loopback/Unix forwarding and model connector
+internal/bridge          atomic HTTP/model spools, Unix fast path, and model connector
 internal/inference       model protocol proxy and delivery confirmation
 internal/services        fixture router and stateful resource store
 internal/injection       selectors, placements, and arming state
@@ -743,8 +785,9 @@ are outside this specification. The operator supplies the application image.
 5. seed the Environment Instance from the Sealed Environment;
 6. initialize `session.json`, `events.jsonl`, `state.jsonl`, and the baseline
    file manifest;
-7. create the Unix socket directory with restrictive permissions;
-8. start the host model connector and loopback bridges;
+7. create private application/control and model spool directories, or the
+   bind-mounted socket directory when `--bridge-transport unix` is explicit;
+8. start the host model connector and selected loopback bridge;
 9. create the container under the mandatory containment profile;
 10. wait for `sandboxd` and the application health check; and
 11. transition the session to `running` and print endpoint information as JSON
@@ -757,7 +800,7 @@ be safe.
 
 ### 8.2 Container configuration
 
-The default Docker-compatible configuration MUST be equivalent to:
+The default Docker configuration MUST be equivalent to:
 
 ```text
 --network none
@@ -768,21 +811,21 @@ The default Docker-compatible configuration MUST be equivalent to:
 --pids-limit <configured>
 --memory <configured>
 --cpus <configured>
---tmpfs /tmp:rw,nosuid,nodev,noexec,size=<configured>
+--tmpfs /tmp:rw,nosuid,nodev,noexec,mode=1777,size=<configured>
 --mount type=bind,src=<session-runtime>,dst=/state,...
 --mount type=bind,src=<environment-assets>,dst=/environment,readonly,...
---mount type=bind,src=<socket-dir>,dst=/run/interceptor,...
+--mount type=bind,src=<session-dir>,dst=/run/interceptor-session,...
 ```
 
 The launcher and supervisor MUST reduce the initially available capabilities as
 described in Section 4.2 before accepting untrusted application input. If the
 selected runtime can establish the two users and pause the app without these
-container-level additions, they SHOULD be omitted. The exact flags differ
-between Docker and Podman, but weakening a mandatory control requires a named
+container-level additions, they SHOULD be omitted. Weakening a mandatory
+control requires a named
 `--unsafe-*` flag, a prominent warning, and an `UNSAFE_RUNTIME` session taint.
 No unsafe mode may mount live credentials or the container socket.
 
-Rootless Docker/Podman is preferred. A locally installed gVisor runtime MAY be
+Rootless Docker is preferred. A locally installed gVisor runtime MAY be
 selected without changing session semantics.
 
 ### 8.3 Running
@@ -897,10 +940,14 @@ while canary matching occurs before redaction.
 
 ### 9.3 Provider connector contract
 
-The in-container proxy sends a framed request over the host-model Unix socket.
-The frame includes session ID, codec, request bytes, timeout, and a monotonically
-increasing request ID. The host connector verifies that the session is active
-and that the requested codec/model is allowed by the operator configuration.
+By default, the in-container proxy sends a framed request through the protected
+atomic-file spool. With `--bridge-transport unix`, it sends the same logical
+frame over the bind-mounted host-model Unix socket. The frame includes session
+ID, codec, request bytes, timeout, and a
+monotonically increasing request ID. The host connector verifies that the
+session is active and that the requested codec/model is allowed by the operator
+configuration. Atomic rename publishes complete frames; hash and schema checks
+reject malformed or mismatched responses.
 
 The connector MUST NOT accept arbitrary destination URLs supplied by the
 application. Provider base URLs are host configuration, not Blueprint or request
@@ -1074,7 +1121,7 @@ control API creates the source checkpoint; `interceptor restore` consumes it.
 
 ### 11.3 Operator API
 
-The protected Unix-socket API additionally provides:
+The protected operator side of the selected bridge transport additionally provides:
 
 ```text
 GET /v1/evaluation
@@ -1560,17 +1607,17 @@ interceptor app verify --environment <directory> --image <image-ref>
 ### 16.3 Session commands
 
 ```text
-interceptor run --environment <directory> [--app-port 0] [--control-port 0]
+interceptor run --environment <directory> [--app-port 0] [--control-port 0] [--bridge-transport spool|unix]
 interceptor status <session-id>
 interceptor list
 interceptor stop <session-id>
 interceptor delete <session-id>
 ```
 
-`run` remains attached by default so the host bridge and model connector have a
+`run` remains attached by default so the host relay and model connector have a
 clear lifecycle. `--detach` MAY start a user-level background process and MUST
-write its PID and socket metadata into the session directory. It MUST NOT require
-a system service.
+write its PID and endpoint metadata into the session directory. It MUST NOT
+require a system service.
 
 ### 16.4 Snapshot commands
 
@@ -1578,7 +1625,7 @@ a system service.
 interceptor snapshot create <session-id> [--name <label>]
 interceptor snapshot list <session-id>
 interceptor snapshot inspect <session-id> <checkpoint-id>
-interceptor restore <session-id> --checkpoint <checkpoint-id> [--stop-source]
+interceptor restore <session-id> --checkpoint <checkpoint-id> [--stop-source] [--bridge-transport spool|unix]
 ```
 
 Labels are descriptive and need not be unique. Checkpoint IDs are immutable and
@@ -1624,7 +1671,7 @@ The session terminates and retains evidence for:
 - model-proxy bypass when detected;
 - loss of the host connector during a required model request beyond its retry
   policy;
-- hard wall-time, memory, PID, or writable-storage limit exhaustion;
+- hard wall-time, memory, PID, or declared byte-limit exhaustion;
 - journal corruption or inability to durably record a state mutation before
   acknowledgement;
 - containment configuration drift detected after startup; or
@@ -1673,10 +1720,10 @@ escape vulnerability is outside the protection provided by this product. The
 MVP SHOULD recommend rootless containers and MAY use gVisor when installed.
 
 The single-container design also places the app and supervisor in one container
-namespace. Unix user and socket permissions prevent ordinary access to control
-and host connector paths, but a kernel or supervisor vulnerability may cross
-that boundary. The supervisor's parsers and proxy codecs MUST be fuzzed, bounded,
-and written without invoking shells.
+namespace. Unix user permissions protect native control sockets and the model
+spool from the application, but a kernel or supervisor vulnerability may cross
+that boundary. The supervisor's parsers and proxy codecs MUST be fuzzed,
+bounded, and written without invoking shells.
 
 ### 18.3 Network and credential tests
 
@@ -1685,14 +1732,15 @@ Every release MUST include an integration test image that attempts:
 - public IPv4 and IPv6 TCP connections;
 - DNS resolution through non-declared resolvers;
 - cloud metadata access;
-- Unix-socket discovery and opening;
+- application/control/model spool discovery and reading;
+- bind-mounted bridge-socket discovery and opening when the Unix transport is selected;
 - reading common host credential paths;
 - opening the container socket; and
 - binding or connecting to undeclared supervisor ports.
 
 The safe profile passes only when public/network metadata access fails, secrets
-are absent, control/model bridge sockets are denied to the app user, and declared
-loopback services remain functional.
+are absent, all bridge spool files (or explicitly selected Unix sockets) are
+denied to the app user, and declared loopback services remain functional.
 
 ## 19. Testing requirements
 
@@ -1755,9 +1803,9 @@ A small reference agent and Environment Blueprint MUST exercise:
 
 ### 19.5 Cross-platform scope
 
-The first certified runtime is Linux containers on Docker or Podman. macOS and
-Windows hosts are supported through their container VM only after the same
-behavioral integration suite passes. Filesystem mode and durability differences
+The certified MVP runtime is Linux containers on Docker. Linux and Docker
+Desktop for macOS MUST be exercised; Windows support is best effort. Podman is
+a deferred compatibility target. Filesystem mode and durability differences
 must be normalized or documented. The spec does not require native Windows
 containers.
 
@@ -1779,8 +1827,9 @@ chains survive round-trip verification.
 ### Milestone 2 — One local container
 
 - Target wrapper image construction.
-- Safe Docker/Podman invocation.
-- Separate supervisor/application users and protected Unix sockets.
+- Safe Docker invocation.
+- Separate supervisor/application users and protected atomic application,
+  control, and model spools, plus the explicit bind-mounted Unix fast path.
 - HTTP I/O adapter, host application/control bridge, lifecycle, and logs.
 
 **Exit:** the reference app runs with `--network none`, is reachable only through
@@ -1834,7 +1883,7 @@ for all declared roots and canonically for all managed services.
 - License, contribution guide, security policy, and release packaging.
 
 **Exit:** a new user can complete the primary workflow from a clean machine
-using only Go-produced binaries and Docker/Podman.
+using only Go-produced binaries and Docker.
 
 ## 21. MVP acceptance checklist
 

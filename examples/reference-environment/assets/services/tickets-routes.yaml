@@ -1,0 +1,23 @@
+routes:
+  - id: list-tickets
+    method: GET
+    path: /tickets
+    action: list
+    collection: tickets
+  - id: get-ticket
+    method: GET
+    path: /tickets/{id}
+    action: get
+    collection: tickets
+  - id: create-ticket
+    method: POST
+    path: /tickets
+    action: create
+    collection: tickets
+    key_field: id
+  - id: patch-ticket
+    method: PATCH
+    path: /tickets/{id}
+    action: patch
+    collection: tickets
+    patch_fields: [subject, status, description]

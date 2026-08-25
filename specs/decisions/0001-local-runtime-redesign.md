@@ -115,7 +115,7 @@ Removing them would change the problem being solved.
 | Hosted environment registry | Blueprint directories addressed by path and a generated `environment.lock.json` digest. |
 | PostgreSQL control state | Atomic JSON metadata files under a local data directory. |
 | Garage/object storage | A local SHA-256 blob directory used by journals and recordings. |
-| Kubernetes operator and CRD | `interceptor run` creates and supervises one Docker/Podman container. |
+| Kubernetes operator and CRD | `interceptor run` creates and supervises one Docker container. |
 | Namespace-per-session | Container-per-session plus a unique local session directory. |
 | EBS CoW overlay and CSI snapshot | A logical change journal and content-addressed file delta records. |
 | Internet-facing authenticated API | Loopback-only host endpoints and protected Unix sockets, with no auth. |
@@ -209,7 +209,7 @@ unless it is adapted to externalize that state.
 
 ## Local containment model
 
-The default safe profile should use Docker or Podman with:
+The default safe profile uses Docker with:
 
 - `--network none`;
 - read-only container root, explicit writable state mounts, and tmpfs scratch;
@@ -217,14 +217,20 @@ The default safe profile should use Docker or Podman with:
   PID/CPU/memory/disk limits, and no container socket;
 - no provider or real-service credentials in the container;
 - canary credentials accepted only by local synthetic services;
-- host/container communication through mounted Unix sockets;
+- host/container application, control, and model-provider communication through
+  protected atomic-file spools in the mounted session directory by default;
+- an explicit `--bridge-transport unix` fast path for bind-mounted Unix sockets
+  when the operator knows the host and container share a suitable Linux kernel;
 - host listeners bound only to `127.0.0.1` or `::1`.
 
 The host CLI bridges selected application and control routes between loopback
-TCP and container Unix sockets. A host-side model connector holds provider
-credentials. The in-container inference proxy talks to it over a protected Unix
-socket, while the application can reach only the inference proxy on container
-loopback.
+TCP and a protected regular-file spool. A host-side model connector holds
+provider credentials and exchanges atomically published frames with the
+in-container inference proxy through a second spool. The application can reach
+only the inference proxy on container loopback. Linux operators may explicitly
+select bind-mounted Unix sockets; the runtime never probes, auto-selects, or
+falls back. This keeps Docker Desktop portable behavior as the safe default
+while leaving a lower-overhead Linux fast path under operator control.
 
 This is a meaningful containment boundary for a cooperatively onboarded target,
 but it is not equivalent to a dedicated gVisor/Kata cluster. The MVP must state
@@ -238,7 +244,7 @@ containers or an optional gVisor runtime where available.
 | `internal/domain` | Reuse concepts and selected validation, rename legacy `World` contracts to the new Environment vocabulary, and remove tenant, hosted-auth, distributed lifecycle, and paired-entropy fields. Add Sealed Environment lock, local session, checkpoint, and journal-operation types. |
 | `internal/recording` | Reuse the hash-chain design. Replace the in-memory-only chain with an append-only JSONL writer and verifier. |
 | `internal/blobstore/filesystem.go` | Reuse the traversal-safe, digest-verifying local blob logic after renaming it as the only MVP blob store. |
-| `internal/httpapi` | Keep strict JSON decoding and response hygiene patterns; replace authenticated multi-tenant routes with loopback/Unix-socket session routes. |
+| `internal/httpapi` | Keep strict JSON decoding and response hygiene patterns; replace authenticated multi-tenant routes with loopback/spool session routes and an explicit Unix fast path. |
 | `internal/controlplane` | Replace with a local session supervisor and lifecycle state machine. |
 | `internal/auth` | Remove. Local host trust and socket/loopback exposure are the MVP boundary. |
 | `internal/store/postgres.go`, `migrations` | Remove. Use atomic JSON metadata and append-only JSONL. |
