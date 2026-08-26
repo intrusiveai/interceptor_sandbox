@@ -33,10 +33,30 @@ docker build -t interceptor-reference-agent:local examples/reference-agent
 docker image inspect --format '{{.Id}}' interceptor-reference-agent:local
 ```
 
-The printed `sha256:...` value is the image's digital fingerprint. Copy it after
-the `@` in
-`examples/reference-environment/environment.yaml`. Also replace the example
-`metadata.reviewed_by` value and confirm `reviewed_at` reflects the review.
+The printed `sha256:...` value is the image's digital fingerprint. Open
+`examples/reference-environment/environment.yaml` and find `application.image`
+(currently line 13):
+
+```yaml
+image: interceptor-reference-agent:local@sha256:0000000000000000000000000000000000000000000000000000000000000000
+```
+
+Delete the placeholder value after `@` and paste the complete value printed by
+`docker image inspect` in its place.
+
+Next, update the review metadata near the top of the same file (currently lines
+8–9):
+
+```yaml
+reviewed_by: your-name-or-handle
+reviewed_at: 2026-08-25T18:30:00Z
+```
+
+Replace `your-name-or-handle` with the name or username of the person who
+reviewed the Blueprint and its assets. Set `reviewed_at` to
+the UTC date and time when that review was completed, using RFC 3339 format. The
+timestamp above is only an example. These fields provide a local audit record;
+they are not checked against an account service or another external value.
 
 Then validate, seal, build, and verify:
 
