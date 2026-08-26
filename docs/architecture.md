@@ -34,6 +34,75 @@ in-container supervisor. The wrapper image combines that program with the exact
 approved application image. The supervisor starts the application, runs the
 simulated services, records activity, and coordinates safe snapshot points.
 
+## How the application becomes a sandbox image
+
+There are two related container images:
+
+1. The **application image** is built by the application developer. It contains
+   the application and its normal runtime dependencies.
+2. The **wrapper image** is built by `interceptor app build`. It starts from the
+   application image, adds the Linux `interceptor` executable, and makes that
+   executable the container entrypoint.
+
+The build and startup sequence is:
+
+```text
+Application source
+      │ docker build
+      ▼
+Application image
+      │ interceptor app build
+      │ adds /usr/local/bin/interceptor
+      ▼
+Wrapper image
+      │ interceptor run
+      ▼
+interceptor sandboxd
+      ├─ starts simulated services and the model proxy
+      ├─ starts the application as a child process and checks its health
+      └─ opens the private application/control bridge
+```
+
+The Interceptor executable is one program with several modes. On the host it
+acts as the CLI and session manager. In the wrapper container it runs in
+`sandboxd` mode as the supervisor. It can also run a restricted helper used by
+command-based snapshot preparation. A separate `sandboxd` executable does not
+need to be installed in the application image.
+
+`interceptor app build` does not start any services or listeners. It also does
+not copy the Environment Blueprint, session data, or model-provider credentials
+into the image. It creates the reusable wrapper image and records which exact
+application, Interceptor build, and Sealed Environment it belongs to.
+
+When `interceptor run` starts a session, it verifies that wrapper record, mounts
+the Sealed Environment and new session storage, and starts the wrapper with the
+`sandboxd` argument. The resulting container command is conceptually:
+
+```sh
+/usr/local/bin/interceptor sandboxd
+```
+
+The application's original image entrypoint is therefore not used during a
+sandbox session. Instead, `sandboxd` starts the application from
+`application.launch.command` and `application.launch.workdir` in the Blueprint.
+This is why those fields must describe the complete command needed to start the
+application.
+
+## Which process creates each listener
+
+The local interface is split across the host and container:
+
+| Owner | What it starts |
+| --- | --- |
+| Application process | Its own local HTTP listener at `application.io.application_listen`. |
+| `sandboxd` inside the container | Simulated services, attacker sinks, the model proxy at `MODEL_BASE_URL`, and the private application/control bridge. |
+| `interceptor run` on the host | The printed local application and control URLs, plus the connector that sends approved model requests to the configured provider. |
+
+Requests sent to the printed application or control URL cross the private
+bridge to `sandboxd`. Model requests travel in the other direction: the
+application calls the in-container model proxy, which crosses the private bridge
+to the host connector. The provider credential exists only on that host side.
+
 ## Runtime containment
 
 Each session has one Docker container configured to limit what the application

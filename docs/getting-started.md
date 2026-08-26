@@ -69,6 +69,19 @@ interceptor app build \
 interceptor app verify --environment examples/reference-environment
 ```
 
+The first `docker build` created the ordinary application image. The
+`interceptor app build` command creates a second **wrapper image** from it. The
+wrapper keeps the application and its dependencies, adds the Interceptor
+executable, and configures that executable to start `sandboxd` when a session
+runs. `sandboxd` starts the in-container model proxy and simulated services,
+starts the application command from the Blueprint, checks its health, and then
+opens the private application and control bridge. You do not need to add
+`sandboxd` to the reference application's Dockerfile or run the wrapper image
+yourself.
+
+For a fuller explanation, see [How the application becomes a sandbox
+image](architecture.md#how-the-application-becomes-a-sandbox-image).
+
 In a separate terminal, start the included deterministic model provider:
 
 ```sh

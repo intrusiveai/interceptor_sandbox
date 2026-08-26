@@ -5,6 +5,40 @@ can run it safely. The Environment Blueprint supplies that information: how to
 start the application, where it listens, which routes may be called, where it
 stores data, and how it reaches the model and simulated services.
 
+## Application image and wrapper image
+
+You build the normal application image first. You do not need to add `sandboxd`
+or Interceptor-specific listeners to that Dockerfile. After the Environment is
+sealed, `interceptor app build` creates a second image—the wrapper image—by:
+
+1. using the application image as its starting point;
+2. adding the Linux `interceptor` executable; and
+3. making Interceptor the wrapper image's entrypoint.
+
+When a session starts, that executable runs in `sandboxd` supervisor mode.
+`sandboxd` starts the model proxy, simulated services, attacker sinks, and
+private bridge. It then starts the application executable as a non-root child
+process. The host-side `interceptor run` process creates the local URLs printed
+for the tester and owns the real model-provider connection.
+
+The original image's `ENTRYPOINT`, `CMD`, and `USER` are not used to start the
+application in a sandbox session. The Blueprint's `application.launch.command`
+replaces the original startup command, and the application runs under
+Interceptor's non-root application identity. Declare the complete executable
+and arguments, preferably using an absolute executable path, and ensure the
+image's files are readable and executable by that identity.
+
+Similarly, the application receives the environment variables declared in
+`application.launch.environment` plus declared synthetic credentials and
+Interceptor's virtual-time value. Environment variables declared only with
+`ENV` in the original Dockerfile are not automatically passed to the child
+application. Do not rely on the original image entrypoint to assemble arguments
+or environment variables at startup.
+
+See [How the application becomes a sandbox
+image](architecture.md#how-the-application-becomes-a-sandbox-image) for the full
+build and runtime sequence.
+
 ## Required application contract
 
 The application must:
@@ -89,6 +123,10 @@ The build records which exact application image and Sealed Environment were
 used. If either one changes, verification detects the mismatch and requires a
 new seal and build. This prevents a test from quietly running different code or
 environment data than the reviewer approved.
+
+The wrapper image is the image used for sessions. You do not run it manually;
+`interceptor run` locates it through the recorded application lock and starts
+its `sandboxd` mode with the required mounts, limits, and bridge configuration.
 
 For a locally tagged source image, get the ID with:
 
