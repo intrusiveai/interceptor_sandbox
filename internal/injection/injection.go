@@ -240,7 +240,52 @@ func (m *Manager) RewriteOpenAI(request []byte, turnID string) ([]byte, []Result
 	if !ok {
 		return nil, nil, errors.New("model request messages must be an array")
 	}
-	calls := collectToolCalls(messages)
+	return m.rewriteToolResults(envelope, collectToolCalls(messages), turnID)
+}
+
+func (m *Manager) RewriteOpenAIResponses(request []byte, turnID string) ([]byte, []Result, error) {
+	envelope, err := decodeEnvelope(request)
+	if err != nil {
+		return nil, nil, err
+	}
+	input, ok := envelope["input"].([]any)
+	if !ok {
+		// A string input cannot contain a completed function call, so it is a
+		// valid Responses request with nothing for this injection surface to do.
+		if _, stringInput := envelope["input"].(string); stringInput {
+			return request, nil, nil
+		}
+		return nil, nil, errors.New("Responses input must be a string or array")
+	}
+	return m.rewriteToolResults(envelope, collectResponsesToolCalls(input), turnID)
+}
+
+func (m *Manager) RewriteBedrockConverse(request []byte, turnID string) ([]byte, []Result, error) {
+	envelope, err := decodeEnvelope(request)
+	if err != nil {
+		return nil, nil, err
+	}
+	messages, ok := envelope["messages"].([]any)
+	if !ok {
+		if _, exists := envelope["messages"]; !exists {
+			return request, nil, nil
+		}
+		return nil, nil, errors.New("Bedrock Converse messages must be an array")
+	}
+	return m.rewriteToolResults(envelope, collectBedrockToolCalls(messages), turnID)
+}
+
+func decodeEnvelope(request []byte) (map[string]any, error) {
+	var envelope map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(request))
+	decoder.UseNumber()
+	if err := decoder.Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("decode model request: %w", err)
+	}
+	return envelope, nil
+}
+
+func (m *Manager) rewriteToolResults(envelope map[string]any, calls []toolCall, turnID string) ([]byte, []Result, error) {
 	results := []Result{}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -263,14 +308,13 @@ func (m *Manager) RewriteOpenAI(request []byte, turnID string) ([]byte, []Result
 					return nil, nil, fmt.Errorf("persist injection consumption: %w", err)
 				}
 			}
-			message := messages[call.messageIndex].(map[string]any)
-			original := message["content"]
+			original := call.target[call.targetField]
 			updated, err := Apply(original, definition.Placement, definition.Payload)
 			if err != nil {
 				result.Error = err.Error()
 				m.record("injection_placement_failed", definition.ID, map[string]any{"turn_id": turnID, "error": err.Error()})
 			} else {
-				message["content"] = updated
+				call.target[call.targetField] = updated
 				result.Applied, item.evaluation.Fired = true, true
 				m.record("injection_applied", definition.ID, map[string]any{"turn_id": turnID, "tool_name": call.name, "tool_call_id": call.id})
 			}
@@ -426,10 +470,11 @@ func (m *Manager) record(kind, id string, semantic map[string]any) {
 }
 
 type toolCall struct {
-	id, name     string
-	arguments    any
-	ordinal      int
-	messageIndex int
+	id, name    string
+	arguments   any
+	ordinal     int
+	target      map[string]any
+	targetField string
 }
 
 func collectToolCalls(messages []any) []toolCall {
@@ -458,7 +503,7 @@ func collectToolCalls(messages []any) []toolCall {
 		}
 	}
 	result := []toolCall{}
-	for index, raw := range messages {
+	for _, raw := range messages {
 		message, ok := raw.(map[string]any)
 		if !ok || message["role"] != "tool" {
 			continue
@@ -470,10 +515,98 @@ func collectToolCalls(messages []any) []toolCall {
 			counts[call.name]++
 			call.ordinal = counts[call.name]
 		}
-		call.id, call.messageIndex = id, index
+		call.id, call.target, call.targetField = id, message, "content"
 		result = append(result, call)
 	}
 	return result
+}
+
+func collectResponsesToolCalls(items []any) []toolCall {
+	metadata := map[string]toolCall{}
+	counts := map[string]int{}
+	for _, raw := range items {
+		item, _ := raw.(map[string]any)
+		if item["type"] != "function_call" {
+			continue
+		}
+		id, _ := item["call_id"].(string)
+		name, _ := item["name"].(string)
+		arguments := decodeArguments(item["arguments"])
+		counts[name]++
+		metadata[id] = toolCall{id: id, name: name, arguments: arguments, ordinal: counts[name]}
+	}
+	result := []toolCall{}
+	for _, raw := range items {
+		item, _ := raw.(map[string]any)
+		if item["type"] != "function_call_output" {
+			continue
+		}
+		id, _ := item["call_id"].(string)
+		call := metadata[id]
+		call.id, call.target, call.targetField = id, item, "output"
+		result = append(result, call)
+	}
+	return result
+}
+
+func collectBedrockToolCalls(messages []any) []toolCall {
+	metadata := map[string]toolCall{}
+	counts := map[string]int{}
+	for _, raw := range messages {
+		message, _ := raw.(map[string]any)
+		content, _ := message["content"].([]any)
+		for _, rawBlock := range content {
+			block, _ := rawBlock.(map[string]any)
+			use, _ := block["toolUse"].(map[string]any)
+			if use == nil {
+				continue
+			}
+			id, _ := use["toolUseId"].(string)
+			name, _ := use["name"].(string)
+			counts[name]++
+			metadata[id] = toolCall{id: id, name: name, arguments: use["input"], ordinal: counts[name]}
+		}
+	}
+	result := []toolCall{}
+	for _, raw := range messages {
+		message, _ := raw.(map[string]any)
+		content, _ := message["content"].([]any)
+		for _, rawBlock := range content {
+			block, _ := rawBlock.(map[string]any)
+			toolResult, _ := block["toolResult"].(map[string]any)
+			if toolResult == nil {
+				continue
+			}
+			id, _ := toolResult["toolUseId"].(string)
+			parts, _ := toolResult["content"].([]any)
+			for _, rawPart := range parts {
+				part, _ := rawPart.(map[string]any)
+				field := ""
+				if _, exists := part["text"]; exists {
+					field = "text"
+				} else if _, exists := part["json"]; exists {
+					field = "json"
+				}
+				if field != "" {
+					call := metadata[id]
+					call.id, call.target, call.targetField = id, part, field
+					result = append(result, call)
+					break
+				}
+			}
+		}
+	}
+	return result
+}
+
+func decodeArguments(raw any) any {
+	if text, ok := raw.(string); ok {
+		var decoded any
+		if json.Unmarshal([]byte(text), &decoded) == nil {
+			return decoded
+		}
+	}
+	return raw
 }
 
 func selectorMatches(selector Selector, call toolCall) bool {

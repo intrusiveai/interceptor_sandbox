@@ -59,7 +59,7 @@ The MVP MUST:
 - express Environment Blueprints as reviewable YAML plus ordinary asset files;
 - operate without runtime Blueprint-authoring model calls;
 - proxy and record every supported model interaction;
-- serve deterministic static and small stateful dependencies;
+- serve deterministic static, small stateful, and MCP tool dependencies;
 - fail closed on unknown synthetic-service requests;
 - accept attack content only from an external caller;
 - keep attacker-visible data separate from evaluation facts;
@@ -157,7 +157,9 @@ The following are non-negotiable acceptance criteria.
 2. No credential valid against a real external service may enter the session
    container.
 3. Provider credentials MUST remain in the host-side model connector.
-4. Canary credentials MUST be accepted only by local synthetic services.
+4. Canary credentials MUST be accepted only by local synthetic services or by
+   the local model proxy when an application SDK requires fake authentication
+   before sending a loopback request.
 5. The container socket, host root, SSH agent, cloud credential directories,
    and unrelated host paths MUST NOT be mounted.
 6. The application MUST run as a non-root user with no Linux capabilities and
@@ -233,7 +235,7 @@ One session container (`--network none`)
   | sandboxd                                             |
   | - I/O adapter / reverse proxy                        |
   | - inference proxy                                    |
-  | - fixture and stateful synthetic services                  |
+  | - fixture, stateful, and MCP synthetic services            |
   | - injection controller                               |
   | - attacker HTTP sink                                 |
   | - recorder and oracle evaluator                      |
@@ -342,12 +344,29 @@ atomically. Request and response files use restrictive permissions and are
 removed after consumption. The application user cannot access the spool.
 
 Provider credentials exist only in the host connector environment or approved
-host credential source. They MUST NOT be written to spool frames, session metadata, logs,
-command arguments, Blueprint files, or container environment variables.
+host credential source. They MUST NOT be written to spool frames, session
+metadata, logs, command arguments, Blueprint files, or container environment
+variables. OpenAI-compatible HTTP credentials are read from a named host
+environment variable. Bedrock credentials MUST be resolved by the native AWS
+SDK for Go v2 default configuration and credential chain on the host so normal
+keys, session credentials, profiles, SSO, web identity, credential processes,
+and workload roles remain usable without Interceptor copying them.
 
-The first implementation MUST support one explicit provider-compatible HTTP
-codec. Additional codecs are extensions. An application whose model traffic
-cannot be routed through a supported codec fails onboarding.
+The application-facing seam is protocol-aware. It accepts non-streaming OpenAI
+Chat Completions, OpenAI Responses, and Amazon Bedrock Converse. The host MUST
+support these provider adapters:
+
+- `openai-chat`: fixed-origin Chat Completions pass-through;
+- `openai-responses`: fixed-origin Responses pass-through;
+- `bedrock-converse`: native Converse decoding and invocation through the AWS
+  SDK; and
+- `litellm`: fixed-origin Chat Completions or Responses pass-through to the
+  matching LiteLLM gateway route.
+
+The MVP MUST use like-for-like application/provider protocol pairings and MUST
+NOT silently translate between model APIs. An incompatible codec and adapter
+fails explicitly. An application whose native model API is unsupported fails
+onboarding.
 
 ### 4.5 Internal module boundaries
 
@@ -361,7 +380,7 @@ internal/image           target-wrapper image construction
 internal/session         host and container lifecycle
 internal/bridge          atomic HTTP/model spools, Unix fast path, and model connector
 internal/inference       model protocol proxy and delivery confirmation
-internal/services        fixture router and stateful resource store
+internal/services        fixture, stateful resource, and MCP tool services
 internal/injection       selectors, placements, and arming state
 internal/sinks           attacker HTTP capture
 internal/recording       event JSONL, hashes, blobs, verification
@@ -490,6 +509,7 @@ application:
     environment:
       MODEL_BASE_URL: http://127.0.0.1:18080/v1
       TICKETS_BASE_URL: http://tickets.sandbox.local:18100
+      KNOWLEDGE_MCP_BASE_URL: http://knowledge-mcp.sandbox.local:18102/mcp
       EXFIL_BASE_URL: http://metrics.example.test:18200
       APP_STATE_DIR: /state/app
   io:
@@ -541,6 +561,13 @@ services:
     listen: 127.0.0.1:18101
     hostnames: [handbook.sandbox.local]
     fixtures: assets/services/handbook-fixtures.yaml
+  - id: knowledge-mcp
+    kind: mcp_http
+    listen: 127.0.0.1:18102
+    hostnames: [knowledge-mcp.sandbox.local]
+    endpoint: /mcp
+    tools: assets/services/knowledge-mcp-tools.yaml
+    seed: assets/services/knowledge-mcp-state.json
 
 credentials:
   - id: ticket-token
@@ -622,7 +649,7 @@ Rules:
 
 ### 6.5 Services
 
-The MVP supports three in-process service kinds.
+The MVP supports four in-process service kinds.
 
 #### 6.5.1 `fixture_http`
 
@@ -662,7 +689,55 @@ service emulator. If the application's legitimate behavior depends on
 unsupported semantics or wire compatibility, validation fails with an
 unsupported-dependency report.
 
-#### 6.5.3 `http_sink`
+#### 6.5.3 `mcp_http`
+
+The MCP HTTP service provides a deterministic, protocol-aware replacement for
+a remote MCP tool server. It listens on one declared container-loopback HTTP
+endpoint and accepts individual JSON-RPC 2.0 requests. The application MUST be
+configured to use the synthetic hostname; the runtime MUST NOT transparently
+forward the request to the real remote endpoint.
+
+The implemented subset supports:
+
+- `initialize`, `ping`, `tools/list`, and `tools/call` requests;
+- the `notifications/initialized` notification;
+- older initialization-based protocol versions through `2025-11-25` and
+  stateless direct tool-list and tool-call requests;
+- non-streaming JSON responses;
+- text content and optional structured tool results; and
+- Blueprint-defined fixture and stateful tool behavior.
+
+Tool definitions are a sealed YAML asset. Each tool declares a unique name,
+description, object-shaped input schema, optional output schema, and exactly
+one behavior:
+
+- `fixture` selects a deterministic result by priority and JSON argument-subset
+  matching; or
+- `stateful` maps `list`, `get`, `create`, `replace`, `patch`, or `delete` to a
+  canonical collection/key record store seeded by a sealed JSON asset.
+
+Input schemas MUST be published in `tools/list`. The MVP validates required
+top-level fields, basic JSON types, and `additionalProperties: false`; complete
+JSON Schema evaluation is not required. Ambiguous equal-priority fixtures MUST
+fail Blueprint validation. Unknown methods, tools, and unmatched tool fixtures
+MUST fail closed and record a coverage gap.
+
+Stateful MCP mutations MUST use the same write-ahead `service_put` and
+`service_delete` journal operations as `stateful_http`. Their records MUST be
+addressable by `environment_state` injections and `service_state_match`
+oracles. MCP initialization, discovery, calls, errors, and gaps MUST produce
+evaluation-channel evidence containing the service and applicable tool
+semantics. Transport authorization headers MUST NOT be copied into those event
+semantics.
+
+The MVP does not support SSE, HTTP GET streams, protocol sessions, request
+batching, pagination, server-initiated messages, cancellation, resources,
+prompts, sampling, roots, elicitation, subscriptions, non-text content, TLS,
+OAuth, transport authentication, dynamic fixture templates, or forwarding to
+an actual remote MCP server. Each request body, encoded tool result, and
+individual stateful seed record is bounded at 1 MiB.
+
+#### 6.5.4 `http_sink`
 
 The attacker HTTP sink accepts configured methods and paths, captures request
 headers and a bounded body, and returns a deterministic declared response. Its
@@ -676,7 +751,8 @@ SMTP, DNS, generic TCP, and two-way tasking are future service kinds.
 Every credential-looking application setting MUST be classified as one of:
 
 - absent;
-- a synthetic canary accepted only by a named local service; or
+- a synthetic canary accepted only by a named local service or by the reserved
+  local `model-proxy` target; or
 - a host-side provider credential used only by the model connector.
 
 Blueprint validation fails if an application environment entry appears to
@@ -913,6 +989,19 @@ Every supported application model call MUST traverse the in-container
 inference proxy. The application is configured with the proxy base URL. General
 networking is disabled, so a remote provider cannot be contacted directly.
 
+The proxy MUST accept non-streaming OpenAI Chat Completions, OpenAI Responses,
+and Amazon Bedrock Converse create operations. It MUST retain the application's
+native request and response protocol. The selected host adapter MUST support
+that codec; incompatible pairings fail explicitly. Unsupported routes, fields,
+or content types fail explicitly rather than being silently discarded.
+
+OpenAI SDKs use the Blueprint's loopback model base URL. Bedrock SDKs use the
+same loopback server as their Bedrock Runtime endpoint and produce the normal
+`/model/{modelId}/converse` path. An application MAY receive declared synthetic
+keys solely to satisfy local SDK authentication/signing requirements. The proxy
+MUST ignore these credentials and signatures. Real provider authentication is
+added only by the host adapter.
+
 Onboarding MUST include a model-call smoke test. A session with application
 model activity but no matching proxy record is invalid and terminates with
 `MODEL_BYPASS` when detectable.
@@ -924,9 +1013,11 @@ MVP.
 
 For each request and response, the proxy records:
 
-- provider codec and requested model identifier;
-- normalized message, tool, and response semantics;
-- raw request and response blobs subject to configured size limits;
+- provider codec, selected host provider, and requested model identifier;
+- protocol-native message, tool, and response semantics;
+- the final injected application request;
+- provider request and native response blobs, subject to configured size
+  limits;
 - token usage reported by the provider;
 - start/end times and logical sequence;
 - tool-call IDs where present;
@@ -937,6 +1028,10 @@ For each request and response, the proxy records:
 Sensitive host authorization headers are stripped before recording. Synthetic
 credentials are recorded only according to the Blueprint's redaction policy,
 while canary matching occurs before redaction.
+
+Bedrock provider records are canonical JSON representations of native SDK
+Converse input/output. They are not the signed HTTP wire bytes produced inside
+the SDK. AWS request signatures and resolved credentials MUST NOT be recorded.
 
 ### 9.3 Provider connector contract
 
@@ -950,11 +1045,33 @@ configuration. Atomic rename publishes complete frames; hash and schema checks
 reject malformed or mismatched responses.
 
 The connector MUST NOT accept arbitrary destination URLs supplied by the
-application. Provider base URLs are host configuration, not Blueprint or request
-data. Redirects to a different origin are refused. The connector reports the
-digest and normalized semantics of the final request bytes sent to the provider
-back to the inference proxy so delivery is measured after connector translation,
-not against an earlier envelope.
+application. HTTP provider base URLs are host configuration, not Blueprint or
+request data. Redirects to a different origin are refused. Bedrock region,
+profile overrides, endpoint resolution, credentials, signing, retries, and
+credential refresh are host-side AWS SDK concerns. Every requested model ID or
+ARN remains subject to the exact operator allowlist.
+
+The connector reports separate digests for the final injected application
+request, provider request, and native provider response. Injection delivery is
+confirmed against the final request accepted by the adapter. Codec tests MUST
+prove that supported injected tool results remain in their native Chat,
+Responses, or Converse representation.
+
+The `openai-responses` adapter MUST preserve the native create-request and
+response bodies. Provider-managed retrieve/delete/cancel operations,
+background polling, WebSockets, and streaming are outside the initial route
+set. The `bedrock-converse` adapter MUST initially cover text messages, system
+prompts, function tools/calls/results, common Converse inference configuration,
+additional-model request fields, stop reasons, and token usage. ConverseStream,
+multimodal content, guardrails, prompt variables, service tiers, specialized
+output/performance configuration, and reasoning content are outside the initial
+subset.
+
+The `litellm` adapter sends native Chat Completions or Responses requests to the
+matching gateway endpoint. LiteLLM is responsible for downstream translation,
+routing, and credentials; Interceptor still fixes the gateway origin, keeps its
+optional gateway credential on the host, enforces the model allowlist, and
+records the exchange.
 
 ### 9.4 Recorded response mode
 
@@ -992,8 +1109,11 @@ The MVP requires two surfaces:
    encounters the payload through its normal data path.
 
 Direct system-prompt rewriting, arbitrary memory-store plugins, vector-index
-rewrites, MCP-native interception, and syscall-layer injection are future
-surfaces.
+rewrites, MCP-native transit interception before the framework receives a tool
+result, and syscall-layer injection are future surfaces. Stateful `mcp_http`
+records are already eligible for `environment_state` fidelity injection, and
+MCP results converted into supported Chat, Responses, or Converse tool-result
+history remain eligible for `model_tool_result` simulation.
 
 ### 10.3 Modes
 
@@ -1053,7 +1173,9 @@ delivered during the live session.
 ### 10.7 Delivery accounting
 
 For simulation mode, delivery is confirmed when the final post-rewrite content
-is present in the final provider request reported by the host connector.
+is present in the native Chat, Responses, or Converse request accepted by the
+host adapter. Codec tests prove that the content remains linked to the selected
+tool call in that protocol.
 
 For fidelity mode, planting is not delivery. The inference proxy registers the
 injection's canonical content fingerprint and confirms delivery only when the
@@ -1318,7 +1440,7 @@ The MVP state journal supports:
 | `directory_delete` | Remove an empty directory after its children have been removed. |
 | `symlink_set` | Create an internal, validated relative symlink when the Blueprint schema allows it. |
 | `service_put` | Set a canonical JSON value at `(service, collection, key)`. |
-| `service_delete` | Delete a canonical stateful-service value. |
+| `service_delete` | Delete a canonical managed-service value. |
 | `injection_put` | Create or replace injection arming state. |
 | `injection_delete` | Remove injection arming state. |
 | `clock_set` | Set the sandbox virtual time value. |
@@ -1332,7 +1454,7 @@ blobs, and duplicate sequence numbers.
 
 ### 13.4 Write-ahead semantics for managed state
 
-For a stateful service or control mutation:
+For a managed stateful HTTP/MCP service or control mutation:
 
 1. validate the complete requested transaction without changing state;
 2. serialize and append the transaction with its hash;
@@ -1655,6 +1777,7 @@ The runtime fails the specific request and records an evaluation event for:
 - unmatched fixture requests;
 - ambiguous fixture matches;
 - unsupported stateful operations;
+- unknown MCP methods/tools and unmatched MCP fixture arguments;
 - invalid injection placement;
 - model connector destination or codec violations;
 - attempts to mutate read-only Environment Instance paths;
@@ -1752,6 +1875,8 @@ Required unit coverage includes:
 - path, symlink, asset, and reserved-root validation;
 - fixture specificity, ambiguity, and fail-closed misses;
 - stateful route transitions and write-ahead ordering;
+- MCP initialization, discovery, dynamic JSON-RPC IDs, fixture matching,
+  stateful calls, gaps, and replay;
 - event and journal canonical hashes;
 - partial-line crash recovery behavior;
 - blob traversal resistance and digest verification;
@@ -1791,9 +1916,12 @@ that:
 A small reference agent and Environment Blueprint MUST exercise:
 
 - HTTP turn delivery and exact output pass-through;
-- one model provider codec through the host connector;
+- native Chat, Responses, and Converse codecs through the host connector;
+- like-for-like OpenAI, Converse, and LiteLLM adapter unit tests, including text
+  and function-tool round trips;
 - fixture hit and coverage gap;
 - stateful create/read/update behavior;
+- MCP tool discovery plus fixture and stateful tool calls;
 - simulation and fidelity injection;
 - all required delivery outcomes;
 - attacker HTTP sink observation and oracle separation;
@@ -1839,6 +1967,8 @@ loopback bridge, and stops cleanly with evidence retained.
 
 - Fixture HTTP router with coverage gaps.
 - Declarative stateful HTTP resource store with WAL-before-ack.
+- Declarative non-streaming MCP HTTP tool service with fixture and journaled
+  stateful behaviors.
 - Canary credentials and attacker HTTP sink.
 
 **Exit:** a legitimate reference workflow observes coherent mutate-then-read
@@ -1846,7 +1976,10 @@ state and no unknown request receives invented success.
 
 ### Milestone 4 — Model seam and recording
 
-- One inference provider codec.
+- Native non-streaming Chat Completions, Responses, and Converse application
+  codecs.
+- Like-for-like host adapters for OpenAI Chat, OpenAI Responses, Bedrock
+  Converse through the AWS SDK, and LiteLLM.
 - Protected host model connector with no container credentials.
 - Semantic and raw model records, token accounting, and tool-call correlation.
 
@@ -1898,6 +2031,10 @@ The implementation is ready to call an MVP only if all are true:
 - [ ] Unknown synthetic-service requests fail closed and are reported as
       coverage gaps.
 - [ ] Every model interaction crosses the inference proxy.
+- [ ] OpenAI Chat, OpenAI Responses, Bedrock Converse, and LiteLLM can be
+      selected without placing provider credentials in the container.
+- [ ] Declared MCP HTTP tools work without external network access; unknown
+      MCP methods, tools, and fixture inputs fail closed with coverage evidence.
 - [ ] Natural application output is returned byte-for-byte to the harness.
 - [ ] Event records carry channel, provenance, sequence, and valid hash chain.
 - [ ] A harness can arm both required injection modes.
@@ -1921,7 +2058,9 @@ The implementation is ready to call an MVP only if all are true:
 The following may be added after the MVP proves its core loop, but none should
 shape the initial implementation prematurely:
 
-- MCP-native and additional model-provider codecs;
+- additional MCP methods, model operations, streaming transports, content
+  types, authentication, provider adapters, and cross-protocol mappings where
+  their semantics can be preserved;
 - line-oriented CLI and terminal I/O adapters;
 - SMTP, DNS, and generic TCP attacker sinks;
 - specialized stateful service codec plugins;

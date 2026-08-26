@@ -81,3 +81,31 @@ func TestRewriteToolResultAndJournalConsumption(t *testing.T) {
 	}
 	_ = os.Remove(journalPath)
 }
+
+func TestRewriteNativeResponsesAndBedrockToolResults(t *testing.T) {
+	journal, err := statejournal.Open(filepath.Join(t.TempDir(), "state.jsonl"), "sess-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+	manager := NewManager(journal, nil)
+	if err := manager.Arm(Definition{
+		ID: "inj-native", Surface: "model_tool_result", Mode: "simulation", Scope: "standing", Enabled: true,
+		Selector:  Selector{ToolName: "lookup", CallOrdinal: "first", ArgumentsPointer: "/q", ArgumentsEqual: json.RawMessage(`"old"`)},
+		Placement: Placement{Operation: "append_text"}, Payload: json.RawMessage(`" injected"`),
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	responses := []byte(`{"model":"gpt-test","input":[{"type":"function_call","call_id":"call-1","name":"lookup","arguments":"{\"q\":\"old\"}"},{"type":"function_call_output","call_id":"call-1","output":"result"}]}`)
+	rewrittenResponses, results, err := manager.RewriteOpenAIResponses(responses, "turn-responses")
+	if err != nil || len(results) != 1 || !results[0].Applied || !bytes.Contains(rewrittenResponses, []byte(`"output":"result injected"`)) {
+		t.Fatalf("Responses injection failed: err=%v results=%#v body=%s", err, results, rewrittenResponses)
+	}
+
+	bedrock := []byte(`{"messages":[{"role":"assistant","content":[{"toolUse":{"toolUseId":"tool-1","name":"lookup","input":{"q":"old"}}}]},{"role":"user","content":[{"toolResult":{"toolUseId":"tool-1","content":[{"text":"result"}]}}]}]}`)
+	rewrittenBedrock, results, err := manager.RewriteBedrockConverse(bedrock, "turn-bedrock")
+	if err != nil || len(results) != 1 || !results[0].Applied || !bytes.Contains(rewrittenBedrock, []byte(`"text":"result injected"`)) {
+		t.Fatalf("Bedrock injection failed: err=%v results=%#v body=%s", err, results, rewrittenBedrock)
+	}
+}

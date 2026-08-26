@@ -24,6 +24,12 @@ Current decisions:
 - [`0001-local-runtime-redesign.md`](decisions/0001-local-runtime-redesign.md) —
   replace the distributed control-plane design with a local container runtime,
   file-backed state, and logical journal snapshots.
+- [`0002-simulated-mcp-http.md`](decisions/0002-simulated-mcp-http.md) — add a
+  protocol-aware, deterministic MCP tool service on the existing synthetic
+  service, evidence, injection, and journal foundations.
+- [`0003-host-model-provider-adapters.md`](decisions/0003-host-model-provider-adapters.md)
+  — preserve native application model APIs while keeping all real provider
+  access behind compatible host adapters.
 
 ## Change discipline
 

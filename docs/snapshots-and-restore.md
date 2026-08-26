@@ -27,7 +27,7 @@ running process.
 A checkpoint includes the persistent information needed to rebuild the synthetic
 environment at that moment:
 
-- records created, changed, or deleted in simulated stateful services;
+- records created, changed, or deleted in simulated stateful HTTP or MCP services;
 - active injections and whether a one-time injection was already used;
 - files created, changed, linked, or deleted in folders declared as saved
   application state (`mutable_roots`);
@@ -149,12 +149,19 @@ Interceptor promises it can rebuild.
 ```sh
 interceptor restore <source-session-id> \
   --checkpoint <checkpoint-id> \
+  --model-provider openai-chat \
   --provider-base-url https://provider.example/v1 \
   --allow-model provider-model-id
 ```
 
 The host provider options are required again because credentials and provider
 configuration are deliberately absent from snapshots.
+
+A restore may select `openai-chat`, `openai-responses`, `bedrock-converse`, or
+`litellm`, but changing provider or model can change agent behavior even when
+the restored sandbox state is identical. Keep provider type, model ID,
+generation options, and gateway routing fixed when comparing branches. See
+[Model providers](model-providers.md).
 
 Before starting anything, restore verifies:
 
@@ -204,7 +211,7 @@ deterministic mock/recorded provider.
 Before setting `snapshot_capable: true`, verify all of the following:
 
 - every value the application needs after restart is saved under a declared
-  mutable root or in a managed stateful service;
+  mutable root or in a managed stateful HTTP or MCP service;
 - read-only and writable seeds are classified correctly;
 - the configured quiescence action finishes buffered writes and background
   work;

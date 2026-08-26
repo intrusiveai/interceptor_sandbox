@@ -18,6 +18,7 @@ import (
 
 	"github.com/intrusive-ai/interceptor-sandbox/internal/appimage"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/blobstore"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/bridge"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/buildinfo"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/environment"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
@@ -163,25 +164,30 @@ func runCommand(arguments []string, stdout io.Writer) error {
 	applicationPort := flags.Int("app-port", 0, "application bridge port")
 	controlPort := flags.Int("control-port", 0, "control bridge port")
 	bridgeTransport := flags.String("bridge-transport", "spool", "host/container bridge transport: spool or unix")
+	providerType := flags.String("model-provider", bridge.ProviderOpenAIChat, "host provider: openai-chat, openai-responses, bedrock-converse, or litellm")
 	providerURL := flags.String("provider-base-url", os.Getenv("INTERCEPTOR_PROVIDER_BASE_URL"), "fixed provider base URL")
-	credentialEnvironment := flags.String("model-api-key-env", "OPENAI_API_KEY", "host environment variable containing provider credential")
+	credentialEnvironment := flags.String("model-api-key-env", "", "host environment variable containing provider credential (defaults to OPENAI_API_KEY for OpenAI providers)")
+	awsRegion := flags.String("aws-region", "", "AWS Region override for bedrock-converse")
+	awsProfile := flags.String("aws-profile", "", "AWS shared configuration profile for bedrock-converse")
 	var allowedModels stringList
 	flags.Var(&allowedModels, "allow-model", "allowed model identifier (repeatable)")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 || *directory == "" || *providerURL == "" || len(allowedModels) == 0 {
-		return errors.New("usage: interceptor run --environment <directory> --provider-base-url <url> --allow-model <model> [options]")
+	if flags.NArg() != 0 || *directory == "" || len(allowedModels) == 0 {
+		return errors.New("usage: interceptor run --environment <directory> --model-provider <type> --allow-model <model> [provider options]")
 	}
-	apiKey := os.Getenv(*credentialEnvironment)
-	if apiKey == "" {
-		return fmt.Errorf("provider credential environment variable %s is empty", *credentialEnvironment)
+	apiKey, err := validateProviderOptions(*providerType, *providerURL, *credentialEnvironment)
+	if err != nil {
+		return err
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	_, err := hostrun.Run(ctx, hostrun.Config{
+	_, err = hostrun.Run(ctx, hostrun.Config{
 		EnvironmentDirectory: *directory, ApplicationPort: *applicationPort, ControlPort: *controlPort,
-		ProviderURL: *providerURL, ProviderAPIKey: apiKey, AllowedModels: allowedModels, BridgeTransport: *bridgeTransport, Docker: ociruntime.Docker{}, Output: stdout,
+		ProviderType: *providerType, ProviderURL: *providerURL, ProviderAPIKey: apiKey,
+		AWSRegion: *awsRegion, AWSProfile: *awsProfile, AllowedModels: allowedModels,
+		BridgeTransport: *bridgeTransport, Docker: ociruntime.Docker{}, Output: stdout,
 	})
 	return err
 }
@@ -197,35 +203,64 @@ func restoreCommand(arguments []string, stdout io.Writer) error {
 	applicationPort := flags.Int("app-port", 0, "application bridge port")
 	controlPort := flags.Int("control-port", 0, "control bridge port")
 	bridgeTransport := flags.String("bridge-transport", "spool", "host/container bridge transport: spool or unix")
+	providerType := flags.String("model-provider", bridge.ProviderOpenAIChat, "host provider: openai-chat, openai-responses, bedrock-converse, or litellm")
 	providerURL := flags.String("provider-base-url", os.Getenv("INTERCEPTOR_PROVIDER_BASE_URL"), "fixed provider base URL")
-	credentialEnvironment := flags.String("model-api-key-env", "OPENAI_API_KEY", "host environment variable containing provider credential")
+	credentialEnvironment := flags.String("model-api-key-env", "", "host environment variable containing provider credential (defaults to OPENAI_API_KEY for OpenAI providers)")
+	awsRegion := flags.String("aws-region", "", "AWS Region override for bedrock-converse")
+	awsProfile := flags.String("aws-profile", "", "AWS shared configuration profile for bedrock-converse")
 	stopSource := flags.Bool("stop-source", false, "stop source after restored session becomes healthy")
 	var allowedModels stringList
 	flags.Var(&allowedModels, "allow-model", "allowed model identifier (repeatable)")
 	if err := flags.Parse(arguments[1:]); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 || *checkpointID == "" || *providerURL == "" || len(allowedModels) == 0 {
-		return errors.New("usage: interceptor restore <session-id> --checkpoint <id> --provider-base-url <url> --allow-model <model>")
+	if flags.NArg() != 0 || *checkpointID == "" || len(allowedModels) == 0 {
+		return errors.New("usage: interceptor restore <session-id> --checkpoint <id> --model-provider <type> --allow-model <model> [provider options]")
 	}
-	apiKey := os.Getenv(*credentialEnvironment)
-	if apiKey == "" {
-		return fmt.Errorf("provider credential environment variable %s is empty", *credentialEnvironment)
+	apiKey, err := validateProviderOptions(*providerType, *providerURL, *credentialEnvironment)
+	if err != nil {
+		return err
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	config := hostrun.Config{
-		ApplicationPort: *applicationPort, ControlPort: *controlPort, ProviderURL: *providerURL,
-		ProviderAPIKey: apiKey, AllowedModels: allowedModels, BridgeTransport: *bridgeTransport, Docker: ociruntime.Docker{}, Output: stdout,
+		ApplicationPort: *applicationPort, ControlPort: *controlPort, ProviderType: *providerType, ProviderURL: *providerURL,
+		ProviderAPIKey: apiKey, AWSRegion: *awsRegion, AWSProfile: *awsProfile,
+		AllowedModels: allowedModels, BridgeTransport: *bridgeTransport, Docker: ociruntime.Docker{}, Output: stdout,
 	}
 	if *stopSource {
 		config.OnReady = func(session.Metadata) error { return stopCommand([]string{sourceSessionID}, stdout) }
 	}
-	_, err := hostrun.Restore(ctx, config, sourceSessionID, *checkpointID)
+	_, err = hostrun.Restore(ctx, config, sourceSessionID, *checkpointID)
 	if err != nil {
 		return err
 	}
 	return nil
+}
+
+func validateProviderOptions(providerType, providerURL, credentialEnvironment string) (string, error) {
+	providerType = strings.ToLower(strings.TrimSpace(providerType))
+	switch providerType {
+	case bridge.ProviderBedrockConverse:
+		return "", nil
+	case bridge.ProviderOpenAIChat, bridge.ProviderOpenAIResponses, bridge.ProviderLiteLLM:
+		if strings.TrimSpace(providerURL) == "" {
+			return "", fmt.Errorf("--provider-base-url is required for model provider %s", providerType)
+		}
+	default:
+		return "", fmt.Errorf("unsupported model provider %q", providerType)
+	}
+	if credentialEnvironment == "" && providerType == bridge.ProviderLiteLLM {
+		return "", nil
+	}
+	if credentialEnvironment == "" {
+		credentialEnvironment = "OPENAI_API_KEY"
+	}
+	apiKey := os.Getenv(credentialEnvironment)
+	if apiKey == "" {
+		return "", fmt.Errorf("provider credential environment variable %s is empty", credentialEnvironment)
+	}
+	return apiKey, nil
 }
 
 func sandboxdCommand(arguments []string) error {
@@ -810,7 +845,7 @@ func usage(writer io.Writer) {
 Commands:
   environment init|validate|seal|inspect
   app build|verify
-  run --environment <directory> --provider-base-url <url> --allow-model <model> [--bridge-transport spool|unix]
+  run --environment <directory> --model-provider <type> --allow-model <model> [provider options]
   list
   status <session-id>
   stop <session-id>

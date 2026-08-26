@@ -80,16 +80,41 @@ Verify:
 
 - `turn_timeout_ms` is positive;
 - the application calls `MODEL_BASE_URL`, not the provider directly;
-- it uses an OpenAI-compatible chat-completions path;
-- the request's `model` exactly matches one repeated `--allow-model` value;
-- `--provider-base-url` includes the intended base path but no credentials,
-  query, or fragment;
-- the selected `--model-api-key-env` is non-empty in the host shell; and
-- the provider is reachable from the host and does not redirect to another
-  origin.
+- it uses a supported Chat Completions, Responses, or Converse path;
+- the request's body `model` (OpenAI) or path `modelId` (Converse) exactly
+  matches one repeated `--allow-model` value;
+- the selected `--model-provider` is correct;
+- for OpenAI or LiteLLM, `--provider-base-url` includes the intended base path
+  but no credentials, query, or fragment;
+- for OpenAI, `OPENAI_API_KEY` or the selected `--model-api-key-env` is
+  non-empty; for an authenticated LiteLLM gateway, its selected key is
+  non-empty;
+- for Bedrock, an AWS region is available, the host credential chain is valid,
+  and the identity has `bedrock:InvokeModel` permission; and
+- the provider is reachable from the host. HTTP providers must not redirect to
+  another origin.
+
+Check that the application's API matches the selected adapter. A Responses call
+cannot use `openai-chat`, and a Converse call cannot use `openai-responses`.
+All current routes reject streaming. For Bedrock, also verify that the
+application SDK points to the loopback endpoint and uses declared synthetic
+credentials rather than trying to reach AWS directly. See [Model
+providers](model-providers.md) for each adapter's supported subset.
 
 For local diagnosis, use the included mock provider and `reference-model` to
 separate application integration problems from upstream provider behavior.
+
+## MCP tool calls fail
+
+Verify that the MCP client uses the declared `http://...sandbox.local:<port>/mcp`
+URL rather than the real remote endpoint. Then check that the service has
+`kind: mcp_http`, its `endpoint` matches exactly, and the requested tool and
+arguments have a matching definition.
+
+HTTP `GET`, SSE, sessions, OAuth, resources, prompts, and server-initiated MCP
+messages are not supported in the MVP. An unknown method, tool, or fixture input
+is reported as a coverage gap. See [Simulated MCP services](mcp-services.md)
+for the exact supported subset.
 
 ## Unix bridge fails on macOS or Docker Desktop
 
@@ -117,16 +142,18 @@ already changed state.
 
 ## Synthetic service returns `501 coverage_gap`
 
-The request did not match a sealed fixture or declared stateful/sink route. This
-is a modeling gap, not a transient upstream failure:
+The request did not match a sealed HTTP fixture, stateful/sink route, MCP
+method, tool, or MCP fixture. This is a modeling gap, not a transient upstream
+failure:
 
 ```sh
 interceptor coverage <session-id>
 interceptor logs tail <session-id> --channel evaluation
 ```
 
-Add the missing deterministic fixture or route, review the behavior, reseal,
-rebuild, and start a new session. Do not add general network as a fallback.
+Add the missing deterministic fixture, route, or MCP tool behavior; review it;
+then reseal, rebuild, and start a new session. Do not add general network as a
+fallback.
 
 ## Snapshot returns `409 snapshot_failed`
 

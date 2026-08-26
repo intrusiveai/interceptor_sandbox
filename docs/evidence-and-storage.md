@@ -52,12 +52,25 @@ purpose:
 | --- | --- |
 | `attack` | completed application turns and attacker-sink observations |
 | `control` | session lifecycle, injection administration, snapshots |
-| `evaluation` | model exchanges, fixture hits/gaps, stateful-service activity |
+| `evaluation` | model exchanges, fixture hits/gaps, stateful-service and MCP tool activity |
 
 Each event records when and where something happened, what kind of event it was,
 whether it came from the application, sandbox, or test harness, and any related
 turn or injection. Larger raw content may be stored separately and referenced
 from the event.
+
+For a model exchange, the evaluation event identifies the application's native
+codec and selected host provider. It separately references the final injected
+application request, the request accepted by the provider adapter, and the
+native response returned to the application. These are usually the same API
+shape because the MVP uses like-for-like routing, but each stage has its own
+digital fingerprint. Authorization headers, API keys, AWS credentials, and AWS
+request signatures are excluded.
+
+Bedrock is called through the native AWS SDK, which owns HTTP serialization and
+signing internally. Its provider-specific evidence is therefore a canonical
+JSON representation of the SDK Converse input/output rather than a capture of
+the signed wire bytes.
 
 The `provenance` field identifies the source of an event—for example, the
 application, the sealed environment, the test harness, an attacker sink, or

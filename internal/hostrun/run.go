@@ -32,8 +32,11 @@ type Config struct {
 	EnvironmentDirectory string
 	ApplicationPort      int
 	ControlPort          int
+	ProviderType         string
 	ProviderURL          string
 	ProviderAPIKey       string
+	AWSRegion            string
+	AWSProfile           string
 	AllowedModels        []string
 	BridgeTransport      string
 	Docker               ociruntime.Docker
@@ -268,8 +271,12 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 	if err := session.Save(paths.Metadata, metadata); err != nil {
 		return metadata, err
 	}
+	provider, err := modelProvider(ctx, config)
+	if err != nil {
+		return metadata, err
+	}
 	connector, err := bridge.NewHostConnector(bridge.HostConnectorConfig{
-		SessionID: metadata.ID, ProviderURL: config.ProviderURL, APIKey: config.ProviderAPIKey,
+		SessionID: metadata.ID, Provider: provider,
 		AllowedModel: config.AllowedModels, MaxBodyBytes: blueprint.Limits.MaxBlobBytes,
 	})
 	if err != nil {
@@ -414,6 +421,26 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		metadata = latest
 	}
 	return metadata, nil
+}
+
+func modelProvider(ctx context.Context, config Config) (bridge.ModelProvider, error) {
+	providerType := strings.ToLower(strings.TrimSpace(config.ProviderType))
+	if providerType == "" {
+		providerType = bridge.ProviderOpenAIChat
+	}
+	httpConfig := bridge.HTTPProviderConfig{BaseURL: config.ProviderURL, APIKey: config.ProviderAPIKey}
+	switch providerType {
+	case bridge.ProviderOpenAIChat:
+		return bridge.NewOpenAIChatProvider(httpConfig)
+	case bridge.ProviderOpenAIResponses:
+		return bridge.NewOpenAIResponsesProvider(httpConfig)
+	case bridge.ProviderLiteLLM:
+		return bridge.NewLiteLLMProvider(httpConfig)
+	case bridge.ProviderBedrockConverse:
+		return bridge.LoadBedrockConverseProvider(ctx, bridge.BedrockProviderConfig{Region: config.AWSRegion, Profile: config.AWSProfile})
+	default:
+		return nil, fmt.Errorf("unsupported model provider %q", config.ProviderType)
+	}
 }
 
 func CallSession(ctx context.Context, sessionID, method, path string, body []byte) ([]byte, error) {

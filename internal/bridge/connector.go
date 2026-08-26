@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -35,11 +34,16 @@ type ModelFrame struct {
 var bridgeErrorSequence atomic.Uint64
 
 type ModelResult struct {
-	Status             int               `json:"status"`
-	Headers            map[string]string `json:"headers,omitempty"`
-	Body               []byte            `json:"body"`
-	FinalRequest       []byte            `json:"final_request"`
-	FinalRequestDigest string            `json:"final_request_digest"`
+	Status                 int               `json:"status"`
+	Headers                map[string]string `json:"headers,omitempty"`
+	Body                   []byte            `json:"body"`
+	FinalRequest           []byte            `json:"final_request"`
+	FinalRequestDigest     string            `json:"final_request_digest"`
+	Provider               string            `json:"provider,omitempty"`
+	ProviderRequest        []byte            `json:"provider_request,omitempty"`
+	ProviderDigest         string            `json:"provider_request_digest,omitempty"`
+	ProviderResponse       []byte            `json:"provider_response,omitempty"`
+	ProviderResponseDigest string            `json:"provider_response_digest,omitempty"`
 }
 
 type Connector interface {
@@ -47,7 +51,11 @@ type Connector interface {
 }
 
 type HostConnectorConfig struct {
-	SessionID    string
+	SessionID string
+	Provider  ModelProvider
+	// ProviderURL, APIKey, and HTTPClient retain source compatibility for
+	// callers that have not yet selected an explicit provider adapter. They
+	// construct the original OpenAI Chat Completions-compatible provider.
 	ProviderURL  string
 	APIKey       string
 	AllowedCodec string
@@ -57,45 +65,31 @@ type HostConnectorConfig struct {
 }
 
 type HostConnector struct {
-	config  HostConnectorConfig
-	baseURL *url.URL
-	client  *http.Client
-	lastID  atomic.Uint64
+	config   HostConnectorConfig
+	provider ModelProvider
+	lastID   atomic.Uint64
 }
 
 func NewHostConnector(config HostConnectorConfig) (*HostConnector, error) {
 	if config.SessionID == "" {
 		return nil, errors.New("connector session ID is required")
 	}
-	baseURL, err := url.Parse(config.ProviderURL)
-	if err != nil || baseURL.Scheme != "http" && baseURL.Scheme != "https" || baseURL.Host == "" || baseURL.User != nil || baseURL.RawQuery != "" || baseURL.Fragment != "" {
-		return nil, errors.New("provider URL must be an absolute HTTP(S) URL without credentials, query, or fragment")
-	}
-	if config.AllowedCodec == "" {
-		config.AllowedCodec = "openai_chat_completions"
+	provider := config.Provider
+	if provider == nil {
+		var err error
+		provider, err = NewOpenAIChatProvider(HTTPProviderConfig{
+			BaseURL: config.ProviderURL,
+			APIKey:  config.APIKey,
+			Client:  config.HTTPClient,
+		})
+		if err != nil {
+			return nil, err
+		}
 	}
 	if config.MaxBodyBytes <= 0 {
 		config.MaxBodyBytes = 16 << 20
 	}
-	client := config.HTTPClient
-	if client == nil {
-		client = &http.Client{}
-	}
-	copyClient := *client
-	previousRedirect := copyClient.CheckRedirect
-	copyClient.CheckRedirect = func(request *http.Request, via []*http.Request) error {
-		if request.URL.Scheme != baseURL.Scheme || request.URL.Host != baseURL.Host {
-			return errors.New("provider redirected to a different origin")
-		}
-		if previousRedirect != nil {
-			return previousRedirect(request, via)
-		}
-		if len(via) >= 10 {
-			return errors.New("too many provider redirects")
-		}
-		return nil
-	}
-	return &HostConnector{config: config, baseURL: baseURL, client: &copyClient}, nil
+	return &HostConnector{config: config, provider: provider}, nil
 }
 
 func (c *HostConnector) Forward(ctx context.Context, frame ModelFrame) (ModelResult, error) {
@@ -112,8 +106,11 @@ func (c *HostConnector) Forward(ctx context.Context, frame ModelFrame) (ModelRes
 		}
 		break
 	}
-	if frame.Codec != c.config.AllowedCodec {
+	if configCodec := c.config.AllowedCodec; configCodec != "" && frame.Codec != configCodec {
 		return ModelResult{}, fmt.Errorf("connector rejected codec %q", frame.Codec)
+	}
+	if !c.provider.SupportsCodec(frame.Codec) {
+		return ModelResult{}, fmt.Errorf("provider %q does not support application codec %q", c.provider.Name(), frame.Codec)
 	}
 	if int64(len(frame.Body)) > c.config.MaxBodyBytes {
 		return ModelResult{}, errors.New("model request exceeds connector body limit")
@@ -121,14 +118,12 @@ func (c *HostConnector) Forward(ctx context.Context, frame ModelFrame) (ModelRes
 	if !strings.HasPrefix(frame.Path, "/") || strings.Contains(frame.Path, "..") || strings.ContainsAny(frame.Path, "?#") {
 		return ModelResult{}, errors.New("connector request path is invalid")
 	}
-	var requestEnvelope struct {
-		Model string `json:"model"`
+	model, err := modelIdentifier(frame.Codec, frame.Path, frame.Body)
+	if err != nil {
+		return ModelResult{}, err
 	}
-	if err := json.Unmarshal(frame.Body, &requestEnvelope); err != nil || requestEnvelope.Model == "" {
-		return ModelResult{}, errors.New("model request must contain a model identifier")
-	}
-	if len(c.config.AllowedModel) > 0 && !contains(c.config.AllowedModel, requestEnvelope.Model) {
-		return ModelResult{}, fmt.Errorf("model %q is not allowed", requestEnvelope.Model)
+	if len(c.config.AllowedModel) > 0 && !contains(c.config.AllowedModel, model) {
+		return ModelResult{}, fmt.Errorf("model %q is not allowed", model)
 	}
 	timeout := time.Duration(frame.TimeoutMS) * time.Millisecond
 	if timeout <= 0 || timeout > 10*time.Minute {
@@ -136,39 +131,67 @@ func (c *HostConnector) Forward(ctx context.Context, frame ModelFrame) (ModelRes
 	}
 	requestContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	destination := *c.baseURL
-	framePath := strings.TrimPrefix(frame.Path, "/")
-	if strings.HasSuffix(strings.TrimSuffix(c.baseURL.Path, "/"), "/v1") {
-		framePath = strings.TrimPrefix(framePath, "v1/")
-	}
-	destination.Path = path.Join(strings.TrimSuffix(c.baseURL.Path, "/"), framePath)
-	request, err := http.NewRequestWithContext(requestContext, http.MethodPost, destination.String(), bytes.NewReader(frame.Body))
-	if err != nil {
-		return ModelResult{}, err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	if value := frame.Headers["OpenAI-Organization"]; value != "" {
-		request.Header.Set("OpenAI-Organization", value)
-	}
-	if c.config.APIKey != "" {
-		request.Header.Set("Authorization", "Bearer "+c.config.APIKey)
-	}
-	response, err := c.client.Do(request)
+	response, err := c.provider.Complete(requestContext, ProviderRequest{
+		Codec:        frame.Codec,
+		Model:        model,
+		Path:         frame.Path,
+		Headers:      frame.Headers,
+		Body:         frame.Body,
+		MaxBodyBytes: c.config.MaxBodyBytes,
+	})
 	if err != nil {
 		return ModelResult{}, fmt.Errorf("provider request failed: %w", err)
 	}
-	defer response.Body.Close()
-	body, err := readLimit(response.Body, c.config.MaxBodyBytes)
-	if err != nil {
-		return ModelResult{}, fmt.Errorf("provider response: %w", err)
+	if response.Status < 100 || response.Status > 599 || int64(len(response.Body)) > c.config.MaxBodyBytes || int64(len(response.RequestBody)) > c.config.MaxBodyBytes || int64(len(response.RawBody)) > c.config.MaxBodyBytes {
+		return ModelResult{}, errors.New("provider returned an invalid or oversized response")
 	}
-	result := ModelResult{Status: response.StatusCode, Body: body, FinalRequest: append([]byte(nil), frame.Body...), FinalRequestDigest: digest.Bytes(frame.Body), Headers: map[string]string{}}
-	for _, header := range []string{"Content-Type", "X-Request-ID", "OpenAI-Request-ID"} {
-		if value := response.Header.Get(header); value != "" {
-			result.Headers[header] = value
+	providerRequest := response.RequestBody
+	if len(providerRequest) == 0 {
+		providerRequest = frame.Body
+	}
+	providerResponse := response.RawBody
+	if len(providerResponse) == 0 {
+		providerResponse = response.Body
+	}
+	return ModelResult{
+		Status:                 response.Status,
+		Headers:                response.Headers,
+		Body:                   response.Body,
+		FinalRequest:           append([]byte(nil), frame.Body...),
+		FinalRequestDigest:     digest.Bytes(frame.Body),
+		Provider:               c.provider.Name(),
+		ProviderRequest:        append([]byte(nil), providerRequest...),
+		ProviderDigest:         digest.Bytes(providerRequest),
+		ProviderResponse:       append([]byte(nil), providerResponse...),
+		ProviderResponseDigest: digest.Bytes(providerResponse),
+	}, nil
+}
+
+func modelIdentifier(codec, requestPath string, body []byte) (string, error) {
+	switch codec {
+	case CodecOpenAIChat, CodecOpenAIResponses:
+		var envelope struct {
+			Model string `json:"model"`
 		}
+		if err := json.Unmarshal(body, &envelope); err != nil || envelope.Model == "" {
+			return "", errors.New("model request must contain a model identifier")
+		}
+		return envelope.Model, nil
+	case CodecBedrockConverse:
+		const prefix, suffix = "/model/", "/converse"
+		start := strings.Index(requestPath, prefix)
+		if start < 0 || !strings.HasSuffix(requestPath, suffix) {
+			return "", errors.New("Bedrock Converse path must be /model/{modelId}/converse")
+		}
+		encoded := requestPath[start+len(prefix) : len(requestPath)-len(suffix)]
+		model, err := url.PathUnescape(encoded)
+		if err != nil || model == "" {
+			return "", errors.New("Bedrock Converse path contains an invalid model identifier")
+		}
+		return model, nil
+	default:
+		return "", fmt.Errorf("unsupported model request codec %q", codec)
 	}
-	return result, nil
 }
 
 func (c *HostConnector) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -236,10 +259,20 @@ func (c *UnixConnectorClient) Forward(ctx context.Context, frame ModelFrame) (Mo
 	if err := decoder.Decode(&result); err != nil {
 		return ModelResult{}, err
 	}
-	if result.Status < 100 || result.Status > 599 || !digest.Valid(result.FinalRequestDigest) || digest.Bytes(result.FinalRequest) != result.FinalRequestDigest {
+	if !validModelResult(&result) {
 		return ModelResult{}, errors.New("host connector returned invalid result")
 	}
 	return result, nil
+}
+
+func validModelResult(result *ModelResult) bool {
+	if result == nil || result.Status < 100 || result.Status > 599 || !digest.Valid(result.FinalRequestDigest) || digest.Bytes(result.FinalRequest) != result.FinalRequestDigest {
+		return false
+	}
+	if len(result.ProviderRequest) > 0 && (!digest.Valid(result.ProviderDigest) || digest.Bytes(result.ProviderRequest) != result.ProviderDigest) {
+		return false
+	}
+	return len(result.ProviderResponse) == 0 || digest.Valid(result.ProviderResponseDigest) && digest.Bytes(result.ProviderResponse) == result.ProviderResponseDigest
 }
 
 func ListenUnix(socketPath string, handler http.Handler) (*http.Server, net.Listener, error) {

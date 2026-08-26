@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -39,8 +40,9 @@ func NewModelProxy(sessionID string, connector Connector, injections *injection.
 }
 
 func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodPost || !strings.HasSuffix(request.URL.Path, "/chat/completions") {
-		writeBridgeError(writer, http.StatusNotImplemented, "unsupported_model_route", "only OpenAI-compatible chat completions are supported")
+	codec, ok := modelCodec(request.Method, request.URL.Path)
+	if !ok {
+		writeBridgeError(writer, http.StatusNotImplemented, "unsupported_model_route", "supported model routes are Chat Completions, OpenAI Responses, and Bedrock Converse")
 		return
 	}
 	body, err := readLimit(request.Body, p.maxBytes)
@@ -51,8 +53,19 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 	turnID := request.Header.Get("X-Interceptor-Turn-ID")
 	rewritten := body
 	results := []injection.Result{}
+	if err := validateNonStreaming(codec, body); err != nil {
+		writeBridgeError(writer, http.StatusBadRequest, "unsupported_streaming", err.Error())
+		return
+	}
 	if p.injections != nil {
-		rewritten, results, err = p.injections.RewriteOpenAI(body, turnID)
+		switch codec {
+		case CodecOpenAIChat:
+			rewritten, results, err = p.injections.RewriteOpenAI(body, turnID)
+		case CodecOpenAIResponses:
+			rewritten, results, err = p.injections.RewriteOpenAIResponses(body, turnID)
+		case CodecBedrockConverse:
+			rewritten, results, err = p.injections.RewriteBedrockConverse(body, turnID)
+		}
 		if err != nil {
 			writeBridgeError(writer, http.StatusBadRequest, "injection_failed", err.Error())
 			return
@@ -63,8 +76,11 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 	p.connectorMu.Lock()
 	requestID := p.nextID.Add(1)
 	result, err := p.connector.Forward(request.Context(), ModelFrame{
-		SessionID: p.sessionID, RequestID: requestID, Codec: "openai_chat_completions", Path: request.URL.Path,
-		Headers: map[string]string{"OpenAI-Organization": request.Header.Get("OpenAI-Organization")}, Body: rewritten, TimeoutMS: p.timeout.Milliseconds(), CreatedAt: time.Now().UTC(),
+		SessionID: p.sessionID, RequestID: requestID, Codec: codec, Path: request.URL.EscapedPath(),
+		Headers: map[string]string{
+			"OpenAI-Organization": request.Header.Get("OpenAI-Organization"),
+			"OpenAI-Project":      request.Header.Get("OpenAI-Project"),
+		}, Body: rewritten, TimeoutMS: p.timeout.Milliseconds(), CreatedAt: time.Now().UTC(),
 	})
 	p.connectorMu.Unlock()
 	if err != nil {
@@ -98,15 +114,19 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 		}
 	}
 	responseRef := p.store(request.Context(), result.Body)
-	model, usage := modelSemantics(rewritten, result.Body)
+	providerRequestRef := p.store(request.Context(), result.ProviderRequest)
+	providerResponseRef := p.store(request.Context(), result.ProviderResponse)
+	model, usage := modelSemantics(codec, request.URL.EscapedPath(), rewritten, result.Body)
 	if p.onTokens != nil {
 		if total := totalTokens(usage); total > 0 {
 			p.onTokens(total)
 		}
 	}
 	p.record("model_exchange", turnID, requestRef, map[string]any{
-		"codec": "openai_chat_completions", "model": model, "status": result.Status,
-		"request_ref": requestRef, "response_ref": responseRef, "provider_request_digest": result.FinalRequestDigest,
+		"codec": codec, "provider": result.Provider, "model": model, "status": result.Status,
+		"request_ref": requestRef, "response_ref": responseRef, "provider_request_ref": providerRequestRef,
+		"provider_response_ref": providerResponseRef, "final_proxy_request_digest": result.FinalRequestDigest,
+		"provider_request_digest": result.ProviderDigest, "provider_response_digest": result.ProviderResponseDigest,
 		"elapsed_ms": time.Since(started).Milliseconds(), "usage": usage, "injection_ids": ids,
 	})
 	for name, value := range result.Headers {
@@ -130,7 +150,11 @@ func totalTokens(usage any) int64 {
 	if !ok {
 		return 0
 	}
-	switch value := object["total_tokens"].(type) {
+	value := object["total_tokens"]
+	if value == nil {
+		value = object["totalTokens"]
+	}
+	switch value := value.(type) {
 	case float64:
 		return int64(value)
 	case json.Number:
@@ -159,14 +183,43 @@ func (p *ModelProxy) record(kind, turnID, rawRef string, semantic any) {
 	_, _ = p.recorder.Append(recording.Draft{Channel: recording.Evaluation, Layer: "inference_proxy", Kind: kind, Provenance: recording.Application, TurnID: turnID, RawRef: rawRef, Semantic: semantic})
 }
 
-func modelSemantics(request, response []byte) (string, any) {
-	var requestValue struct {
-		Model string `json:"model"`
-	}
-	_ = json.Unmarshal(request, &requestValue)
+func modelSemantics(codec, path string, request, response []byte) (string, any) {
+	model, _ := modelIdentifier(codec, path, request)
 	var responseValue struct {
 		Usage any `json:"usage"`
 	}
 	_ = json.Unmarshal(response, &responseValue)
-	return requestValue.Model, responseValue.Usage
+	return model, responseValue.Usage
+}
+
+func modelCodec(method, requestPath string) (string, bool) {
+	if method != http.MethodPost {
+		return "", false
+	}
+	switch {
+	case strings.HasSuffix(requestPath, "/chat/completions"):
+		return CodecOpenAIChat, true
+	case strings.HasSuffix(requestPath, "/responses"):
+		return CodecOpenAIResponses, true
+	case strings.Contains(requestPath, "/model/") && strings.HasSuffix(requestPath, "/converse"):
+		return CodecBedrockConverse, true
+	default:
+		return "", false
+	}
+}
+
+func validateNonStreaming(codec string, body []byte) error {
+	if codec == CodecBedrockConverse {
+		return nil
+	}
+	var request struct {
+		Stream bool `json:"stream"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil {
+		return fmt.Errorf("model request must be valid JSON: %w", err)
+	}
+	if request.Stream {
+		return errors.New("streaming model responses are not supported in this release")
+	}
+	return nil
 }

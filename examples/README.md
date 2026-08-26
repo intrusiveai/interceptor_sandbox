@@ -1,7 +1,8 @@
 # Reference application and environment
 
-The reference pair exercises the HTTP adapter, model proxy, stateful service,
-attacker sink, both injection surfaces, and logical snapshot/restore flow.
+The reference pair exercises the HTTP adapter, model proxy, stateful and MCP
+services, attacker sink, both injection surfaces, and logical snapshot/restore
+flow.
 
 Build the source image, replace the Blueprint's placeholder with its exact local
 image ID, then validate, seal, and build the wrapper:
@@ -27,6 +28,13 @@ go run ./examples/mock-provider
 
 The mock listens on `127.0.0.1:19090` and implements
 `POST /v1/chat/completions` plus `GET /healthz`.
+
+The reference application also exposes `POST /api/mcp/smoke`. Submit a tool
+name and arguments to exercise MCP initialization, discovery, and a tool call:
+
+```json
+{"tool":"search_documents","arguments":{"query":"retention"}}
+```
 
 Runtime examples use the portable file-spool bridge by default. On a native
 Linux Docker host, `interceptor run` and `interceptor restore` may opt into

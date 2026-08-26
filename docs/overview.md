@@ -52,13 +52,14 @@ Inside the container, the supervisor starts:
 - the onboarded application as a non-root process;
 - simulated services with predefined or changeable data;
 - endpoints that capture attempted data theft;
-- an OpenAI-compatible model proxy; and
+- a model proxy that understands the supported native application APIs; and
 - private application and control bridge endpoints.
 
-The container has no general network. A host-side connector forwards only the
-supported model route to one operator-supplied provider origin and only for
-explicitly allowed model names. The provider API key remains in host process
-memory.
+The container has no general network. A host-side connector accepts only the
+supported model routes and explicitly allowed model names. Chat Completions,
+OpenAI Responses, and Amazon Bedrock Converse remain in their native shapes;
+LiteLLM accepts the supported OpenAI-compatible routes. Provider keys and real
+AWS credentials remain on the host.
 
 While `run` or `restore` remains open, the host process exposes two local-only
 URLs that do not require passwords:
@@ -86,10 +87,13 @@ The MVP favors understandable local mechanisms:
 
 ## Current capability boundary
 
-Applications currently connect to Interceptor over HTTP. The model connection
-supports OpenAI-compatible `POST .../chat/completions`. Simulated services are
-`fixture_http` and `stateful_http`; attacker capture uses `http_sink`; virtual
-time is fixed. Docker is the supported container runtime for the MVP.
+Applications currently connect to Interceptor over HTTP. Their model connection
+may use non-streaming Chat Completions, OpenAI Responses, or Amazon Bedrock
+Converse; the selected host adapter must support the same native protocol.
+Simulated services are
+`fixture_http`, `stateful_http`, and the non-streaming MCP subset provided by
+`mcp_http`; attacker capture uses `http_sink`; virtual time is fixed. Docker is
+the supported container runtime for the MVP.
 
 Snapshots capture declared saved state, not information that exists only in
 memory, running tasks, open connections, or caches. Before enabling snapshots,

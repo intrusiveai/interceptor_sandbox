@@ -198,5 +198,5 @@ or every change made to the environment.
   safe save point, or snapshot creation failed
 - `413` body or capture limit exceeded
 - `429` turn limit exhausted
-- `501` unsupported application, fixture, sink, or model route
+- `501` unsupported application, synthetic-service, sink, or model route
 - `500` integrity or evaluation failure

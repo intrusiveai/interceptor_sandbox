@@ -50,12 +50,17 @@ The application must:
 - expose every externally callable method/path in `served_routes`;
 - direct all supported model calls to the local `MODEL_BASE_URL` supplied in
   the Blueprint;
-- use the OpenAI-compatible chat-completions API for model calls; and
+- use one of the native model APIs supported by the selected host adapter; and
 - avoid dependencies on undeclared external network services.
 
 The container cannot use the general network. Any non-model HTTP dependency
 must therefore be represented by a simulated service in the Blueprint. This is
 what keeps a test from accidentally reaching a real production service.
+
+An agent that normally uses a remote MCP server can instead point its MCP
+client at a declared `mcp_http` service. Interceptor implements a deterministic,
+non-streaming tool subset and records MCP tool activity. See [Simulated MCP
+services](mcp-services.md) for the supported protocol and tool behaviors.
 
 Set positive `startup_timeout_ms` and `turn_timeout_ms`. If `health_path` is
 present, the supervisor waits for a successful HTTP response (status 200–299)
@@ -71,11 +76,29 @@ simulated or attacker service declared in the Blueprint.
 
 Credential-looking variables—names containing `TOKEN`, `SECRET`, `PASSWORD`,
 or ending in `_KEY`—must be declared in `credentials` with the same value and a
-synthetic service in `accepted_by`. Use only synthetic secrets here.
+synthetic service or `model-proxy` in `accepted_by`. Use only synthetic secrets
+here.
 
-The real model provider API key is different. The CLI reads it from a host
-environment variable selected by `--model-api-key-env` and never injects it into
-the application container.
+Real model-provider authentication is different. For OpenAI and LiteLLM, the
+CLI can read a Bearer key from a host environment variable selected by
+`--model-api-key-env`. For Bedrock, the native AWS SDK loads its normal host
+credential chain, including profiles and roles. Interceptor never injects these
+credentials into the application container.
+
+Interceptor does not require an application to convert its model protocol. An
+OpenAI application may use Chat Completions or Responses; a Bedrock application
+may use the Converse API; and LiteLLM accepts either supported OpenAI-compatible
+route. The selected host adapter must match that application API. Cross-protocol
+translation is not part of the MVP.
+
+SDKs often insist on an API key or AWS signature before sending even to a local
+endpoint. Give the application a declared synthetic value, never a real
+credential. For Bedrock, point the SDK at the loopback proxy with
+`AWS_ENDPOINT_URL_BEDROCK_RUNTIME` (or its explicit endpoint option) and provide
+synthetic AWS access/secret values accepted by `model-proxy`. Interceptor
+ignores the local signature, while the host AWS SDK signs the real call with its
+own credential chain. See [Model providers](model-providers.md) for examples and
+the supported native subsets.
 
 ## Snapshot integration
 

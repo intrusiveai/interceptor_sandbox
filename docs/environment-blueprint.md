@@ -107,6 +107,12 @@ control characters are rejected.
 `*_BASE_URL` values may identify loopback or a hostname declared in `services`
 or `attacker_services`.
 
+OpenAI-compatible applications use `MODEL_BASE_URL` as their SDK base URL.
+Bedrock SDK applications also set `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` to the
+same loopback server without `/v1`, such as `http://127.0.0.1:18080`. Their
+synthetic AWS signing values must be declared under `credentials` with
+`accepted_by: model-proxy`. See [Model providers](model-providers.md).
+
 ### HTTP I/O
 
 The only MVP application interface is HTTP. `application_listen` must be a local
@@ -282,6 +288,36 @@ snapshot restore the same records later. An undeclared route returns `501` and
 reports a coverage gap—a sign that the Blueprint does not yet model something
 the application tried to do.
 
+### `mcp_http`
+
+Use this when the application expects an MCP server rather than an ordinary
+REST service:
+
+```yaml
+services:
+  - id: knowledge-mcp
+    kind: mcp_http
+    listen: 127.0.0.1:18200
+    hostnames: [knowledge-mcp.sandbox.local]
+    endpoint: /mcp
+    tools: assets/services/knowledge-mcp-tools.yaml
+    seed: assets/services/knowledge-mcp-state.json
+```
+
+`endpoint` must be a clean absolute path. `tools` declares the tool names,
+schemas, and deterministic fixture or stateful behavior. `seed` is required
+when any tool uses stateful behavior. The application should configure its MCP
+client with the declared HTTP hostname and endpoint.
+
+The current service handles non-streaming JSON-RPC `initialize`, `ping`,
+`tools/list`, and `tools/call`. It does not contact a real MCP server. Unknown
+methods, tools, and fixture inputs fail closed and produce coverage gaps.
+Stateful MCP records use the same journal, injection selectors, oracles, and
+snapshot restore path as `stateful_http` records.
+
+See [Simulated MCP services](mcp-services.md) for the tool-file syntax and the
+complete supported and unsupported capability list.
+
 Service `options` is reserved in the current MVP and has no implemented behavior.
 
 ## Synthetic credentials
@@ -295,8 +331,9 @@ credentials:
 ```
 
 IDs and environment-variable names must be valid and unique. `accepted_by` must
-name a declared synthetic service. The same value must appear in the
-application environment if that variable is set there. Never place real
+name a declared synthetic service, or use the reserved value `model-proxy` for
+fake credentials needed by an application model SDK. The same value must appear
+in the application environment if that variable is set there. Never place real
 credentials in a Blueprint.
 
 ## Canaries

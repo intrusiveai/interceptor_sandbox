@@ -17,9 +17,11 @@ Start here:
 Reference and operational guides:
 
 - [Architecture](architecture.md)
+- [Model providers](model-providers.md)
 - [CLI reference](cli-reference.md)
 - [Local API reference](api-reference.md)
 - [Injections and evaluation](injections-and-evaluation.md)
+- [Simulated MCP services](mcp-services.md)
 - [Snapshots and restore](snapshots-and-restore.md)
 - [Evidence and storage](evidence-and-storage.md)
 - [Security and trust model](security.md)

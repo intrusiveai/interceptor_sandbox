@@ -50,7 +50,7 @@ type Server struct {
 	journal     *statejournal.Writer
 	blobs       *blobstore.Store
 	injections  *injection.Manager
-	services    map[string]*services.StatefulHandler
+	services    map[string]services.ManagedHandler
 	sinks       map[string]*services.SinkHandler
 	servers     []*http.Server
 	listeners   []net.Listener
@@ -177,7 +177,7 @@ func New() (*Server, error) {
 	appGID := uint32(envInt("INTERCEPTOR_APP_GID", 20000))
 	return &Server{
 		blueprint: report.Blueprint, metadata: metadata, paths: paths, recorder: recorder, journal: journal, blobs: blobs,
-		injections: injection.NewManager(journal, recorder), services: map[string]*services.StatefulHandler{}, sinks: map[string]*services.SinkHandler{},
+		injections: injection.NewManager(journal, recorder), services: map[string]services.ManagedHandler{}, sinks: map[string]*services.SinkHandler{},
 		appUID: appUID, appGID: appGID, hostUID: envInt("INTERCEPTOR_HOST_UID", 0), hostGID: envInt("INTERCEPTOR_HOST_GID", 0),
 		turns: map[string]Turn{}, oracleState: map[string]evaluation.OracleResult{}, virtualTime: report.Blueprint.Time.Base.UTC(), done: make(chan error, 1),
 	}, nil
@@ -230,6 +230,16 @@ func (s *Server) startSyntheticServices() error {
 				return err
 			}
 			s.services[definition.ID], handler = stateful, stateful
+		case "mcp_http":
+			seedPath := ""
+			if definition.Seed != "" {
+				seedPath = filepath.Join(containerEnvironment, definition.Seed)
+			}
+			mcp, err := services.LoadMCP(filepath.Join(containerEnvironment, definition.Tools), seedPath, definition.Endpoint, definition.ID, s.journal, s.recorder)
+			if err != nil {
+				return err
+			}
+			s.services[definition.ID], handler = mcp, mcp
 		}
 		if err := s.serveTCP(definition.Listen, s.trackActivity(handler)); err != nil {
 			return fmt.Errorf("start service %s: %w", definition.ID, err)
@@ -568,7 +578,7 @@ func (s *Server) fidelityMutation(ctx context.Context, definition injection.Defi
 	if selector.Service != "" {
 		handler := s.services[selector.Service]
 		if handler == nil {
-			return nil, nil, fmt.Errorf("fidelity target service %q is not stateful", selector.Service)
+			return nil, nil, fmt.Errorf("fidelity target service %q does not expose managed state", selector.Service)
 		}
 		current := handler.Snapshot()[selector.Collection][selector.Key]
 		if len(current) == 0 {

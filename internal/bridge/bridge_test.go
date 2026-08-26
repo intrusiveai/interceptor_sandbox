@@ -44,6 +44,9 @@ func TestHostConnectorUsesFixedDestinationAndHostCredential(t *testing.T) {
 	if string(result.FinalRequest) != string(body) || result.FinalRequestDigest != digest.Bytes(body) || strings.Contains(string(result.FinalRequest), "host-secret") {
 		t.Fatalf("credential leaked into connector result: %#v", result)
 	}
+	if result.Provider != ProviderOpenAIChat || result.ProviderDigest != digest.Bytes(body) || result.ProviderResponseDigest != digest.Bytes(result.Body) {
+		t.Fatalf("provider evidence was not identified and fingerprinted: %#v", result)
+	}
 	if _, err := connector.Forward(context.Background(), ModelFrame{SessionID: "sess-test", RequestID: 2, Codec: "openai_chat_completions", Path: "/v1/chat/completions", Body: []byte(`{"model":"other"}`), TimeoutMS: 1000}); err == nil {
 		t.Fatal("expected disallowed model to fail")
 	}
@@ -102,6 +105,49 @@ func TestModelProxyAppliesInjectionBeforeConnector(t *testing.T) {
 	state := injections.Evaluation()
 	if len(state) != 1 || state[0].Delivery != "confirmed" {
 		t.Fatalf("delivery was not confirmed: %#v", state)
+	}
+}
+
+func TestModelProxyPreservesNativeApplicationRoutes(t *testing.T) {
+	connector := &captureConnector{}
+	proxy, err := NewModelProxy("sess-test", connector, nil, nil, nil, 1<<20, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		path, body, codec string
+	}{
+		{"/v1/chat/completions", `{"model":"chat-model","messages":[]}`, CodecOpenAIChat},
+		{"/v1/responses", `{"model":"responses-model","input":"hello"}`, CodecOpenAIResponses},
+		{"/model/anthropic.claude-v2%3A1/converse", `{"messages":[{"role":"user","content":[{"text":"hello"}]}]}`, CodecBedrockConverse},
+	}
+	for _, test := range tests {
+		response := httptest.NewRecorder()
+		proxy.ServeHTTP(response, httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.body)))
+		if response.Code != http.StatusOK || connector.frame.Codec != test.codec || string(connector.frame.Body) != test.body {
+			t.Fatalf("native route %s changed: status=%d frame=%#v", test.path, response.Code, connector.frame)
+		}
+	}
+}
+
+func TestModelIdentifierUsesBodyForOpenAIAndPathForBedrock(t *testing.T) {
+	model, err := modelIdentifier(CodecOpenAIResponses, "/v1/responses", []byte(`{"model":"gpt-test","input":"hello"}`))
+	if err != nil || model != "gpt-test" {
+		t.Fatalf("unexpected Responses model: %q %v", model, err)
+	}
+	model, err = modelIdentifier(CodecBedrockConverse, "/model/arn%3Aaws%3Abedrock%3Aus-west-2%3A123%3Ainference-profile%2Ftest/converse", []byte(`{}`))
+	if err != nil || model != "arn:aws:bedrock:us-west-2:123:inference-profile/test" {
+		t.Fatalf("unexpected Bedrock model: %q %v", model, err)
+	}
+}
+
+func TestModelProxyRejectsStreamingWithoutCallingConnector(t *testing.T) {
+	connector := &captureConnector{}
+	proxy, _ := NewModelProxy("sess-test", connector, nil, nil, nil, 1<<20, time.Second)
+	response := httptest.NewRecorder()
+	proxy.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hello","stream":true}`)))
+	if response.Code != http.StatusBadRequest || connector.frame.RequestID != 0 {
+		t.Fatalf("streaming request was not rejected before forwarding: status=%d frame=%#v", response.Code, connector.frame)
 	}
 }
 

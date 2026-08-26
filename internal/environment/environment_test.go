@@ -47,6 +47,82 @@ func TestValidateRejectsWritableSeedOutsideMutableRoots(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsMCPHTTPAssetsAndRejectsMissingSeed(t *testing.T) {
+	directory := testBlueprint(t, "")
+	tools := `tools:
+  - name: get_ticket
+    description: Read a ticket
+    input_schema:
+      type: object
+      properties: {id: {type: string}}
+      required: [id]
+    behavior:
+      kind: stateful
+      action: get
+      collection: tickets
+      key_argument: id
+`
+	if err := os.WriteFile(filepath.Join(directory, "assets", "mcp-tools.yaml"), []byte(tools), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "assets", "mcp-seed.json"), []byte(`{"tickets":{"t-1":{"id":"t-1"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	blueprintPath := filepath.Join(directory, BlueprintFile)
+	blueprint, err := os.ReadFile(blueprintPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addition := `  - id: tools
+    kind: mcp_http
+    listen: 127.0.0.1:18101
+    hostnames: [tools.sandbox.local]
+    endpoint: /mcp
+    tools: assets/mcp-tools.yaml
+    seed: assets/mcp-seed.json
+`
+	updated := strings.Replace(string(blueprint), "    fixtures: assets/fixtures.yaml\n", "    fixtures: assets/fixtures.yaml\n"+addition, 1)
+	if err := os.WriteFile(blueprintPath, []byte(updated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := Validate(directory)
+	if err != nil {
+		t.Fatalf("validate MCP service: %v", err)
+	}
+	if len(report.Assets) != 3 {
+		t.Fatalf("MCP tool and seed files were not sealed assets: %#v", report.Assets)
+	}
+
+	withoutSeed := strings.Replace(updated, "    seed: assets/mcp-seed.json\n", "", 1)
+	if err := os.WriteFile(blueprintPath, []byte(withoutSeed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Validate(directory); err == nil || !strings.Contains(err.Error(), "requires a service seed") {
+		t.Fatalf("expected stateful MCP tool without seed to fail, got %v", err)
+	}
+}
+
+func TestValidateAcceptsSyntheticSDKCredentialsForModelProxy(t *testing.T) {
+	directory := testBlueprint(t, `credentials:
+  - id: local-aws-key
+    environment_variable: AWS_ACCESS_KEY_ID
+    value: interceptor-local
+    accepted_by: model-proxy
+`)
+	path := filepath.Join(directory, BlueprintFile)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = []byte(strings.Replace(string(body), "      MODEL_BASE_URL: http://127.0.0.1:18080/v1\n", "      MODEL_BASE_URL: http://127.0.0.1:18080/v1\n      AWS_ACCESS_KEY_ID: interceptor-local\n", 1))
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Validate(directory); err != nil {
+		t.Fatalf("synthetic SDK credential for model proxy was rejected: %v", err)
+	}
+}
+
 func testBlueprint(t *testing.T, extra string) string {
 	t.Helper()
 	directory := t.TempDir()

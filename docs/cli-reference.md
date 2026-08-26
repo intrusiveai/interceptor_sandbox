@@ -85,10 +85,13 @@ a particular wrapper image name.
 ```sh
 interceptor run \
   --environment <directory> \
-  --provider-base-url <http-or-https-url> \
+  [--model-provider openai-chat|openai-responses|bedrock-converse|litellm] \
   --allow-model <model> \
   [--allow-model <model> ...] \
-  [--model-api-key-env OPENAI_API_KEY] \
+  [--provider-base-url <http-or-https-url>] \
+  [--model-api-key-env <variable>] \
+  [--aws-region <region>] \
+  [--aws-profile <profile>] \
   [--app-port 0] \
   [--control-port 0] \
   [--bridge-transport spool|unix]
@@ -97,11 +100,28 @@ interceptor run \
 Required:
 
 - `--environment` identifies a sealed, built environment.
-- `--provider-base-url` fixes the provider origin and base path. It defaults
-  from `INTERCEPTOR_PROVIDER_BASE_URL`.
 - at least one `--allow-model` restricts request body model names.
-- the host environment variable selected by `--model-api-key-env` must be
-  non-empty. Its default is `OPENAI_API_KEY`.
+
+Provider options:
+
+- `--model-provider` defaults to `openai-chat`. The other choices are
+  `openai-responses`, `bedrock-converse`, and `litellm`.
+- `--provider-base-url` fixes the HTTP provider or gateway origin and base
+  path. It is required except for Bedrock and defaults from
+  `INTERCEPTOR_PROVIDER_BASE_URL`.
+- OpenAI providers read `OPENAI_API_KEY` by default. `--model-api-key-env`
+  selects a different host variable.
+- LiteLLM sends no authorization header unless `--model-api-key-env` names a
+  non-empty gateway-key variable.
+- Bedrock ignores API-key and base-URL options. `--aws-region` and
+  `--aws-profile` optionally override values loaded by the AWS SDK's normal
+  host configuration chain.
+
+The application-facing route must match the provider choice: Chat Completions
+for `openai-chat`, Responses for `openai-responses`, Converse for
+`bedrock-converse`, and either supported OpenAI-compatible route for `litellm`.
+See [Model providers](model-providers.md) for endpoint setup, authentication,
+and current feature limits.
 
 Ports default to `0`, allowing the OS to choose unused loopback ports. The
 bridge defaults to portable `spool`. Select `unix` only on a compatible native
@@ -157,10 +177,13 @@ restore point. Inspect always prints the detailed checkpoint JSON.
 ```sh
 interceptor restore <source-session-id> \
   --checkpoint <checkpoint-id> \
-  --provider-base-url <url> \
+  [--model-provider openai-chat|openai-responses|bedrock-converse|litellm] \
   --allow-model <model> \
   [--allow-model <model> ...] \
-  [--model-api-key-env OPENAI_API_KEY] \
+  [--provider-base-url <url>] \
+  [--model-api-key-env <variable>] \
+  [--aws-region <region>] \
+  [--aws-profile <profile>] \
   [--app-port 0] \
   [--control-port 0] \
   [--bridge-transport spool|unix] \
@@ -169,8 +192,9 @@ interceptor restore <source-session-id> \
 
 Restore checks the snapshot for missing or changed data, rebuilds its saved state
 in a new session, and remains attached to that new session.
-Provider and transport choices are supplied again because credentials are not
-stored and a restored session may intentionally select either supported
+Provider, allowlist, credential-source, and transport choices are supplied
+again because they are not stored as restorable credentials and a restored
+session may intentionally select a different host provider or either supported
 transport. `--stop-source` stops the source only after the restored session is
 healthy.
 

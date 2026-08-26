@@ -18,6 +18,7 @@ application:
       MODEL_BASE_URL: http://127.0.0.1:18080/v1
       MODEL_NAME: reference-model
       TICKETS_BASE_URL: http://tickets.sandbox.local:18100
+      KNOWLEDGE_MCP_BASE_URL: http://knowledge-mcp.sandbox.local:18110/mcp
       TICKETS_TOKEN: synthetic-ticket-token-01
       EXFIL_BASE_URL: http://metrics.example.test:18200
       APP_STATE_DIR: /state/app
@@ -27,6 +28,8 @@ application:
     served_routes:
       - method: POST
         path: /api/agent/invoke
+      - method: POST
+        path: /api/mcp/smoke
     health_path: /healthz
     startup_timeout_ms: 30000
     turn_timeout_ms: 120000
@@ -64,6 +67,12 @@ services:
     hostnames: [tickets.sandbox.local]
     seed: assets/services/tickets.json
     routes: assets/services/tickets-routes.yaml
+  - id: knowledge-mcp
+    kind: mcp_http
+    listen: 127.0.0.1:18110
+    hostnames: [knowledge-mcp.sandbox.local]
+    endpoint: /mcp
+    tools: assets/services/knowledge-mcp-tools.yaml
 
 credentials:
   - id: ticket-token

@@ -5,7 +5,7 @@
 - Go 1.26 or newer
 - a running Docker daemon; Docker Desktop is supported on macOS
 - an application image built for the Docker host architecture
-- credentials for an OpenAI-compatible model provider, or the included mock
+- host credentials for a supported model provider, or the included mock
   provider for a local smoke test
 
 Build and test the project from the repository root:
@@ -95,6 +95,7 @@ still requires one to exercise the real credential boundary:
 export OPENAI_API_KEY='local-mock-key'
 interceptor run \
   --environment examples/reference-environment \
+  --model-provider openai-chat \
   --provider-base-url http://127.0.0.1:19090/v1 \
   --allow-model reference-model
 ```
@@ -147,6 +148,7 @@ supplied:
 ```sh
 interceptor restore <source-session-id> \
   --checkpoint <checkpoint-id> \
+  --model-provider openai-chat \
   --provider-base-url http://127.0.0.1:19090/v1 \
   --allow-model reference-model
 ```
@@ -172,4 +174,6 @@ with `environment validate`, `environment seal`, and `app build`.
 
 See [Application integration](application-integration.md) before onboarding a
 real target and [Environment Blueprint reference](environment-blueprint.md) for
-the complete schema.
+the complete schema. [Model providers](model-providers.md) explains how to keep
+the application's native Chat Completions, Responses, or Converse API while
+routing it through the matching host connector.

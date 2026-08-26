@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -144,7 +145,7 @@ func Validate(directory string) (*ValidationReport, error) {
 	for i, service := range blueprint.Services {
 		prefix := fmt.Sprintf("services[%d]", i)
 		add(validateID(prefix+".id", service.ID, serviceIDs))
-		if service.Kind != "fixture_http" && service.Kind != "stateful_http" {
+		if service.Kind != "fixture_http" && service.Kind != "stateful_http" && service.Kind != "mcp_http" {
 			add(fmt.Errorf("%s.kind %q is unsupported", prefix, service.Kind))
 		}
 		add(validateListen(prefix+".listen", service.Listen, listens, service.ID))
@@ -165,6 +166,23 @@ func Validate(directory string) (*ValidationReport, error) {
 			}
 			if service.Routes != "" {
 				assetSources = append(assetSources, service.Routes)
+			}
+		}
+		if service.Kind == "mcp_http" {
+			if service.Tools == "" {
+				add(fmt.Errorf("%s.tools is required for mcp_http", prefix))
+			} else {
+				assetSources = append(assetSources, service.Tools)
+			}
+			if service.Endpoint == "" || !strings.HasPrefix(service.Endpoint, "/") ||
+				path.Clean(service.Endpoint) != service.Endpoint || strings.ContainsAny(service.Endpoint, "\x00\r\n?#") {
+				add(fmt.Errorf("%s.endpoint must be a clean absolute HTTP path", prefix))
+			}
+			if service.Fixtures != "" || service.Routes != "" {
+				add(fmt.Errorf("%s mcp_http may not declare fixtures or routes", prefix))
+			}
+			if service.Seed != "" {
+				assetSources = append(assetSources, service.Seed)
 			}
 		}
 	}
@@ -216,7 +234,7 @@ func Validate(directory string) (*ValidationReport, error) {
 		if credential.Value == "" {
 			add(fmt.Errorf("%s.value is required", prefix))
 		}
-		if _, exists := serviceIDs[credential.AcceptedBy]; !exists {
+		if _, exists := serviceIDs[credential.AcceptedBy]; !exists && credential.AcceptedBy != "model-proxy" {
 			add(fmt.Errorf("%s.accepted_by references unknown service %q", prefix, credential.AcceptedBy))
 		}
 		if current, exists := blueprint.Application.Launch.Environment[credential.EnvironmentVariable]; exists && current != credential.Value {
@@ -303,6 +321,14 @@ func Validate(directory string) (*ValidationReport, error) {
 			case "stateful_http":
 				if _, stateErr := services.LoadStateful(filepath.Join(root, filepath.FromSlash(service.Seed)), filepath.Join(root, filepath.FromSlash(service.Routes)), service.ID, nil, nil); stateErr != nil {
 					add(fmt.Errorf("services[%d] stateful definition: %w", i, stateErr))
+				}
+			case "mcp_http":
+				seedPath := ""
+				if service.Seed != "" {
+					seedPath = filepath.Join(root, filepath.FromSlash(service.Seed))
+				}
+				if _, mcpErr := services.LoadMCP(filepath.Join(root, filepath.FromSlash(service.Tools)), seedPath, service.Endpoint, service.ID, nil, nil); mcpErr != nil {
+					add(fmt.Errorf("services[%d] MCP definition: %w", i, mcpErr))
 				}
 			}
 		}

@@ -95,7 +95,7 @@ The local interface is split across the host and container:
 | Owner | What it starts |
 | --- | --- |
 | Application process | Its own local HTTP listener at `application.io.application_listen`. |
-| `sandboxd` inside the container | Simulated services, attacker sinks, the model proxy at `MODEL_BASE_URL`, and the private application/control bridge. |
+| `sandboxd` inside the container | Simulated HTTP and MCP services, attacker sinks, the model proxy at `MODEL_BASE_URL`, and the private application/control bridge. |
 | `interceptor run` on the host | The printed local application and control URLs, plus the connector that sends approved model requests to the configured provider. |
 
 Requests sent to the printed application or control URL cross the private
@@ -183,17 +183,29 @@ the private bridge.
 ## Model data path
 
 1. The application calls the Blueprint's local-only `MODEL_BASE_URL`.
-2. The in-container proxy accepts only OpenAI-compatible chat completions.
-3. It applies any matching injection to the request and stores larger recorded
-   content separately.
+2. The in-container proxy recognizes native Chat Completions, OpenAI Responses,
+   and Amazon Bedrock Converse routes. It rejects unsupported and streaming
+   routes.
+3. It applies matching tool-result injections using that protocol's own tool
+   representation and stores larger recorded content separately.
 4. A model frame crosses the selected private bridge.
 5. The host connector checks that the request belongs to the current session,
-   arrives in the expected order and format, stays within size limits, and uses
-   a model explicitly allowed by the operator.
-6. It sends the request to the fixed `--provider-base-url`, adds the host-only
-   Bearer credential, and rejects cross-origin redirects.
-7. The response returns through the proxy, where usage and confirmed delivery
-   are recorded, then reaches the application unchanged.
+   arrives in the expected order and format, stays within size limits, uses a
+   model explicitly allowed by the operator, and matches the selected provider
+   adapter.
+6. The adapter keeps the request like-for-like: Chat goes to Chat, Responses to
+   Responses, and Converse to the host AWS SDK's `Converse` operation. LiteLLM
+   accepts either supported OpenAI-compatible route. HTTP adapters use the fixed
+   `--provider-base-url`.
+7. The adapter adds host-only authentication. HTTP redirects to another origin
+   are rejected, and AWS credentials remain within the SDK on the host.
+8. The native response is recorded and returned in the same protocol the
+   application used. The proxy records usage and confirmed injection delivery
+   before returning it.
+
+The application keeps its framework's native API, but the operator must choose
+a compatible host provider. See [Model providers](model-providers.md) for the
+supported pairings and their limits.
 
 ## State and evidence
 

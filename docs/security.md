@@ -43,24 +43,30 @@ The only intended external request path is:
 
 ```text
 application -> loopback model proxy -> protected bridge
-            -> host connector -> fixed provider origin
+            -> host connector -> selected fixed provider or AWS Bedrock
 ```
 
-The connector accepts only the supported model API format, requests from the
-current session, bounded request bodies, and model names explicitly allowed by
-the operator. The application cannot choose a different provider destination,
-and the connector rejects redirects to another server.
+The connector accepts only a native model API supported by the selected host
+adapter, requests from the current session, bounded request bodies, and model
+names explicitly allowed by the operator. The application cannot choose a
+different HTTP destination or host AWS region. HTTP connectors reject redirects
+to another server; the Bedrock connector uses only the endpoint resolution and
+request signing performed by the host AWS SDK.
 
 ## Credentials
 
-The model API key is read from a host environment variable and retained by the
-attached host connector. It is not passed in the Docker command, container
-environment, session metadata, bridge request files, logs, checkpoints, or
-exports.
+OpenAI and gateway keys are read from a host environment variable and retained
+by the attached host connector. Bedrock credentials are loaded and refreshed by
+the AWS SDK's host credential chain. Neither form is passed in the Docker
+command, container environment, session metadata, bridge request files, logs,
+checkpoints, or exports.
 
 All Blueprint credentials must be synthetic. Credential-like application
-variables must be explicitly declared and tied to a synthetic service. Canary
-values should also be synthetic and unique.
+variables must be explicitly declared and tied to a synthetic service or the
+local `model-proxy`. A Bedrock application may use fake AWS values solely so
+its SDK will sign the local request; Interceptor discards that signature and
+never substitutes it for the real host AWS identity. Canary values should also
+be synthetic and unique.
 
 Avoid placing credentials directly on a shell command line. Use a dedicated
 host environment variable and, if desired:

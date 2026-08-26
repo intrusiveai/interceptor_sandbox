@@ -67,6 +67,18 @@ The model proxy finds the named tool call and the message containing its result,
 then changes that result before sending the request to the model provider. The
 application's stored service or file data is not changed.
 
+Matching follows the application's native model protocol:
+
+- Chat Completions links an assistant `tool_call` to a `tool` message;
+- Responses links `function_call` and `function_call_output` Items by
+  `call_id`; and
+- Converse links `toolUse` and `toolResult` blocks by `toolUseId`.
+
+The call and result must both be present in the submitted request so Interceptor
+can evaluate the tool name, arguments, and ordinal. A Responses request that
+provides only `previous_response_id` leaves that earlier call inside the
+provider, so a tool-name selector cannot match it locally.
+
 ### Environment-state selector
 
 Choose exactly one target form.
@@ -83,9 +95,16 @@ Existing regular file:
 {"path":"/state/app/context.json"}
 ```
 
-The service must be `stateful_http`; the collection/key must already exist. A
-file must already exist and fall under a declared mutable root. The MVP does not
-use fidelity injection to create a new resource or file.
+The service must expose managed state through `stateful_http` or a stateful
+`mcp_http` tool; the collection/key must already exist. A file must already
+exist and fall under a declared mutable root. The MVP does not use fidelity
+injection to create a new resource or file.
+
+For MCP, fidelity injection changes the record before the application reads it
+through `tools/call`. Transit `model_tool_result` injection remains available
+after the agent framework turns an MCP response into native Chat, Responses, or
+Converse tool-result history. See [Simulated MCP
+services](mcp-services.md#evidence-injections-and-snapshots).
 
 ## Placement
 

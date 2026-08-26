@@ -106,6 +106,8 @@ type Service struct {
 	Seed      string         `yaml:"seed,omitempty" json:"seed,omitempty"`
 	Routes    string         `yaml:"routes,omitempty" json:"routes,omitempty"`
 	Fixtures  string         `yaml:"fixtures,omitempty" json:"fixtures,omitempty"`
+	Endpoint  string         `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
+	Tools     string         `yaml:"tools,omitempty" json:"tools,omitempty"`
 	Options   map[string]any `yaml:"options,omitempty" json:"options,omitempty"`
 }
 

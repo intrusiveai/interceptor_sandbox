@@ -13,9 +13,11 @@ The implementation currently includes:
 - immutable wrapper-image construction from a digest-pinned application image;
 - Docker containment with no network, a read-only root, dropped capabilities,
   bounded resources, and Docker Desktop-safe host relays;
-- fixture, stateful JSON, and attacker-sink HTTP services that fail closed;
-- an OpenAI-compatible inference seam whose provider credential stays on the
-  host;
+- fixture, stateful JSON, simulated MCP, and attacker-sink HTTP services that
+  fail closed;
+- a protocol-aware inference seam for native Chat Completions, OpenAI
+  Responses, Amazon Bedrock Converse, and LiteLLM routes, with provider
+  credentials kept outside the container;
 - transit tool-result and persistent Environment Instance injections;
 - hash-chained attack, control, and evaluation events plus a write-ahead state
   journal;
@@ -52,6 +54,7 @@ interceptor app build \
 export OPENAI_API_KEY='host-only-provider-key'
 interceptor run \
   --environment ./my-environment \
+  --model-provider openai-chat \
   --provider-base-url https://provider.example/v1 \
   --allow-model provider-model-id
 ```
@@ -73,7 +76,8 @@ interceptor coverage <session-id>
 interceptor logs verify <session-id>
 interceptor logs export <session-id> --output evidence.tar
 interceptor restore <session-id> --checkpoint <checkpoint-id> \
-  --provider-base-url https://provider.example/v1 --allow-model provider-model-id
+  --model-provider openai-chat --provider-base-url https://provider.example/v1 \
+  --allow-model provider-model-id
 interceptor stop <session-id>
 ```
 
@@ -105,7 +109,8 @@ See [`examples/`](examples/) for a reference agent and Environment Blueprint.
 The user documentation starts at [`docs/`](docs/README.md), including the
 [getting-started guide](docs/getting-started.md), [Environment Blueprint
 reference](docs/environment-blueprint.md), [local API](docs/api-reference.md),
-[CLI reference](docs/cli-reference.md), and a detailed guide to [logical
+[CLI reference](docs/cli-reference.md), [model providers](docs/model-providers.md),
+and a detailed guide to [logical
 snapshots and restore](docs/snapshots-and-restore.md).
 
 ## Storage

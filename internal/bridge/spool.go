@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/intrusive-ai/interceptor-sandbox/internal/digest"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
 )
 
@@ -74,7 +73,7 @@ func (c *SpoolConnector) Forward(ctx context.Context, frame ModelFrame) (ModelRe
 			if response.Error != "" {
 				return ModelResult{}, errors.New(response.Error)
 			}
-			if response.Result == nil || response.Result.Status < 100 || response.Result.Status > 599 || !digest.Valid(response.Result.FinalRequestDigest) || digest.Bytes(response.Result.FinalRequest) != response.Result.FinalRequestDigest {
+			if !validModelResult(response.Result) {
 				return ModelResult{}, errors.New("host connector returned invalid result")
 			}
 			return *response.Result, nil
