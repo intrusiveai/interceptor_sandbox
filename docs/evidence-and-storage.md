@@ -3,6 +3,13 @@
 Interceptor uses ordinary local files so sessions can be inspected, verified,
 archived, and moved without a database.
 
+There are three main kinds of saved data:
+
+- **events** describe what happened during the test;
+- the **state journal** describes changes needed to rebuild a snapshot; and
+- the **blob store** holds larger bodies and changed file contents without
+  duplicating identical data.
+
 ## Data root
 
 By default, data is stored below the operating system's user configuration
@@ -38,7 +45,8 @@ directory.
 
 ## Event channels
 
-`events.jsonl` separates evidence by audience:
+`events.jsonl` contains one JSON event per line and separates evidence by
+purpose:
 
 | Channel | Examples |
 | --- | --- |
@@ -46,32 +54,36 @@ directory.
 | `control` | session lifecycle, injection administration, snapshots |
 | `evaluation` | model exchanges, fixture hits/gaps, stateful-service activity |
 
-Each event records a schema version, session and sequence, timestamp, channel,
-layer, kind, provenance, semantic JSON, optional turn/injection attribution,
-optional raw blob reference, previous hash, and hash.
+Each event records when and where something happened, what kind of event it was,
+whether it came from the application, sandbox, or test harness, and any related
+turn or injection. Larger raw content may be stored separately and referenced
+from the event.
 
-Provenance values distinguish application behavior, sealed environment behavior,
-harness injection, attacker infrastructure, and sandbox control. Hash chaining
-detects deletion, insertion, reordering, or modification; it does not prevent a
-local trusted operator from replacing an entire evidence set and is not a
-third-party timestamp or signature.
+The `provenance` field identifies the source of an event—for example, the
+application, the sealed environment, the test harness, an attacker sink, or
+Interceptor itself. Each event also contains a fingerprint of the previous
+event. This linked history reveals deleted, inserted, reordered, or edited
+entries. It is an integrity check, not an external signature: a trusted local
+operator could still replace the entire evidence set.
 
 ## State journal
 
-`state.jsonl` is separate because it is an executable restore record rather than
-an observation stream. Each synced transaction has ordered operations, a reason,
-sequence, previous hash, and hash. It includes service mutations, injection
-state, filesystem delta operations, budgets, oracle state, clock state, and
-restore ancestry.
+`state.jsonl` is separate because it answers a different question: not “what did
+we observe?” but “which changes must be reapplied to rebuild this state?” It
+contains ordered changes to services, injections, saved files, usage limits,
+oracle results, and virtual time. Like the event log, its entries are linked so
+editing can be detected.
 
 Do not edit either JSONL file. Any modification invalidates the chain and can
 make checkpoints unrestorable.
 
 ## Blob store
 
-Large request/response bodies and changed regular files are stored once by
-SHA-256 digest. Logs and journal operations use `sha256:...` references. Blob
-reads verify the expected digest and size.
+A **blob** is simply a larger piece of content stored in its own file. Large
+requests, responses, and changed application files are stored once under a
+SHA-256 digital fingerprint. Events and state changes refer to that fingerprint
+instead of copying the content into every record. Interceptor checks both the
+fingerprint and size when reading it.
 
 Blobs are shared across sessions and retained by `interceptor delete`. The MVP
 does not provide garbage collection or secure deletion. If retention policy
@@ -87,13 +99,13 @@ interceptor logs tail <session-id> --channel evaluation
 interceptor logs verify <session-id>
 ```
 
-`logs tail` verifies the event chain before printing the selected existing
-events. `logs verify` additionally checks:
+`logs tail` checks the linked event history before printing the selected existing
+events. `logs verify` additionally checks that:
 
-- journal chain and session identity;
-- every blob referenced by an event or file operation;
-- checkpoint identity, digest, and log positions; and
-- the current Sealed Environment and application digest binding.
+- the state-change history is complete and belongs to the session;
+- every referenced large file is present and unchanged;
+- each snapshot points to valid positions in the saved histories; and
+- the approved application and Environment have not changed.
 
 Run verification before interpreting or exporting evidence and again after
 moving it between storage systems.
@@ -106,7 +118,7 @@ A stopped or error session can be exported:
 interceptor logs export <session-id> --output evidence.tar
 ```
 
-The deterministic tar contains:
+The tar archive contains:
 
 - an export `manifest.json`;
 - `session.json`;
@@ -128,9 +140,9 @@ canaries, attacker observations, and injected payloads may be persisted in logs
 or blobs. The host provider credential is specifically excluded, but this does
 not make the remaining evidence non-sensitive.
 
-The default bridge also creates transient request/response files. They use
-private permissions, atomic publication, cancellation, expiry, and cleanup, but
-may exist briefly on disk and can survive an abrupt host failure until orphan
-cleanup. Use an encrypted local volume where required and do not put real
-production secrets in an Environment Blueprint.
-
+The default bridge also creates short-lived request and response files. They are
+private to the current user, appear to the receiver only after they are fully
+written, and are cleaned when completed, canceled, or expired. A sudden machine
+failure may leave some behind until Interceptor's cleanup runs. Use an encrypted
+local volume where required and do not put real production secrets in an
+Environment Blueprint.

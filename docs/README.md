@@ -30,9 +30,15 @@ Reference and operational guides:
 | Term | Meaning |
 | --- | --- |
 | Environment Blueprint | Authored `environment.yaml` plus its referenced assets. |
-| Sealed Environment | A validated Blueprint bound to immutable content digests by `environment.lock.json`. |
+| Sealed Environment | A validated Blueprint that has been locked to exact file and image versions so later changes can be detected. |
 | Environment Instance | The live synthetic world materialized inside one session. |
-| Session | One isolated container, application process, state journal, event log, and lifecycle. |
+| Session | One isolated run of the application and its synthetic environment. |
 | Snapshot | The CLI term for creating a logical restore point. |
-| Checkpoint | The durable manifest that identifies a snapshot position. |
+| Checkpoint | The small record that identifies exactly which saved state belongs to a snapshot. |
+| State journal | An ordered history of environment changes used to rebuild saved state. |
+| Digest | A digital fingerprint used to detect whether an image or file changed. |
+| Loopback | A network address available only on the local machine or inside the container, rather than on the wider network. |
 
+Reference pages retain exact field names and implementation terms because users
+need them when configuring or diagnosing the sandbox. Each guide introduces
+those terms in plain language before relying on them.

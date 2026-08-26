@@ -4,6 +4,10 @@ Interceptor reduces an onboarded application's access to the host and network
 while preserving a narrow model-provider path. It is designed for local
 security testing, not multi-tenant remote execution.
 
+In practical terms, the application can interact with the model provider and
+the fake world defined for the test, but it should not be able to browse the
+internet, contact real business services, or read unrelated host files.
+
 ## Trust boundaries
 
 Trusted in the MVP:
@@ -29,10 +33,11 @@ terms.
 
 ## Containment properties
 
-The session disables general container networking, uses a read-only root,
-limits resources, drops application capabilities, and mounts only declared
-state. Synthetic hostnames resolve to loopback inside the container. Unknown
-synthetic requests fail closed instead of escaping to a real service.
+The session disables general container networking, makes most container files
+read-only, limits resource use, removes unnecessary application privileges, and
+shares only declared files with the container. Simulated service names resolve
+only inside the container. If a simulated service does not understand a request,
+it rejects it instead of forwarding it to a real service.
 
 The only intended external request path is:
 
@@ -41,16 +46,17 @@ application -> loopback model proxy -> protected bridge
             -> host connector -> fixed provider origin
 ```
 
-The connector accepts one codec, one route family, one session identity,
-monotonic request IDs, bounded bodies, and an explicit model allowlist. The
-provider URL cannot come from the application request, credentials in the URL
-are rejected, and redirects to a different origin are rejected.
+The connector accepts only the supported model API format, requests from the
+current session, bounded request bodies, and model names explicitly allowed by
+the operator. The application cannot choose a different provider destination,
+and the connector rejects redirects to another server.
 
 ## Credentials
 
 The model API key is read from a host environment variable and retained by the
-attached host connector. It is not passed in Docker argv, container environment,
-session metadata, spool frames, logs, checkpoints, or exports.
+attached host connector. It is not passed in the Docker command, container
+environment, session metadata, bridge request files, logs, checkpoints, or
+exports.
 
 All Blueprint credentials must be synthetic. Credential-like application
 variables must be explicitly declared and tied to a synthetic service. Canary
@@ -65,22 +71,23 @@ interceptor run ... --model-api-key-env MY_PROVIDER_API_KEY
 
 ## Local APIs
 
-Application and cooperative control listeners bind to loopback and do not
-authenticate. Do not expose them through `0.0.0.0`, SSH forwarding, a reverse
-proxy, Docker port publication, or shared CI runners. Choose fixed ports only
-when the local port ownership is understood; otherwise keep the default random
-ports.
+Application and cooperative control URLs accept connections only from the local
+machine and do not require a password. Do not make them remotely reachable
+through `0.0.0.0`, SSH forwarding, a reverse proxy, Docker port publication, or
+a shared CI runner. Choose fixed ports only when necessary; otherwise let the
+operating system choose unused local ports.
 
-Operator-only endpoints remain behind protected bridge files/sockets and are not
-routed by the loopback control server. Filesystem permissions are part of this
+Operator-only endpoints remain behind protected bridge files or sockets and are
+not routed by the local control server. Filesystem permissions are part of this
 boundary, so keep the data root private and do not relax its modes.
 
 ## Transport selection
 
-The regular-file spool is the default on all hosts. Its transient frames may
-contain model/application data but never the provider credential. Private modes,
-bounds, deadlines, cancellation markers, atomic rename, and orphan cleanup
-reduce exposure and ambiguity.
+The regular-file spool is the default on all hosts. Its short-lived files may
+contain model or application data but never the provider credential. Private
+file permissions, size and time limits, cancellation handling, complete-file
+publication, and crash cleanup reduce exposure and prevent partial requests from
+being processed.
 
 Unix socket mode is an explicit optimization, not a stronger security mode.
 Use it only when the host CLI, Docker daemon, and mounted session directory
@@ -90,11 +97,12 @@ back or enabling container networking when the socket cannot be reached.
 ## Known limitations
 
 - Container isolation shares the host kernel and is not equivalent to a VM.
-- Same-user local processes can access loopback APIs and may read data permitted
+- Other processes running as the same local user can access local APIs and may
+  read data permitted
   by host filesystem ownership.
 - Evidence chains detect internal modification but are not externally signed.
 - Sensitive model/application data is recorded unredacted in local evidence.
-- Shared blobs are retained after session deletion.
+- Shared large-content files are retained after session deletion.
 - Docker Desktop and the Docker daemon are part of the trusted computing base.
 - The MVP does not provide remote authentication, authorization, tenancy,
   encrypted evidence, secure deletion, or a secret manager integration.
@@ -104,4 +112,3 @@ back or enabling container networking when the socket cannot be reached.
 Run Interceptor on a dedicated development machine or appropriately isolated CI
 worker when the target image is not trusted. Keep Docker, the host OS, and the
 Interceptor binary patched, and review every Environment asset before sealing.
-

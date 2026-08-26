@@ -17,40 +17,41 @@ deterministic oracles that provide indisputable evidence of an attack's
 success/failure, which is useful to compare against an external LLM judge that
 may be analyzing the attack success rate separately.
 
-In technical terms, Interceptor Sandbox lets a security tester run an agentic
-application against a small, reviewable synthetic world without giving the
-application ordinary network access. The environment can include files,
-deterministic HTTP fixtures, mutable JSON services, synthetic credentials,
-canaries, and attacker-controlled capture endpoints. Model calls pass through a
-narrow host connector so real provider credentials never enter the container.
+More specifically, Interceptor Sandbox lets a security tester run an agentic
+application against a small, reviewable simulated world without giving the
+application ordinary network access. The world can include files, services with
+predefined responses, services whose records can change, fake credentials,
+recognizable test secrets called canaries, and endpoints that capture attempted
+data theft. Model calls pass through a narrow connection on the host so real
+provider credentials never enter the container.
 
 The project is intended for repeatable security experiments such as:
 
 - checking whether untrusted model or tool content changes application behavior;
 - measuring whether synthetic secrets reach output, a model request, or an
   attacker sink;
-- comparing transit-only simulation with mutations to persistent environment
-  state;
+- comparing content changed only on its way to the model with content changed in
+  the environment's stored data;
 - reproducing a result from a known logical state; and
 - collecting verifiable evidence without a database or hosted control plane.
 
-It is not an attack generator. The caller chooses test inputs, injection
-payloads, sequencing, and interpretation. It is also not a containment boundary
-for arbitrary hostile native code equivalent to a virtual machine, and it does
-not claim byte-for-byte deterministic model output.
+It is not an attack generator. The tester chooses the inputs, injected content,
+order of operations, and interpretation. It also does not isolate hostile native
+code as strongly as a separate virtual machine, and it cannot promise that a
+model will generate exactly the same response every time.
 
 ## How it works
 
-The operator authors an Environment Blueprint and assets, validates them, and
-seals them into a digest-bound definition. Interceptor then builds a small
-application-specific wrapper image containing the Go supervisor and launches
-one Docker container per session.
+The operator writes an Environment Blueprint and its supporting files, validates
+them, and seals them. Sealing records digital fingerprints so later changes can
+be detected. Interceptor then packages its supervisor with the application and
+launches one Docker container for each session.
 
 Inside the container, the supervisor starts:
 
 - the onboarded application as a non-root process;
-- declared fixture and stateful HTTP services;
-- declared attacker sinks;
+- simulated services with predefined or changeable data;
+- endpoints that capture attempted data theft;
 - an OpenAI-compatible model proxy; and
 - private application and control bridge endpoints.
 
@@ -59,16 +60,16 @@ supported model route to one operator-supplied provider origin and only for
 explicitly allowed model names. The provider API key remains in host process
 memory.
 
-The host process exposes two unauthenticated loopback URLs while `run` or
-`restore` remains attached:
+While `run` or `restore` remains open, the host process exposes two local-only
+URLs that do not require passwords:
 
 - the **application URL** forwards only Blueprint-declared application routes;
 - the **control URL** exposes cooperative turns, injections, snapshots, status,
   events, and attacker observations.
 
-Operator-only information such as evaluation results and the state journal is
-not exposed on the loopback control URL. CLI commands reach those endpoints
-through the session's protected bridge.
+Operator-only information such as evaluation results and the complete history
+of state changes is not exposed on the local control URL. CLI commands reach
+that information through the session's private communication channel.
 
 ## Design priorities
 
@@ -77,20 +78,23 @@ The MVP favors understandable local mechanisms:
 - one Go binary and one container per session;
 - Docker rather than Kubernetes;
 - YAML and ordinary assets rather than a database;
-- JSON metadata and append-only JSONL logs;
-- content-addressed files for larger bodies and filesystem content; and
-- logical replay-based restore rather than block, volume, or process cloning.
+- readable JSON metadata and logs that add new entries without rewriting old
+  ones;
+- shared storage that avoids duplicating identical large content; and
+- restore by reapplying recorded state changes rather than copying an entire
+  disk or running process.
 
 ## Current capability boundary
 
-The implemented application adapter is HTTP. The model seam supports
-OpenAI-compatible `POST .../chat/completions`. Synthetic services are
+Applications currently connect to Interceptor over HTTP. The model connection
+supports OpenAI-compatible `POST .../chat/completions`. Simulated services are
 `fixture_http` and `stateful_http`; attacker capture uses `http_sink`; virtual
-time is fixed. Docker is the supported OCI runtime for the MVP.
+time is fixed. Docker is the supported container runtime for the MVP.
 
-Snapshots capture declared persistent state, not RAM, open connections,
-threads, caches, or kernel state. An application must be restartable from its
-declared mutable roots and managed service state before enabling snapshots.
+Snapshots capture declared saved state, not information that exists only in
+memory, running tasks, open connections, or caches. Before enabling snapshots,
+an application must be able to restart using its declared saved folders and
+simulated service data.
 
 ## Typical lifecycle
 
@@ -99,9 +103,8 @@ declared mutable roots and managed service state before enabling snapshots.
 3. Build and verify the wrapper image.
 4. Start an attached session.
 5. Submit application traffic or cooperative turns.
-6. Arm authored injections and inspect observations.
-7. Evaluate deterministic oracles and coverage gaps.
-8. Create a snapshot at a quiescent point.
+6. Enable test injections and inspect what the application did.
+7. Evaluate predefined success checks and identify missing simulated behavior.
+8. Create a snapshot after the application reaches a safe save point.
 9. Restore one or more independent sessions from that checkpoint.
 10. Stop the session, verify its logs, and export evidence.
-

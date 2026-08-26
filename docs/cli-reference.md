@@ -10,6 +10,9 @@ Commands print errors to stderr and return nonzero on failure. Commands with
 `--json` produce machine-readable JSON where noted. There is no global config
 file or global flag parser.
 
+This page is primarily a lookup reference. For a guided first run, use
+[Getting started](getting-started.md).
+
 `INTERCEPTOR_DATA_DIR` overrides the platform user configuration directory used
 for session data, application locks, and blobs. `INTERCEPTOR_PROVIDER_BASE_URL`
 can supply the default provider URL for `run` and `restore`.
@@ -37,8 +40,8 @@ refuses to overwrite an existing Blueprint.
 interceptor environment validate <directory> [--json]
 ```
 
-Strictly validates the Blueprint and assets without writing a lock. JSON output
-contains `valid`, `name`, `version`, the asset manifest, and warnings.
+Checks the Blueprint and all referenced files without changing them. JSON output
+contains `valid`, `name`, `version`, a list of approved assets, and warnings.
 
 ```sh
 interceptor environment seal <directory> [--json]
@@ -51,8 +54,8 @@ warnings.
 interceptor environment inspect <directory> [--json]
 ```
 
-Verifies the directory against its existing lock. JSON output includes the lock,
-parsed Blueprint, and warnings.
+Checks that the directory still matches the version that was sealed. JSON
+output includes the lock record, parsed Blueprint, and warnings.
 
 ## Wrapper image commands
 
@@ -73,8 +76,9 @@ interceptor app verify \
   [--json]
 ```
 
-Verifies the Sealed Environment, application lock, wrapper image, and bound
-digests. `--image` optionally asserts the expected wrapper image reference.
+Checks that the Sealed Environment and wrapper image still match the exact files
+and application image used during the build. `--image` can additionally require
+a particular wrapper image name.
 
 ## Start a session
 
@@ -103,8 +107,9 @@ Ports default to `0`, allowing the OS to choose unused loopback ports. The
 bridge defaults to portable `spool`. Select `unix` only on a compatible native
 Linux Docker host; see [Architecture](architecture.md#hostcontainer-transports).
 
-The process stays attached because it owns the loopback relays and model
-connector. Interrupting it requests a graceful stop.
+The process stays open while the session runs because it provides the local URLs
+and the carefully limited connection to the model provider. Closing it requests
+a graceful stop.
 
 ## Inspect sessions
 
@@ -133,9 +138,10 @@ the session stopped. Repeating it for a stopped session is harmless.
 interceptor delete <session-id>
 ```
 
-Deletes a stopped or error session directory. Running sessions are refused.
-Shared content-addressed blobs are retained, so deletion is not a secure-erasure
-or garbage-collection command.
+Deletes the local folder for a stopped or failed session. Running sessions are
+refused. Shared large files are retained because another session may refer to
+them, so this command neither securely erases all content nor reclaims all disk
+space.
 
 ## Snapshots and restore
 
@@ -145,8 +151,8 @@ interceptor snapshot list <session-id> [--json]
 interceptor snapshot inspect <session-id> <checkpoint-id>
 ```
 
-Create asks the running supervisor for a quiescent logical checkpoint. Inspect
-always prints checkpoint JSON.
+Create asks the application to reach a safe save point and records a logical
+restore point. Inspect always prints the detailed checkpoint JSON.
 
 ```sh
 interceptor restore <source-session-id> \
@@ -161,7 +167,8 @@ interceptor restore <source-session-id> \
   [--stop-source]
 ```
 
-Restore verifies and replays the checkpoint into a new attached session.
+Restore checks the snapshot for missing or changed data, rebuilds its saved state
+in a new session, and remains attached to that new session.
 Provider and transport choices are supplied again because credentials are not
 stored and a restored session may intentionally select either supported
 transport. `--stop-source` stops the source only after the restored session is
@@ -184,16 +191,17 @@ optional flag is accepted for consistency; output is JSON either way.
 interceptor logs tail <session-id> [--channel attack|control|evaluation]
 ```
 
-Verifies the event chain and prints existing matching events as JSONL. This is
-a current-file read, not a continuously following `tail -f`. The default
-channel is `attack`.
+Checks the event history for changes and prints existing matching events, one
+JSON object per line. Despite the command name, this reads the current file once;
+it does not continue waiting for new events. The default channel is `attack`.
 
 ```sh
 interceptor logs verify <session-id>
 ```
 
-Verifies event and journal hash chains, referenced blobs, checkpoints, session
-identity, and Sealed Environment/application digests.
+Checks that the event history, state-change history, snapshots, and referenced
+large files are complete and unchanged, and that they belong to the expected
+session, application, and Sealed Environment.
 
 ```sh
 interceptor logs export <session-id> --output <tar-path>
@@ -208,4 +216,3 @@ rename behavior, so choose the output path deliberately.
 `sandboxd` and `app-helper` are wrapper-image entry points used by Interceptor.
 They are not user-facing administration commands and should not be invoked
 directly.
-

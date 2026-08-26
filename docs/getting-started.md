@@ -21,6 +21,11 @@ examples below.
 
 ## Run the reference environment
 
+The reference environment is a small working example containing an agent,
+simulated support-ticket service, synthetic private data, an attacker capture
+endpoint, and snapshot-capable application state. Running it once is the easiest
+way to see how the pieces fit together before authoring a new Blueprint.
+
 Build the reference application and get its exact local image ID:
 
 ```sh
@@ -28,7 +33,8 @@ docker build -t interceptor-reference-agent:local examples/reference-agent
 docker image inspect --format '{{.Id}}' interceptor-reference-agent:local
 ```
 
-Copy the printed `sha256:...` value after the `@` in
+The printed `sha256:...` value is the image's digital fingerprint. Copy it after
+the `@` in
 `examples/reference-environment/environment.yaml`. Also replace the example
 `metadata.reviewed_by` value and confirm `reviewed_at` reflects the review.
 
@@ -74,8 +80,10 @@ curl -sS -X POST "$APPLICATION_URL/api/agent/invoke" \
   --data '{"prompt":"List the open support tickets"}'
 ```
 
-Or use the cooperative control URL to create a tracked turn. The `body` field is
-a JSON byte string and therefore uses base64 (`e30=` is `{}`):
+Or use the cooperative control URL to create a tracked turn. This wrapper gives
+the request a turn ID and records a structured result. Because the wrapper can
+carry any kind of request body, its `body` field uses base64 text (`e30=` is
+the base64 form of `{}`):
 
 ```sh
 curl -sS -X POST "$CONTROL_URL/v1/turns" \
@@ -99,8 +107,9 @@ interceptor snapshot create <session-id> --name after-smoke-test
 interceptor snapshot list <session-id>
 ```
 
-Restore creates a new session and leaves the source running unless
-`--stop-source` is supplied:
+Restore creates a new, independent session containing the state saved at the
+snapshot. The original session remains running unless `--stop-source` is
+supplied:
 
 ```sh
 interceptor restore <source-session-id> \
@@ -131,4 +140,3 @@ with `environment validate`, `environment seal`, and `app build`.
 See [Application integration](application-integration.md) before onboarding a
 real target and [Environment Blueprint reference](environment-blueprint.md) for
 the complete schema.
-

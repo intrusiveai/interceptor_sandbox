@@ -5,6 +5,21 @@ named `environment.yaml` and every asset it references. Unknown YAML fields,
 multiple documents, missing assets, unsafe paths, and unsupported capabilities
 fail validation.
 
+In plain language, the Blueprint answers five questions: What application is
+being tested? What files and services does it believe exist? Which values are
+safe synthetic credentials or canaries? What results count as success? What
+resource and snapshot limits should apply?
+
+This page is both a guide and an exact field reference. A few recurring terms:
+
+- **digest** means a digital fingerprint used to detect changed content;
+- **loopback** means a network address available only inside the local machine
+  or container;
+- **mutable root** means a folder whose changes should be saved in snapshots;
+- **seed** means the starting files or records copied into a new session; and
+- **oracle** means a deterministic check that decides whether a specified
+  security-relevant event occurred.
+
 The current schema identity is:
 
 ```yaml
@@ -82,8 +97,9 @@ application:
 
 ### Image and launch
 
-`image` must be digest pinned. `command` is an argv array, not a shell string.
-`workdir` must be an absolute container path. Environment variable names use
+`image` must be locked to an exact digest so a tag cannot silently select new
+code. `command` is a list containing the executable followed by each argument,
+not one shell command string. `workdir` must be an absolute container path. Environment variable names use
 uppercase shell-name syntax and values are literal; host interpolation and
 control characters are rejected.
 
@@ -93,9 +109,10 @@ or `attacker_services`.
 
 ### HTTP I/O
 
-The only MVP adapter is `http`. `application_listen` must be an HTTP loopback
-URL. `served_routes` is a non-empty, unique list of method/path pairs and acts
-as an allowlist at both application interfaces. Paths must be absolute.
+The only MVP application interface is HTTP. `application_listen` must be a local
+HTTP URL. `served_routes` lists the only application operations that a tester
+may call through Interceptor. Anything not listed is rejected rather than
+forwarded. Paths must be absolute.
 
 `health_path` is optional. `startup_timeout_ms` controls readiness waiting and
 `turn_timeout_ms` bounds cooperative turns and model calls. Configure both as
@@ -103,17 +120,19 @@ positive values for runnable environments.
 
 ### Persistence and quiescence
 
-`snapshot_capable` opts into logical snapshots. `mutable_roots` contains clean,
-absolute, non-overlapping container paths. Broad system paths such as `/`,
+`snapshot_capable` opts into logical snapshots. `mutable_roots` lists the
+folders containing application data that must survive a restore. These paths
+must be absolute and cannot overlap. Broad system paths such as `/`,
 `/etc`, `/usr`, `/run`, `/proc`, `/sys`, `/dev`, and `/environment` are reserved.
 
-`quiesce.kind` supports:
+Quiescence is the application's way of saying “I have finished saving pending
+work, so my stored state is safe to copy.” `quiesce.kind` supports:
 
 | Kind | Additional fields | Behavior |
 | --- | --- | --- |
-| `http` | `method`, loopback `url`, optional `timeout_ms` | Success requires a 2xx response. |
-| `signal` | `signal`, and `ready_file` or loopback `ready_url`, optional `timeout_ms` | Signals the app then polls readiness. Signals: `USR1`, `USR2`, `HUP`, `TERM`. |
-| `command` | non-empty `command` argv, optional `timeout_ms` | Runs the argv through the restricted helper. |
+| `http` | `method`, local `url`, optional `timeout_ms` | Calls the application; a successful HTTP response means it is ready. |
+| `signal` | `signal`, and `ready_file` or local `ready_url`, optional `timeout_ms` | Sends an operating-system signal, then waits for the app to create a file or return a successful response. Signals: `USR1`, `USR2`, `HUP`, `TERM`. |
+| `command` | non-empty `command` list, optional `timeout_ms` | Runs the configured save/flush command. |
 | `none` | none | Declares no application flush protocol. |
 
 The runtime quiesce timeout defaults to 5000 ms when omitted.
@@ -150,7 +169,8 @@ filesystem:
 `source` is a relative file or directory below the Blueprint directory.
 `target` is a clean absolute container path. A writable seed target must fall
 inside a declared mutable root. Read-only seeds are mounted directly from the
-sealed assets; writable seeds are copied into a session-specific generation.
+sealed assets; writable seeds are copied to a private folder for each session.
+This prevents one test run from changing the starting files used by another.
 
 Assets may be regular files, directories, or symlinks that resolve within the
 Blueprint. Hard links, escaping symlinks, special files, absolute sources, and
@@ -165,7 +185,8 @@ The hostname resolves only inside the session container.
 
 ### `fixture_http`
 
-Use this for deterministic stateless HTTP dependencies:
+Use this for an HTTP dependency that should return predefined responses and
+does not need to remember changes between calls:
 
 ```yaml
 services:
@@ -193,15 +214,17 @@ rules:
       json: {id: user-1, email: alice@example.test}
 ```
 
-Matches may constrain exact method and path, selected query/header values, and
-a recursive JSON-object subset. Higher priority rules run first. Equal-priority
-overlapping rules are rejected. A response chooses at most one of `json`,
+Rules can match the request method and path plus selected query, header, and
+JSON values. Higher priority rules run first. Two rules that could match the
+same request at the same priority are rejected because their result would be
+ambiguous. A response chooses at most one of `json`,
 `body`, or `asset`; `asset` is relative to the Blueprint directory. Requests
 are bounded at 1 MiB. No match returns `501` and emits a coverage gap.
 
 ### `stateful_http`
 
-Use this for a small mutable JSON resource service:
+Use this for a small simulated service whose JSON records can be created,
+changed, deleted, and restored with a snapshot:
 
 ```yaml
 services:
@@ -254,8 +277,10 @@ routes:
 Supported actions are `list`, `get`, `create`, `replace`, `patch`, and `delete`.
 `get`, `replace`, `patch`, and `delete` require one `{...}` key placeholder.
 `create` requires `key_field` and no placeholder. `patch` changes only listed
-`patch_fields`. Mutations are write-ahead journaled and therefore participate
-in snapshot/restore. An undeclared route returns `501` and emits a coverage gap.
+`patch_fields`. Interceptor records each change before applying it, which lets a
+snapshot restore the same records later. An undeclared route returns `501` and
+reports a coverage gap—a sign that the Blueprint does not yet model something
+the application tried to do.
 
 Service `options` is reserved in the current MVP and has no implemented behavior.
 
@@ -284,8 +309,11 @@ canaries:
     proves: unauthorized_secret_exposure
 ```
 
-Canary values must be non-empty and unique. `proves` states the security
-meaning of observation. If `location` is set, it must be an absolute path under
+Canaries are recognizable synthetic values placed where sensitive information
+would normally exist. If one appears in application output or an attacker sink,
+the tester has clear evidence that protected data crossed a boundary. Canary
+values must be non-empty and unique. `proves` states the security meaning of
+observation. If `location` is set, it must be an absolute path under
 a filesystem seed, and validation verifies the file actually contains the
 value.
 
@@ -308,15 +336,19 @@ attacker_services:
       paths: [/collect]
 ```
 
-The sink records bounded request method, path, query, headers, and body, then
+An attacker sink behaves like an external server controlled by an attacker. It
+lets the tester see whether the application tried to send data out, while all
+traffic remains inside the sandbox. The sink records a bounded request method,
+path, query, headers, and body, then
 returns the configured status and either `json` or `body`. `options.methods`
 and `options.paths` are optional allowlists. An omitted `max_capture_bytes`
 defaults to 1 MiB. Requests outside an allowlist fail closed.
 
 ## Oracles
 
-Oracles are immutable deterministic checks evaluated separately from
-application responses:
+Oracles are predefined, deterministic checks for evidence such as “the canary
+reached the attacker sink” or “a protected file changed.” They are evaluated
+separately so the application cannot see or influence the verdict:
 
 | Kind | Required configuration | Meaning |
 | --- | --- | --- |
@@ -370,8 +402,7 @@ interceptor environment inspect ./environment --json
 ```
 
 Validation parses all referenced service definitions and checks cross-references.
-Sealing writes `environment.lock.json`, including the application digest, an
-asset manifest, and a deterministic Environment digest. Inspect verifies the
-current directory against that lock. Any behaviorally relevant change requires
-review and resealing.
-
+Sealing writes `environment.lock.json`, a receipt containing digital
+fingerprints for the application and approved assets. Inspect compares the
+current directory with that receipt. Any change that could affect behavior
+requires review and resealing.

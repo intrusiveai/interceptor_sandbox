@@ -16,12 +16,19 @@ default data root).
 
 ## Blueprint does not validate
 
+Validation is intentionally strict because an incomplete Blueprint could let a
+test contact the wrong service, save incomplete state, or produce misleading
+evidence. The error usually identifies the exact field; the list below explains
+the most common underlying problems.
+
 Common causes:
 
-- the image is tagged but not pinned as `name@sha256:<digest>`;
+- the image has a changeable tag but is not locked to an exact fingerprint as
+  `name@sha256:<digest>`;
 - `reviewed_by` or `reviewed_at` is missing;
-- `MODEL_BASE_URL` or `application_listen` is not HTTP loopback;
-- a non-loopback `*_BASE_URL` hostname is not declared by a service;
+- `MODEL_BASE_URL` or `application_listen` is not a local-only HTTP address;
+- a `*_BASE_URL` hostname points somewhere other than a declared simulated
+  service;
 - a credential-looking variable lacks a matching synthetic credential entry;
 - a writable seed is outside `mutable_roots`;
 - mutable roots overlap or use a reserved system path;
@@ -86,9 +93,10 @@ separate application integration problems from upstream provider behavior.
 
 ## Unix bridge fails on macOS or Docker Desktop
 
-This is expected. A Unix socket inode exposed through a Docker Desktop bind
-mount does not reliably carry the original kernel endpoint. Remove
-`--bridge-transport unix` or set `--bridge-transport spool`.
+This is expected. Unix sockets depend on an operating-system communication
+endpoint that Docker Desktop's shared filesystem cannot reliably carry between
+macOS and its Linux virtual machine. Remove `--bridge-transport unix` or set
+`--bridge-transport spool`, which uses portable regular files.
 
 Unix mode has no automatic fallback. On Linux, confirm the Docker daemon is
 local, the session directory is a native shared filesystem, and the CLI and
@@ -98,12 +106,14 @@ container share the same kernel before selecting it.
 
 Check whether the attached `run`/`restore` host process is still alive; it owns
 the relays and provider connector. Then inspect session phase and container
-state. A canceled caller may leave transient files briefly, but cancellation
-markers and orphan cleanup should remove them without replaying a mutation.
+state. A canceled caller may leave short-lived request files briefly, but
+cancellation handling and cleanup should remove them without repeating an
+action that changes state.
 
-If the process or machine crashed, restart from a published checkpoint rather
-than assuming an in-flight request completed. Never manually move a frame from
-`processing` back to `requests`.
+If the process or machine crashed, restart from a completed snapshot rather than
+assuming a request that was in progress finished. Never manually move a request
+file back into the pending directory; doing so could repeat an action that
+already changed state.
 
 ## Synthetic service returns `501 coverage_gap`
 
@@ -123,30 +133,32 @@ rebuild, and start a new session. Do not add general network as a fallback.
 Likely causes are:
 
 - `snapshot_capable` is false or the snapshot limit is exhausted;
-- the quiesce endpoint did not return 2xx;
+- the application did not confirm that it finished saving pending work;
 - the command or signal readiness condition timed out;
-- a background writer changed a mutable root between stability scans;
-- content exceeded the blob limit; or
+- a background task kept changing a saved folder while Interceptor was checking
+  it;
+- changed content exceeded the configured size limit; or
 - an unsupported file type appeared in a mutable root.
 
-Fix quiescence rather than retrying indefinitely. A failed request does not
-publish a checkpoint. Verify the current session logs and create a new snapshot
-only after the application reaches a known stable state.
+Fix the application's save/flush behavior rather than retrying indefinitely. A
+failed request does not create a usable checkpoint. Check the current session
+logs and try again only after the application can reach a known stable state.
 
 ## Restore refuses a checkpoint
 
-Restore intentionally fails closed when:
+Restore refuses to guess or ignore missing state. It stops when:
 
 - the checkpoint belongs to another session;
 - the Environment directory or wrapper lock changed;
-- a journal entry, checkpoint, manifest, or blob is missing or modified;
+- a saved history entry, checkpoint, file list, or saved file body is missing or
+  modified;
 - the checkpoint's Interceptor version or journal schema differs from the
   running binary; or
-- replayed files do not produce the pinned final manifest digest.
+- rebuilt files do not match the fingerprint recorded in the snapshot.
 
 Run `interceptor logs verify <source-session-id>`. Keep the original Sealed
-Environment, application lock/image, source journal, checkpoint, and referenced
-blobs together for as long as restore is required.
+Environment, application lock/image, source state history, checkpoint, and
+referenced saved file content together for as long as restore is required.
 
 ## Evidence export is refused
 
@@ -158,5 +170,4 @@ interceptor logs export <session-id> --output ./evidence.tar
 ```
 
 If verification fails, preserve the data root for investigation. Do not edit the
-JSONL files or checkpoint JSON to force an export.
-
+line-oriented JSON history files or checkpoint JSON to force an export.

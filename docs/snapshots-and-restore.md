@@ -1,61 +1,73 @@
 # Snapshots and restore
 
-Interceptor snapshots are logical restore points, not disk clones and not
-process checkpoints. The closest analogy is a database backup plus transaction
-log: the Sealed Environment is the known base, the state journal is the ordered
-change record, content-addressed blobs hold changed file bytes, and a checkpoint
-pins the exact committed position to restore.
+Interceptor snapshots are saved restore points. They let a tester return to a
+known moment in an experiment or create multiple independent test branches from
+that moment.
+
+Interceptor does not copy an entire disk or freeze a running process. Instead,
+it starts with the approved Environment Blueprint and records the meaningful
+changes made during a session. The closest analogy is restoring a database from
+a backup and its transaction history: begin with known starting data, then
+reapply each saved change in order.
+
+Internally, that ordered history is called the **state journal**. Larger changed
+files are stored separately and referred to by their digital fingerprint. A
+small **checkpoint** records exactly how far through the history a snapshot
+includes.
 
 This design is useful because the important question in an agent security test
 is usually “can I reproduce and branch from this meaningful application state?”
 rather than “can I reproduce every kernel page and open socket?” Logical state
-is portable, inspectable, integrity-verifiable, and substantially simpler than
-volume snapshots, copy-on-write filesystems, CRIU, or infrastructure-specific
-cloning.
+is portable, can be inspected and checked for changes, and is substantially
+simpler than copying a complete storage volume or freezing every detail of a
+running process.
 
 ## What is captured
 
-A checkpoint covers state committed through one journal position:
+A checkpoint includes the persistent information needed to rebuild the synthetic
+environment at that moment:
 
-- mutations to `stateful_http` resources;
-- injection definitions, deletion, consumption, and delivery state;
-- filesystem creates, updates, symlinks, and deletes under declared
-  `mutable_roots`, captured as deltas at snapshot boundaries;
-- consumed turn/token/snapshot budgets;
-- sticky oracle state;
-- the fixed virtual clock state;
-- Environment and application digests;
-- final mutable-filesystem manifest digest; and
-- the source event-log position and tool version/schema identity.
+- records created, changed, or deleted in simulated stateful services;
+- active injections and whether a one-time injection was already used;
+- files created, changed, linked, or deleted in folders declared as saved
+  application state (`mutable_roots`);
+- consumed usage limits, such as turns and model tokens;
+- oracle results that had already fired;
+- the configured virtual time; and
+- fingerprints and version information needed to prove which application,
+  environment, files, and history were used.
 
-Changed regular-file bodies are deduplicated in the shared SHA-256 blob store.
-The journal refers to their digest, size, mode, and absolute container path.
+Changed file contents are stored once in a shared area, even if more than one
+snapshot uses the same content. The journal records where each file belongs and
+refers to its stored content by digital fingerprint.
 
 ## What is not captured
 
-A snapshot does not contain:
+A snapshot does not contain temporary details of the currently running process:
 
-- process memory, threads, stacks, or CPU state;
-- open files, locks, sockets, or active HTTP connections;
-- application caches that were not externalized;
+- information held only in application memory;
+- running tasks, open files, locks, or active network connections;
+- application caches that were not saved to declared storage;
 - writes outside declared mutable roots;
 - temporary filesystem contents;
 - undeclared external service state;
 - the model provider credential; or
 - a promise that later stochastic model responses will be identical.
 
-Restore always starts a fresh application process. A snapshot-capable
-application must be designed to reconstruct all required runtime state from the
-captured persistent contract.
+Restore always starts the application again as a fresh process. This is similar
+to restarting an application after a clean shutdown: anything the application
+needs afterward must have been saved to one of the declared persistent
+locations.
 
 ## The journal and checkpoint
 
-The state journal is append-only JSONL. Each transaction contains a sequence,
-reason, ordered operations, previous hash, and hash. Managed service and
-injection mutations use write-ahead semantics: the transaction is synced before
-the live state is changed.
+The state journal is a file containing one JSON change record per line. New
+records are added to the end. Each record points back to the previous one, which
+makes missing, reordered, or edited entries detectable. Interceptor writes a
+managed service or injection change to this file before changing the live
+environment, reducing the chance that saved history and live state disagree.
 
-A checkpoint is a small JSON manifest containing:
+A checkpoint is a small JSON receipt containing:
 
 ```json
 {
@@ -78,8 +90,9 @@ A checkpoint is a small JSON manifest containing:
 }
 ```
 
-The checkpoint is published last. Its hash and all referenced chain positions
-must verify before restore.
+The checkpoint becomes usable only after all other snapshot data has been saved.
+Before restore, Interceptor checks the checkpoint's digital fingerprint and all
+history positions it references.
 
 ## Snapshot creation
 
@@ -95,31 +108,41 @@ curl -sS -X POST "$CONTROL_URL/v1/snapshots" \
   --data '{"label":"before-untrusted-input"}'
 ```
 
-The coordinator:
+From the operator's point of view, Interceptor asks the application to save
+pending work, confirms that its saved files have stopped changing, records the
+changes, and then lets the application continue. The application is paused only
+briefly near the end.
+
+Under the hood, the coordinator:
 
 1. verifies that snapshots are enabled and within the configured limit;
-2. serializes control work and blocks new application/service activity;
-3. marks the session `quiescing`;
-4. runs the declared application quiesce protocol;
+2. temporarily prevents another administrative action or application request
+   from changing state at the same time;
+3. marks the session `quiescing` (preparing for a safe save);
+4. asks the application to finish and save pending work using its configured
+   quiescence method;
 5. flushes the event recorder;
-6. scans all mutable roots twice, 100 ms apart, and requires identical digests;
-7. pauses the application process group for the final scan;
-8. computes the delta from the previous file manifest and stores changed bodies
-   as blobs;
-9. appends filesystem operations and snapshot state to the durable journal;
-10. writes the current file manifest;
-11. evaluates and captures budget, oracle, and clock state;
-12. writes the hashed checkpoint; and
-13. records `snapshot_ready`, resumes the application, and returns the session
-    to `running`.
+6. checks all saved application folders twice, 100 ms apart, and requires the
+   same result both times;
+7. briefly pauses the application for one final check;
+8. determines which files changed since the last snapshot and saves their
+   contents;
+9. records the file changes and other restorable state in the state journal;
+10. saves the complete list and fingerprints of current files;
+11. records current usage limits, oracle results, and virtual time;
+12. writes the checkpoint and its digital fingerprint; and
+13. records that the snapshot is ready, resumes the application, and returns
+    the session to `running`.
 
-If quiescence fails or the two scans differ, the request fails without
-publishing a checkpoint. Existing state and earlier committed journal entries
-remain valid. Interceptor does not pretend that an unstable boundary succeeded.
+If the application cannot finish saving or files continue to change between the
+two checks, the request fails without creating a usable checkpoint. The running
+session and earlier snapshots remain valid. Interceptor reports the problem
+instead of producing a snapshot that might be incomplete.
 
-Filesystem writes between snapshots are not continuously journaled. Therefore
-the mechanism is not crash recovery for arbitrary unsnapshotted writes. The
-most recent published checkpoint is the recovery boundary.
+File changes are collected when a snapshot is requested, not continuously.
+Therefore, work performed after the latest successful snapshot can be lost if
+the session crashes. The latest successful checkpoint is the latest state that
+Interceptor promises it can rebuild.
 
 ## Restore
 
@@ -136,21 +159,22 @@ configuration are deliberately absent from snapshots.
 Before starting anything, restore verifies:
 
 - the checkpoint hash and source-session identity;
-- exact Interceptor and journal schema compatibility;
-- Environment and application digests;
+- the saved data format is supported by this Interceptor version;
+- the Environment and application fingerprints still match;
 - the currently available Sealed Environment and wrapper-image lock;
 - the source journal's sequence and hash chain through the checkpoint; and
-- every referenced filesystem blob.
+- every saved file body is present and unchanged.
 
-It then:
+It then creates a new session, copies the original starting files, and reapplies
+saved changes in order. More precisely, it:
 
-1. creates a new session ID and new generation directory;
-2. materializes fresh writable seeds from the Sealed Environment;
+1. creates a new session ID and private writable folder;
+2. copies fresh starting files from the Sealed Environment;
 3. creates a new event log and state journal;
-4. replays committed managed-state operations through the checkpoint into that
-   new journal;
+4. reapplies successfully recorded service, injection, budget, oracle, and clock
+   changes through the checkpoint;
 5. applies file operations to the new mutable roots;
-6. rescans and requires the resulting manifest digest to match the checkpoint;
+6. checks that the rebuilt files have the fingerprint recorded by the snapshot;
 7. records `restored_from` ancestry; and
 8. starts a fresh container and application process, then waits for health.
 
@@ -159,8 +183,8 @@ session becomes healthy.
 
 ## Branching and experimental value
 
-Restoring the same checkpoint twice creates two independent sessions and future
-journals. This enables controlled branches such as:
+Restoring the same checkpoint twice creates two independent sessions. Changes
+made in one do not affect the other. This enables controlled branches such as:
 
 - restore “before injection,” apply payload A in one branch and B in another;
 - preserve a post-compromise state, then test different follow-on inputs;
@@ -179,16 +203,16 @@ deterministic mock/recorded provider.
 
 Before setting `snapshot_capable: true`, verify all of the following:
 
-- every durable write is under a declared mutable root or managed stateful
-  service;
+- every value the application needs after restart is saved under a declared
+  mutable root or in a managed stateful service;
 - read-only and writable seeds are classified correctly;
-- the quiesce hook flushes buffered writes and background workers;
+- the configured quiescence action finishes buffered writes and background
+  work;
 - startup can reconstruct state without an earlier process;
 - no required state lives only in `/tmp`, memory, or an external system;
 - mutable roots do not overlap or contain system paths; and
-- a golden mutate → snapshot → restore test checks actual application behavior,
-  not just file existence.
+- a full change → snapshot → restore test confirms that the application behaves
+  correctly afterward, not merely that expected files exist.
 
 If these conditions cannot be met, keep the application runnable with
 `snapshot_capable: false`; that is more accurate than an incomplete snapshot.
-

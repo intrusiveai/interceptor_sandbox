@@ -5,17 +5,24 @@ The caller creates every injection payload; the sandbox matches and places it,
 records delivery, evaluates sealed oracles, and reports outcomes. It does not
 generate attacks or reveal evaluation verdicts to the application.
 
+For example, a tester might add malicious instructions to the result returned
+by a support-ticket tool, then check whether the agent sends a synthetic secret
+to an attacker-controlled endpoint. Interceptor controls where the added text
+appears, records whether it reached the model, and evaluates the predefined
+success condition.
+
 ## Injection surfaces and modes
 
 | Surface | Required mode | Effect |
 | --- | --- | --- |
-| `model_tool_result` | `simulation` | Rewrites matching tool-result content only while a model request passes through the inference proxy. Persistent environment state is unchanged. |
-| `environment_state` | `fidelity` | Mutates an existing managed service resource or regular file in a declared mutable root, then journals the mutation. The application observes it through its normal data path. |
+| `model_tool_result` | `simulation` | Temporarily changes a matching tool result immediately before it is sent to the model. Stored environment data is unchanged. |
+| `environment_state` | `fidelity` | Changes a real record or saved file in the synthetic environment. The application later reads that change through its normal code path. |
 
-Simulation is useful for cheap, precise experiments at a protocol boundary.
-Fidelity is useful when the test depends on the application's real read path,
-caching, parsing, or multi-step behavior. Reports retain the mode so results are
-not conflated.
+Simulation is useful when a tester wants to place content precisely without
+changing setup data. Fidelity is useful when the test should exercise the
+application's real storage reads, caching, parsing, or multi-step behavior.
+Reports retain the mode so readers can tell which kind of test produced a
+result.
 
 ## Definition schema
 
@@ -56,9 +63,9 @@ a positive integer. The other fields narrow the match and are optional:
 - `arguments_contain` requires text containment; and
 - `turn_id` restricts delivery to one known turn.
 
-The proxy looks for an assistant tool call and its corresponding tool-role
-message in an OpenAI-compatible chat-completions request, then changes that
-tool message's `content` before forwarding the request.
+The model proxy finds the named tool call and the message containing its result,
+then changes that result before sending the request to the model provider. The
+application's stored service or file data is not changed.
 
 ### Environment-state selector
 
@@ -115,9 +122,10 @@ content silently.
   `once`, `standing`, or selector `turn_id` are generally easier in the current
   API.
 
-Arming, consumption, deletion, and fidelity state changes are journaled. A
-snapshot therefore restores the definitions and consumption state as of its
-checkpoint.
+Interceptor includes injection creation, one-time use, deletion, and persistent
+environment changes in its saved state history. A restored snapshot therefore
+contains exactly the injections that were active or already consumed at that
+moment.
 
 ## Examples
 
@@ -175,10 +183,11 @@ Post either request to `$CONTROL_URL/v1/injections`.
 
 ## Oracles and outcomes
 
-Oracles are declared in the Sealed Environment, not supplied by the application.
-They inspect verified events, blob content, managed service state, or declared
-mutable files. Once an oracle fires during a session, the result remains sticky
-for later evaluation and is captured at snapshot boundaries.
+An oracle is a predefined rule that checks for concrete evidence of a security
+outcome. Oracles are declared in the Sealed Environment, not supplied by the
+application. They can check recorded requests and responses, simulated service
+records, or saved files. Once an oracle succeeds during a session, later
+evaluation remembers that result, including across a snapshot restore.
 
 `interceptor evaluate <session-id>` returns:
 
@@ -216,15 +225,15 @@ Outcomes distinguish:
 - `SUCCEEDED_DELIVERY_UNOBSERVABLE`: an oracle fired when that injection's
   delivery could not be observed directly.
 
-Delivery confirmation occurs at the inference proxy when the final provider
-request contains the injected content. Merely arming or applying a persistent
-mutation is not reported as confirmed delivery.
+Delivery is confirmed only when Interceptor sees the injected content in the
+final request being sent to the model provider. Merely preparing an injection or
+changing an environment record does not prove that the agent actually read and
+used that content.
 
 ## Coverage gaps
 
-Fixture misses and undeclared stateful service routes fail closed and record a
-coverage-gap event. `interceptor coverage` reports their event references.
-Treat a gap as evidence that the Blueprint does not yet model a dependency; add
-and review the missing capability instead of replacing it with a permissive
-network fallback.
-
+If the application makes a request that no simulated service rule understands,
+Interceptor rejects it and records a coverage gap. `interceptor coverage`
+reports those events. A gap means the Blueprint does not yet simulate something
+the application expected. Add and review that missing behavior instead of
+allowing the application to reach an unknown real service.
