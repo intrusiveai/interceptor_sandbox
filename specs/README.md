@@ -30,6 +30,13 @@ Current decisions:
 - [`0003-host-model-provider-adapters.md`](decisions/0003-host-model-provider-adapters.md)
   — preserve native application model APIs while keeping all real provider
   access behind compatible host adapters.
+- [`0004-modular-application-interfaces.md`](decisions/0004-modular-application-interfaces.md)
+  — adapt HTTP, CLI, REPL, code-level, and custom application entry points to
+  one operation contract inside the sandbox.
+- [`0005-synthetic-identity-and-delegation.md`](decisions/0005-synthetic-identity-and-delegation.md)
+  — simulate workload credentials and delegated users inside each session,
+  without proxying a real identity provider or preserving bearer tokens in
+  snapshots.
 
 ## Change discipline
 

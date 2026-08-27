@@ -318,6 +318,9 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 	for _, service := range blueprint.AttackerServices {
 		hostnames = append(hostnames, service.Hostnames...)
 	}
+	for _, issuer := range blueprint.Identity.Issuers {
+		hostnames = append(hostnames, issuer.Hostnames...)
+	}
 	containerID, err := config.Docker.Run(ctx, ociruntime.RunConfig{
 		Name: containerName, Image: applicationLock.WrapperImage, User: "0:0",
 		Environment: map[string]string{
@@ -334,7 +337,7 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		_ = session.Save(paths.Metadata, metadata)
 		return metadata, err
 	}
-	if err := waitReady(ctx, paths.Metadata, config.Docker, containerID, time.Duration(blueprint.Application.IO.StartupTimeoutMS)*time.Millisecond); err != nil {
+	if err := waitReady(ctx, paths.Metadata, config.Docker, containerID, time.Duration(blueprint.Application.Interface.StartupTimeoutMS)*time.Millisecond); err != nil {
 		logs, _ := config.Docker.Logs(context.Background(), containerID)
 		metadata.Phase, metadata.TerminationReason = session.Error, err.Error()
 		_ = session.Save(paths.Metadata, metadata)
@@ -355,7 +358,7 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		applicationServer = unixProxyServer(applicationListener, filepath.Join(paths.Sockets, "application.sock"), nil)
 		controlServer = unixProxyServer(controlListener, filepath.Join(paths.Sockets, "control.sock"), cooperativeRoute)
 	} else {
-		client, clientErr := bridge.NewHTTPSpoolClient(filepath.Join(paths.Sockets, "http-spool"), blueprint.Limits.MaxBlobBytes, time.Duration(blueprint.Application.IO.TurnTimeoutMS)*time.Millisecond)
+		client, clientErr := bridge.NewHTTPSpoolClient(filepath.Join(paths.Sockets, "http-spool"), blueprint.Limits.MaxBlobBytes, time.Duration(blueprint.Application.Interface.TurnTimeoutMS)*time.Millisecond)
 		if clientErr != nil {
 			return metadata, clientErr
 		}
@@ -586,7 +589,7 @@ func cooperativeRoute(request *http.Request) bool {
 	if request.Method == http.MethodGet && (path == "/v1/status" || path == "/v1/injections" || path == "/v1/snapshots" || path == "/v1/events" || strings.HasPrefix(path, "/v1/turns/") || strings.HasPrefix(path, "/v1/snapshots/") || strings.HasPrefix(path, "/v1/attacker/")) {
 		return true
 	}
-	if request.Method == http.MethodPost && (path == "/v1/turns" || path == "/v1/injections" || path == "/v1/snapshots") {
+	if request.Method == http.MethodPost && (path == "/v1/turns" || path == "/v1/injections" || path == "/v1/snapshots" || path == "/v1/identity/caller-tokens") {
 		return true
 	}
 	return request.Method == http.MethodDelete && strings.HasPrefix(path, "/v1/injections/")

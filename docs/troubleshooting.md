@@ -26,7 +26,8 @@ Common causes:
 - the image has a changeable tag but is not locked to an exact fingerprint as
   `name@sha256:<digest>`;
 - `reviewed_by` or `reviewed_at` is missing;
-- `MODEL_BASE_URL` or `application_listen` is not a local-only HTTP address;
+- `MODEL_BASE_URL` or `application.interface.http.listen` is not a local-only
+  HTTP address;
 - a `*_BASE_URL` hostname points somewhere other than a declared simulated
   service;
 - a credential-looking variable lacks a matching synthetic credential entry;
@@ -41,6 +42,13 @@ Common causes:
 
 Use `environment validate --json` to inspect the asset list once validation
 succeeds.
+
+Blueprints from the earlier alpha schema used `application.io`, `adapter`,
+`application_listen`, and `served_routes`. Those fields are intentionally not
+accepted as aliases because sealing must have one unambiguous format. Move them
+to `application.interface`, `kind`, `http.listen`, and named `operations` as
+shown in [Application interfaces](application-interfaces.md), then seal and
+rebuild the wrapper image.
 
 ## Wrapper image is missing or stale
 
@@ -62,17 +70,34 @@ Confirm Docker Desktop or the Docker daemon is running and that the current user
 can execute `docker info`. Unit tests can run without Docker, but `app build`,
 `app verify`, `run`, and `restore` need the daemon.
 
-## Session health check times out
+## Application readiness times out
 
 Check that:
 
 - `launch.command` and `workdir` exist in the application image;
-- the application binds exactly to `application_listen`, not `0.0.0.0` or a
-  different port;
-- `health_path` returns 2xx without external dependencies;
+- an HTTP application binds exactly to `application.interface.http.listen`, not
+  `0.0.0.0` or a different port, and `health_path` returns 2xx without external
+  dependencies;
+- a stdio/REPL `ready_pattern` matches the text actually written by the
+  application, including spaces at the end of a prompt;
+- a code module can be imported from `workdir`, or an external adapter writes a
+  valid `ready` frame to stdout;
 - `startup_timeout_ms` is long enough and positive;
 - the application user can read its image content and writable seed; and
 - application logs do not show an undeclared network or file dependency.
+
+## Application operation hangs or ends too early
+
+For stdio and REPL applications, compare the captured application output with
+the configured completion rule. Prefer a definite prompt or delimiter over
+`idle`, which can mistake a natural pause for the end of a response. A PTY may
+echo submitted input; enable `strip_echo` if that text should not be returned.
+
+For commands, confirm the input is valid for the selected `stdin` mode, every
+JSON Pointer used by `arguments.from` exists, and the actual exit status appears
+in `success_exit_codes`. For external adapters, stdout must contain only one
+JSON protocol frame per line; send diagnostics to stderr and correlate results
+by invocation ID.
 
 ## Model calls fail
 
@@ -111,10 +136,31 @@ URL rather than the real remote endpoint. Then check that the service has
 `kind: mcp_http`, its `endpoint` matches exactly, and the requested tool and
 arguments have a matching definition.
 
-HTTP `GET`, SSE, sessions, OAuth, resources, prompts, and server-initiated MCP
-messages are not supported in the MVP. An unknown method, tool, or fixture input
-is reported as a coverage gap. See [Simulated MCP services](mcp-services.md)
-for the exact supported subset.
+HTTP `GET` streams, SSE, sessions, interactive OAuth login/PKCE, resources,
+prompts, and server-initiated MCP messages are not supported in the MVP. A
+service may require an already obtained Interceptor synthetic bearer token; if
+so, verify its `authorization`, grant/delegation, audience, and scopes. An
+unknown method, tool, or fixture input is reported as a coverage gap. See
+[Simulated MCP services](mcp-services.md) for the exact supported subset.
+
+## Synthetic identity fails
+
+For autonomous access, confirm that the application received the declared
+OAuth client and token-URL environment variables, requested the protected
+service's exact audience and scopes, and has an active direct grant. For
+delegated access, also confirm that:
+
+- `identity.inbound.audience` names the application agent principal;
+- the harness caller is a declared user owned by the same issuer;
+- the agent exchanges the caller token while authenticating with its own client
+  credentials; and
+- an active delegation covers that user, agent, service, and requested scopes.
+
+An intentionally injected inactive grant, revoked delegation, unavailable
+issuer, rejected exchange, or expired token produces the same kind of failure
+the application would receive from an identity system. Inspect evaluation
+events for the synthetic identity decision; raw tokens and secrets are never
+recorded.
 
 ## Unix bridge fails on macOS or Docker Desktop
 

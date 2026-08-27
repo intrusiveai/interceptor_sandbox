@@ -28,6 +28,8 @@ A checkpoint includes the persistent information needed to rebuild the synthetic
 environment at that moment:
 
 - records created, changed, or deleted in simulated stateful HTTP or MCP services;
+- active synthetic identity grants, delegated-user permissions, and issuer
+  failure settings;
 - active injections and whether a one-time injection was already used;
 - files created, changed, linked, or deleted in folders declared as saved
   application state (`mutable_roots`);
@@ -51,6 +53,8 @@ A snapshot does not contain temporary details of the currently running process:
 - writes outside declared mutable roots;
 - temporary filesystem contents;
 - undeclared external service state;
+- issued access tokens, projected token files, issuer private signing keys, and
+  synthetic AWS session credentials;
 - the model provider credential; or
 - a promise that later stochastic model responses will be identical.
 
@@ -178,8 +182,8 @@ saved changes in order. More precisely, it:
 1. creates a new session ID and private writable folder;
 2. copies fresh starting files from the Sealed Environment;
 3. creates a new event log and state journal;
-4. reapplies successfully recorded service, injection, budget, oracle, and clock
-   changes through the checkpoint;
+4. reapplies successfully recorded service, identity, injection, budget, oracle,
+   and clock changes through the checkpoint;
 5. applies file operations to the new mutable roots;
 6. checks that the rebuilt files have the fingerprint recorded by the snapshot;
 7. records `restored_from` ancestry; and
@@ -187,6 +191,12 @@ saved changes in order. More precisely, it:
 
 The source is unchanged by default. `--stop-source` stops it only after the new
 session becomes healthy.
+
+A restored identity issuer creates a new signing key. Applications retrieve or
+refresh new short-lived credentials, while the restored grants, delegated
+consent, reduced scopes, revocations, and injected issuer failures remain as
+they were at the checkpoint. This preserves the meaningful authorization state
+without carrying an old or expired bearer credential into a new session.
 
 ## Branching and experimental value
 

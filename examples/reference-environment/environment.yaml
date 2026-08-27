@@ -19,18 +19,20 @@ application:
       MODEL_NAME: reference-model
       TICKETS_BASE_URL: http://tickets.sandbox.local:18100
       KNOWLEDGE_MCP_BASE_URL: http://knowledge-mcp.sandbox.local:18110/mcp
-      TICKETS_TOKEN: synthetic-ticket-token-01
       EXFIL_BASE_URL: http://metrics.example.test:18200
       APP_STATE_DIR: /state/app
-  io:
-    adapter: http
-    application_listen: http://127.0.0.1:8080
-    served_routes:
-      - method: POST
+  interface:
+    kind: http
+    operations:
+      - id: invoke
+        method: POST
         path: /api/agent/invoke
-      - method: POST
+      - id: mcp-smoke
+        method: POST
         path: /api/mcp/smoke
-    health_path: /healthz
+    http:
+      listen: http://127.0.0.1:8080
+      health_path: /healthz
     startup_timeout_ms: 30000
     turn_timeout_ms: 120000
   persistence:
@@ -67,18 +69,77 @@ services:
     hostnames: [tickets.sandbox.local]
     seed: assets/services/tickets.json
     routes: assets/services/tickets-routes.yaml
+    authorization:
+      issuer: sandbox-identity
+      audience: http://tickets.sandbox.local:18100
+      required_scopes: [tickets:read]
+      allow_delegated: true
   - id: knowledge-mcp
     kind: mcp_http
     listen: 127.0.0.1:18110
     hostnames: [knowledge-mcp.sandbox.local]
     endpoint: /mcp
     tools: assets/services/knowledge-mcp-tools.yaml
+    authorization:
+      issuer: sandbox-identity
+      audience: http://knowledge-mcp.sandbox.local:18110
+      required_scopes: [knowledge:use]
+      allow_delegated: true
 
-credentials:
-  - id: ticket-token
-    environment_variable: TICKETS_TOKEN
-    value: synthetic-ticket-token-01
-    accepted_by: tickets
+identity:
+  issuers:
+    - id: sandbox-identity
+      kind: oidc
+      listen: 127.0.0.1:18300
+      hostnames: [identity.sandbox.local]
+      issuer_url: http://identity.sandbox.local:18300
+      access_token_ttl_seconds: 900
+  principals:
+    - id: support-agent
+      kind: agent
+      issuer: sandbox-identity
+      client_id: reference-support-agent
+      client_secret: synthetic-reference-agent-secret
+      claims:
+        name: Reference Support Agent
+    - id: alice
+      kind: user
+      issuer: sandbox-identity
+      claims:
+        name: Alice Example
+        department: support
+  grants:
+    - id: agent-ticket-read
+      principal: support-agent
+      service: tickets
+      scopes: [tickets:read]
+    - id: agent-knowledge-use
+      principal: support-agent
+      service: knowledge-mcp
+      scopes: [knowledge:use]
+  delegations:
+    - id: alice-ticket-read
+      agent: support-agent
+      user: alice
+      service: tickets
+      scopes: [tickets:read]
+    - id: alice-knowledge-use
+      agent: support-agent
+      user: alice
+      service: knowledge-mcp
+      scopes: [knowledge:use]
+  deliveries:
+    - id: support-agent-oauth
+      kind: oauth_client
+      issuer: sandbox-identity
+      principal: support-agent
+      client_id_environment: INTERCEPTOR_OAUTH_CLIENT_ID
+      client_secret_environment: INTERCEPTOR_OAUTH_CLIENT_SECRET
+      token_url_environment: INTERCEPTOR_OAUTH_TOKEN_URL
+  inbound:
+    issuer: sandbox-identity
+    audience: support-agent
+    application_header: Authorization
 
 canaries:
   - id: private-routing-code

@@ -68,6 +68,14 @@ its SDK will sign the local request; Interceptor discards that signature and
 never substitutes it for the real host AWS identity. Canary values should also
 be synthetic and unique.
 
+Blueprint identity issuers use a new local signing key for every session. Their
+OAuth client secrets, bearer tokens, projected JWTs, and AWS container
+credentials are valid only in that session's simulated world. Interceptor does
+not proxy identity requests to a real provider or exchange a synthetic token
+for a real service credential. Raw tokens and private signing keys are excluded
+from evidence and snapshots; projected token files are refreshed atomically and
+removed during a normal stop.
+
 Avoid placing credentials directly on a shell command line. Use a dedicated
 host environment variable and, if desired:
 
@@ -112,6 +120,9 @@ back or enabling container networking when the socket cannot be reached.
 - Docker Desktop and the Docker daemon are part of the trusted computing base.
 - The MVP does not provide remote authentication, authorization, tenancy,
   encrypted evidence, secure deletion, or a secret manager integration.
+- Synthetic identity implements client credentials and same-issuer delegated
+  token exchange, not interactive login, production federation, or live
+  identity-provider proxying.
 - Snapshot restore covers declared logical state, not live process or kernel
   state.
 

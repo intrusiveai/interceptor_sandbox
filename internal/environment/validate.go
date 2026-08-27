@@ -40,6 +40,7 @@ func Validate(directory string) (*ValidationReport, error) {
 			failures = append(failures, err)
 		}
 	}
+	assetSources := []string{}
 
 	if blueprint.APIVersion != APIVersion {
 		add(fmt.Errorf("api_version must be %q", APIVersion))
@@ -82,24 +83,11 @@ func Validate(directory string) (*ValidationReport, error) {
 	} else {
 		add(validateLoopbackURL("application.launch.environment.MODEL_BASE_URL", modelBaseURL))
 	}
-	if blueprint.Application.IO.Adapter != "http" {
-		add(fmt.Errorf("application.io.adapter %q is unsupported; MVP requires http", blueprint.Application.IO.Adapter))
+	for _, err := range validateApplicationInterface(blueprint.Application.Interface) {
+		add(err)
 	}
-	add(validateLoopbackURL("application.io.application_listen", blueprint.Application.IO.ApplicationListen))
-	if len(blueprint.Application.IO.ServedRoutes) == 0 {
-		add(errors.New("application.io.served_routes must not be empty"))
-	}
-	seenRoutes := map[string]struct{}{}
-	for i, route := range blueprint.Application.IO.ServedRoutes {
-		method := strings.ToUpper(strings.TrimSpace(route.Method))
-		if method == "" || !strings.HasPrefix(route.Path, "/") {
-			add(fmt.Errorf("application.io.served_routes[%d] requires method and absolute path", i))
-		}
-		key := method + " " + route.Path
-		if _, exists := seenRoutes[key]; exists {
-			add(fmt.Errorf("duplicate served route %s", key))
-		}
-		seenRoutes[key] = struct{}{}
+	if blueprint.Application.Interface.External != nil && blueprint.Application.Interface.External.ConfigAsset != "" {
+		assetSources = append(assetSources, blueprint.Application.Interface.External.ConfigAsset)
 	}
 
 	mutableRoots := map[string]struct{}{}
@@ -123,9 +111,11 @@ func Validate(directory string) (*ValidationReport, error) {
 			add(errors.New("snapshot-capable application requires mutable_roots or quiesce.kind none"))
 		}
 		add(validateQuiesce(blueprint.Application.Persistence.Quiesce))
+		if blueprint.Application.Interface.Adapter == "command" && blueprint.Application.Persistence.Quiesce.Kind != "none" && blueprint.Application.Persistence.Quiesce.Kind != "command" {
+			add(errors.New("command application interfaces support only command or none quiescence"))
+		}
 	}
 
-	assetSources := []string{}
 	for i, seed := range blueprint.Filesystem.Seed {
 		if strings.TrimSpace(seed.Source) == "" {
 			add(fmt.Errorf("filesystem.seed[%d].source is required", i))
@@ -186,6 +176,10 @@ func Validate(directory string) (*ValidationReport, error) {
 			}
 		}
 	}
+	identityResult, identityFailures := validateIdentity(blueprint, serviceIDs, hostnames, listens)
+	for _, identityFailure := range identityFailures {
+		add(identityFailure)
+	}
 
 	attackerIDs := map[string]struct{}{}
 	for i, service := range blueprint.AttackerServices {
@@ -193,6 +187,9 @@ func Validate(directory string) (*ValidationReport, error) {
 		add(validateID(prefix+".id", service.ID, attackerIDs))
 		if _, duplicate := serviceIDs[service.ID]; duplicate {
 			add(fmt.Errorf("%s.id %q conflicts with a synthetic service", prefix, service.ID))
+		}
+		if _, duplicate := identityResult.issuerIDs[service.ID]; duplicate {
+			add(fmt.Errorf("%s.id %q conflicts with an identity issuer", prefix, service.ID))
 		}
 		if service.Kind != "http_sink" {
 			add(fmt.Errorf("%s.kind %q is unsupported", prefix, service.Kind))
@@ -382,6 +379,169 @@ func ApplicationDigest(image string) (string, error) {
 		return "", errors.New("application.image must be an immutable OCI reference ending in @sha256:<64 lowercase hex>")
 	}
 	return image[index+1:], nil
+}
+
+func validateApplicationInterface(value ApplicationInterface) []error {
+	var failures []error
+	add := func(err error) {
+		if err != nil {
+			failures = append(failures, err)
+		}
+	}
+	if value.StartupTimeoutMS <= 0 || value.StartupTimeoutMS > 10*60*1000 {
+		add(errors.New("application.interface.startup_timeout_ms must be between 1 and 600000"))
+	}
+	if value.TurnTimeoutMS <= 0 || value.TurnTimeoutMS > 10*60*1000 {
+		add(errors.New("application.interface.turn_timeout_ms must be between 1 and 600000"))
+	}
+	if len(value.Operations) == 0 {
+		add(errors.New("application.interface.operations must not be empty"))
+	}
+	seenIDs, seenRoutes := map[string]struct{}{}, map[string]struct{}{}
+	for index, operation := range value.Operations {
+		prefix := fmt.Sprintf("application.interface.operations[%d]", index)
+		add(validateID(prefix+".id", operation.ID, seenIDs))
+		if value.Adapter == "http" {
+			method := strings.ToUpper(strings.TrimSpace(operation.Method))
+			if method == "" || operation.Path == "" || !strings.HasPrefix(operation.Path, "/") || path.Clean(operation.Path) != operation.Path || strings.ContainsAny(operation.Path, "\x00\r\n?#") {
+				add(fmt.Errorf("%s requires an HTTP method and clean absolute path", prefix))
+			}
+			key := method + " " + operation.Path
+			if _, exists := seenRoutes[key]; exists {
+				add(fmt.Errorf("duplicate application HTTP route %s", key))
+			}
+			seenRoutes[key] = struct{}{}
+		} else if operation.Method != "" || operation.Path != "" {
+			add(fmt.Errorf("%s method/path are valid only for the HTTP interface", prefix))
+		}
+		for bindingIndex, binding := range operation.Arguments {
+			if value.Adapter != "command" {
+				add(fmt.Errorf("%s.arguments are valid only for the command interface", prefix))
+				break
+			}
+			if (binding.Literal == "") == (binding.From == "") || binding.From != "" && !strings.HasPrefix(binding.From, "/") {
+				add(fmt.Errorf("%s.arguments[%d] requires exactly one literal or JSON Pointer from", prefix, bindingIndex))
+			}
+		}
+	}
+	configured := 0
+	for _, present := range []bool{value.HTTP != nil, value.Command != nil, value.Stdio != nil, value.External != nil, value.Code != nil} {
+		if present {
+			configured++
+		}
+	}
+	if configured != 1 {
+		add(errors.New("application.interface requires exactly one matching adapter configuration"))
+	}
+	switch value.Adapter {
+	case "http":
+		if value.HTTP == nil {
+			add(errors.New("application.interface.http is required for kind http"))
+		} else {
+			add(validateLoopbackURL("application.interface.http.listen", value.HTTP.Listen))
+			if value.HTTP.HealthPath != "" && (!strings.HasPrefix(value.HTTP.HealthPath, "/") || path.Clean(value.HTTP.HealthPath) != value.HTTP.HealthPath) {
+				add(errors.New("application.interface.http.health_path must be a clean absolute path"))
+			}
+		}
+	case "command":
+		if value.Command == nil {
+			add(errors.New("application.interface.command is required for kind command"))
+		} else {
+			stdin := value.Command.Stdin
+			if stdin == "" {
+				stdin = "raw"
+			}
+			if stdin != "raw" && stdin != "json" && stdin != "none" {
+				add(errors.New("application.interface.command.stdin must be raw, json, or none"))
+			}
+			if value.Command.Concurrency < 0 || value.Command.Concurrency > 32 {
+				add(errors.New("application.interface.command.concurrency must be between 0 and 32"))
+			}
+			seenExitCodes := map[int]struct{}{}
+			for _, code := range value.Command.SuccessCodes {
+				if code < 0 || code > 255 {
+					add(errors.New("application.interface.command.success_exit_codes must contain values from 0 through 255"))
+				}
+				if _, exists := seenExitCodes[code]; exists {
+					add(fmt.Errorf("application.interface.command.success_exit_codes contains duplicate %d", code))
+				}
+				seenExitCodes[code] = struct{}{}
+			}
+			if strings.ContainsAny(value.Command.OutputMediaType, "\x00\r\n") {
+				add(errors.New("application.interface.command.output_media_type contains forbidden control characters"))
+			}
+		}
+	case "stdio", "repl":
+		if value.Stdio == nil {
+			add(fmt.Errorf("application.interface.stdio is required for kind %s", value.Adapter))
+		} else {
+			transport := value.Stdio.Transport
+			if transport == "" {
+				transport = map[bool]string{true: "pty", false: "pipes"}[value.Adapter == "repl"]
+			}
+			if transport != "pipes" && transport != "pty" {
+				add(errors.New("application.interface.stdio.transport must be pipes or pty"))
+			}
+			mode := value.Stdio.ResponseMode
+			if mode == "" {
+				mode = "line"
+			}
+			if mode != "line" && mode != "delimiter" && mode != "prompt" && mode != "idle" {
+				add(errors.New("application.interface.stdio.response_mode must be line, delimiter, prompt, or idle"))
+			}
+			if mode == "delimiter" && value.Stdio.Delimiter == "" || mode == "prompt" && value.Stdio.TerminalPattern == "" {
+				add(fmt.Errorf("application.interface.stdio.%s completion value is required", mode))
+			}
+			for name, pattern := range map[string]string{"ready_pattern": value.Stdio.ReadyPattern, "terminal_pattern": value.Stdio.TerminalPattern} {
+				if pattern != "" {
+					if _, err := regexp.Compile(pattern); err != nil {
+						add(fmt.Errorf("application.interface.stdio.%s is invalid: %w", name, err))
+					}
+				}
+			}
+			if value.Stdio.IdleMS < 0 || value.Stdio.IdleMS > 60000 {
+				add(errors.New("application.interface.stdio.idle_ms must be between 0 and 60000"))
+			}
+			if strings.ContainsRune(value.Stdio.InputSuffix, '\x00') || strings.ContainsAny(value.Stdio.OutputMediaType, "\x00\r\n") {
+				add(errors.New("application.interface.stdio contains forbidden control characters"))
+			}
+		}
+	case "external":
+		if value.External == nil || value.External.Protocol != "interceptor.application/v1" {
+			add(errors.New("external interface requires protocol interceptor.application/v1"))
+		} else if value.External.Concurrency < 0 || value.External.Concurrency > 32 {
+			add(errors.New("application.interface.external.concurrency must be between 0 and 32"))
+		}
+	case "code":
+		if value.Code == nil {
+			add(errors.New("application.interface.code is required for kind code"))
+		} else {
+			if value.Code.Language != "python" && value.Code.Language != "node" {
+				add(errors.New("application.interface.code.language must be python or node"))
+			}
+			if strings.TrimSpace(value.Code.Module) == "" || strings.TrimSpace(value.Code.Invoke) == "" {
+				add(errors.New("application.interface.code.module and invoke are required"))
+			}
+			if strings.ContainsAny(value.Code.Module+value.Code.Initialize+value.Code.Invoke, "\x00\r\n") {
+				add(errors.New("application.interface.code names contain forbidden control characters"))
+			}
+			if value.Code.InputMode != "" && value.Code.InputMode != "single" && value.Code.InputMode != "kwargs" {
+				add(errors.New("application.interface.code.input_mode must be single or kwargs"))
+			}
+			if value.Code.Language == "node" && value.Code.InputMode == "kwargs" {
+				add(errors.New("application.interface.code.input_mode kwargs is supported only for Python"))
+			}
+			if value.Code.Concurrency < 0 || value.Code.Concurrency > 32 {
+				add(errors.New("application.interface.code.concurrency must be between 0 and 32"))
+			}
+			if value.Code.Language == "python" && value.Code.Concurrency > 1 {
+				add(errors.New("application.interface.code.concurrency greater than 1 is unsupported for Python"))
+			}
+		}
+	default:
+		add(fmt.Errorf("application.interface.kind %q is unsupported", value.Adapter))
+	}
+	return failures
 }
 
 func validateQuiesce(value QuiesceConfig) error {

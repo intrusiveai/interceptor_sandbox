@@ -21,13 +21,16 @@ More specifically, Interceptor Sandbox lets a security tester run an agentic
 application against a small, reviewable simulated world without giving the
 application ordinary network access. The world can include files, services with
 predefined responses, services whose records can change, fake credentials,
-recognizable test secrets called canaries, and endpoints that capture attempted
-data theft. Model calls pass through a narrow connection on the host so real
-provider credentials never enter the container.
+synthetic agent and user identities, recognizable test secrets called canaries,
+and endpoints that capture attempted data theft. Model calls pass through a
+narrow connection on the host so real provider credentials never enter the
+container.
 
 The project is intended for repeatable security experiments such as:
 
 - checking whether untrusted model or tool content changes application behavior;
+- checking whether an agent preserves a delegated user's identity and stays
+  within its synthetic permissions;
 - measuring whether synthetic secrets reach output, a model request, or an
   attacker sink;
 - comparing content changed only on its way to the model with content changed in
@@ -51,6 +54,8 @@ Inside the container, the supervisor starts:
 
 - the onboarded application as a non-root process;
 - simulated services with predefined or changeable data;
+- a synthetic identity issuer that can grant, exchange, and verify short-lived
+  local credentials;
 - endpoints that capture attempted data theft;
 - a model proxy that understands the supported native application APIs; and
 - private application and control bridge endpoints.
@@ -64,7 +69,9 @@ AWS credentials remain on the host.
 While `run` or `restore` remains open, the host process exposes two local-only
 URLs that do not require passwords:
 
-- the **application URL** forwards only Blueprint-declared application routes;
+- the **application URL** exposes only Blueprint-declared application
+  operations, using native paths for HTTP applications and predictable
+  `/operations/<id>` paths for other interfaces;
 - the **control URL** exposes cooperative turns, injections, snapshots, status,
   events, and attacker observations.
 
@@ -87,13 +94,16 @@ The MVP favors understandable local mechanisms:
 
 ## Current capability boundary
 
-Applications currently connect to Interceptor over HTTP. Their model connection
+Test harnesses connect to Interceptor over a local HTTP URL, while the
+application itself may use HTTP, a CLI, stdin/stdout, a REPL, Python/Node calls,
+or a small external adapter. The application's model connection
 may use non-streaming Chat Completions, OpenAI Responses, or Amazon Bedrock
 Converse; the selected host adapter must support the same native protocol.
 Simulated services are
 `fixture_http`, `stateful_http`, and the non-streaming MCP subset provided by
-`mcp_http`; attacker capture uses `http_sink`; virtual time is fixed. Docker is
-the supported container runtime for the MVP.
+`mcp_http`; those services can optionally enforce synthetic agent or delegated
+user permissions. Attacker capture uses `http_sink`; virtual time is fixed.
+Docker is the supported container runtime for the MVP.
 
 Snapshots capture declared saved state, not information that exists only in
 memory, running tasks, open connections, or caches. Before enabling snapshots,

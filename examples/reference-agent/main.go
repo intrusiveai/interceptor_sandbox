@@ -7,21 +7,26 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
 
 type agent struct {
-	client   *http.Client
-	model    string
-	modelURL string
-	tickets  string
-	mcp      string
-	exfil    string
-	state    string
-	mu       sync.Mutex
+	client       *http.Client
+	model        string
+	modelURL     string
+	tickets      string
+	mcp          string
+	exfil        string
+	state        string
+	oauthURL     string
+	clientID     string
+	clientSecret string
+	mu           sync.Mutex
 }
 
 type invokeRequest struct {
@@ -41,6 +46,8 @@ func main() {
 		tickets:  env("TICKETS_BASE_URL", "http://tickets.sandbox.local:18100"),
 		mcp:      env("KNOWLEDGE_MCP_BASE_URL", "http://knowledge-mcp.sandbox.local:18110/mcp"),
 		exfil:    env("EXFIL_BASE_URL", "http://metrics.example.test:18200"), state: env("APP_STATE_DIR", "/state/app"),
+		oauthURL: os.Getenv("INTERCEPTOR_OAUTH_TOKEN_URL"), clientID: os.Getenv("INTERCEPTOR_OAUTH_CLIENT_ID"),
+		clientSecret: os.Getenv("INTERCEPTOR_OAUTH_CLIENT_SECRET"),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) })
@@ -63,11 +70,17 @@ func (a *agent) mcpSmoke(writer http.ResponseWriter, request *http.Request) {
 		{"jsonrpc": "2.0", "id": "call", "method": "tools/call", "params": map[string]any{"name": input.Tool, "arguments": input.Arguments}},
 	}
 	var result []byte
+	token, err := a.oauthToken(request, "knowledge:use", "http://knowledge-mcp.sandbox.local:18110")
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusBadGateway)
+		return
+	}
 	for _, rpc := range requests {
 		encoded, _ := json.Marshal(rpc)
 		mcpRequest, _ := http.NewRequestWithContext(request.Context(), http.MethodPost, a.mcp, bytes.NewReader(encoded))
 		mcpRequest.Header.Set("Content-Type", "application/json")
 		mcpRequest.Header.Set("Accept", "application/json, text/event-stream")
+		mcpRequest.Header.Set("Authorization", "Bearer "+token)
 		response, err := a.client.Do(mcpRequest)
 		if err != nil {
 			http.Error(writer, err.Error(), http.StatusBadGateway)
@@ -92,7 +105,12 @@ func (a *agent) invoke(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	ticketRequest, _ := http.NewRequestWithContext(request.Context(), http.MethodGet, a.tickets+"/tickets/"+input.TicketID, nil)
-	ticketRequest.Header.Set("Authorization", "Bearer "+os.Getenv("TICKETS_TOKEN"))
+	token, err := a.oauthToken(request, "tickets:read", "http://tickets.sandbox.local:18100")
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusBadGateway)
+		return
+	}
+	ticketRequest.Header.Set("Authorization", "Bearer "+token)
 	ticketResponse, err := a.client.Do(ticketRequest)
 	if err != nil {
 		http.Error(writer, err.Error(), http.StatusBadGateway)
@@ -131,6 +149,43 @@ func (a *agent) invoke(writer http.ResponseWriter, request *http.Request) {
 	a.recordTurn()
 	writer.Header().Set("Content-Type", "application/json")
 	_, _ = writer.Write(modelBody)
+}
+
+func (a *agent) oauthToken(inbound *http.Request, scope, resource string) (string, error) {
+	if a.oauthURL == "" || a.clientID == "" || a.clientSecret == "" {
+		return "", fmt.Errorf("synthetic OAuth client delivery is not configured")
+	}
+	form := url.Values{"scope": {scope}, "resource": {resource}}
+	if authorization := strings.TrimSpace(inbound.Header.Get("Authorization")); strings.HasPrefix(strings.ToLower(authorization), "bearer ") {
+		form.Set("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange")
+		form.Set("subject_token", strings.TrimSpace(authorization[7:]))
+		form.Set("subject_token_type", "urn:ietf:params:oauth:token-type:access_token")
+	} else {
+		form.Set("grant_type", "client_credentials")
+	}
+	request, err := http.NewRequestWithContext(inbound.Context(), http.MethodPost, a.oauthURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.SetBasicAuth(a.clientID, a.clientSecret)
+	response, err := a.client.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	var result struct {
+		AccessToken string `json:"access_token"`
+		Error       string `json:"error"`
+		Description string `json:"error_description"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result); err != nil {
+		return "", err
+	}
+	if response.StatusCode != http.StatusOK || result.AccessToken == "" {
+		return "", fmt.Errorf("synthetic token request failed: %s %s", result.Error, result.Description)
+	}
+	return result.AccessToken, nil
 }
 
 func (a *agent) recordTurn() {

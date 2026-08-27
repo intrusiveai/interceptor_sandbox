@@ -15,3 +15,10 @@ type ManagedHandler interface {
 	Apply(statejournal.Operation) error
 	Snapshot() map[string]map[string]json.RawMessage
 }
+
+// ValidatingManagedHandler can reject a proposed journal operation before it
+// is committed. It is used for state whose identifiers and structural fields
+// are immutable, such as synthetic identity grants and delegations.
+type ValidatingManagedHandler interface {
+	ValidateApply(statejournal.Operation) error
+}

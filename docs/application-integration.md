@@ -2,8 +2,8 @@
 
 Interceptor needs a small amount of information about an application before it
 can run it safely. The Environment Blueprint supplies that information: how to
-start the application, where it listens, which routes may be called, where it
-stores data, and how it reaches the model and simulated services.
+start the application, how a tester invokes it, which operations may be called,
+where it stores data, and how it reaches the model and simulated services.
 
 ## Application image and wrapper image
 
@@ -16,24 +16,27 @@ sealed, `interceptor app build` creates a second image—the wrapper image—by:
 3. making Interceptor the wrapper image's entrypoint.
 
 When a session starts, that executable runs in `sandboxd` supervisor mode.
-`sandboxd` starts the model proxy, simulated services, attacker sinks, and
-private bridge. It then starts the application executable as a non-root child
-process. The host-side `interceptor run` process creates the local URLs printed
-for the tester and owns the real model-provider connection.
+`sandboxd` starts the model proxy, simulated services, and attacker sinks. It
+then prepares the selected application interface—either starting a non-root
+application process or a non-root command helper—and opens the private bridge.
+The host-side `interceptor run` process creates the local URLs printed for the
+tester and owns the real model-provider connection.
 
 The original image's `ENTRYPOINT`, `CMD`, and `USER` are not used to start the
 application in a sandbox session. The Blueprint's `application.launch.command`
-replaces the original startup command, and the application runs under
-Interceptor's non-root application identity. Declare the complete executable
-and arguments, preferably using an absolute executable path, and ensure the
-image's files are readable and executable by that identity.
+replaces the original startup command, and application code runs under
+Interceptor's non-root application identity. For HTTP, stdio, REPL, and
+external interfaces it is the long-running command; for `command` it is the
+base argv used for each operation; for `code` it names the Python or Node
+executable. Declare it explicitly, preferably using an absolute executable
+path, and ensure the image's files are readable and executable by that identity.
 
 Similarly, the application receives the environment variables declared in
-`application.launch.environment` plus declared synthetic credentials and
-Interceptor's virtual-time value. Environment variables declared only with
-`ENV` in the original Dockerfile are not automatically passed to the child
-application. Do not rely on the original image entrypoint to assemble arguments
-or environment variables at startup.
+`application.launch.environment`, declared static synthetic credentials,
+identity-delivery variables, and Interceptor's virtual-time value. Environment
+variables declared only with `ENV` in the original Dockerfile are not
+automatically passed to the child application. Do not rely on the original
+image entrypoint to assemble arguments or environment variables at startup.
 
 See [How the application becomes a sandbox
 image](architecture.md#how-the-application-becomes-a-sandbox-image) for the full
@@ -46,8 +49,8 @@ The application must:
 - be available as a container image locked to an exact digest (a digital
   fingerprint) ending in `@sha256:<64-lowercase-hex>`;
 - start from a fixed command and working directory;
-- listen on a local HTTP address inside the container;
-- expose every externally callable method/path in `served_routes`;
+- use one declared application interface and expose every callable operation in
+  `application.interface.operations`;
 - direct all supported model calls to the local `MODEL_BASE_URL` supplied in
   the Blueprint;
 - use one of the native model APIs supported by the selected host adapter; and
@@ -63,8 +66,16 @@ non-streaming tool subset and records MCP tool activity. See [Simulated MCP
 services](mcp-services.md) for the supported protocol and tool behaviors.
 
 Set positive `startup_timeout_ms` and `turn_timeout_ms`. If `health_path` is
-present, the supervisor waits for a successful HTTP response (status 200–299)
-before reporting the session as running.
+present for an HTTP application, the supervisor waits for a successful response
+(status 200–299) before reporting the session as running. REPLs may instead
+declare a startup prompt, and external/code adapters explicitly report ready.
+
+The interface can match the application you already have. HTTP services keep
+their native routes; a one-shot CLI can receive arguments and stdin; a
+long-running stdin/stdout program or REPL can use delimiters or prompts; and a
+Python or Node module can be imported and called directly. A small external
+adapter protocol covers unusual invocation requirements. See [Application
+interfaces](application-interfaces.md) for the configuration and tradeoffs.
 
 ## Environment variables and credentials
 
@@ -100,14 +111,29 @@ ignores the local signature, while the host AWS SDK signs the real call with its
 own credential chain. See [Model providers](model-providers.md) for examples and
 the supported native subsets.
 
+An application that normally retrieves a workload identity can instead use an
+`identity.delivery`. Interceptor can supply ordinary OAuth client settings, a
+rotating projected JWT file, or the AWS SDK's standard
+`AWS_CONTAINER_CREDENTIALS_FULL_URI` endpoint. Protected simulated HTTP and MCP
+services validate the resulting short-lived synthetic token and the current
+Blueprint grant.
+
+For delegated access, an HTTP test request can carry
+`X-Interceptor-Caller: <declared-user>`. Interceptor removes that harness-only
+value and passes a signed user bearer token to the application. The agent can
+exchange it with its own client identity for a downstream token that preserves
+both the user and acting agent. Non-HTTP interfaces can request a caller token
+from the control API or CLI and place it in the application's declared input
+format. See [Synthetic identity and delegated access](identity.md).
+
 ## Snapshot integration
 
 Only enable `snapshot_capable` if the application can restart correctly using:
 
 1. its original image and read-only starting files;
 2. the folders declared as writable application state (`mutable_roots`); and
-3. state managed by Interceptor, such as simulated service records and active
-   injections.
+3. state managed by Interceptor, such as simulated service records, active
+   injections, identity grants, delegated consent, and issuer failure state.
 
 All information that must survive a restart needs to be written under
 `mutable_roots`. Information held only in memory, `/tmp`, an undeclared folder,
@@ -164,8 +190,8 @@ Use the exact returned image fingerprint in `application.image`, for example
 
 Before relying on an environment:
 
-1. Start the session and verify its health check.
-2. Call every declared application route through the application URL.
+1. Start the session and verify its configured readiness check.
+2. Call every declared application operation through the application URL.
 3. Confirm a model call succeeds through the proxy using an allowed model.
 4. Exercise each synthetic service route and resolve every reported coverage gap.
 5. Verify synthetic credentials work only with their declared service.

@@ -41,6 +41,7 @@ organization: {}
 time: {}
 filesystem: {}
 services: []
+identity: {}
 credentials: []
 canaries: []
 attacker_services: []
@@ -76,13 +77,15 @@ application:
       MODEL_BASE_URL: http://127.0.0.1:18080/v1
       MODEL_NAME: provider-model-id
       CRM_BASE_URL: http://crm.sandbox.local:18100
-  io:
-    adapter: http
-    application_listen: http://127.0.0.1:8080
-    served_routes:
-      - method: POST
+  interface:
+    kind: http
+    operations:
+      - id: invoke
+        method: POST
         path: /invoke
-    health_path: /healthz
+    http:
+      listen: http://127.0.0.1:8080
+      health_path: /healthz
     startup_timeout_ms: 30000
     turn_timeout_ms: 120000
   persistence:
@@ -104,8 +107,8 @@ uppercase shell-name syntax and values are literal; host interpolation and
 control characters are rejected.
 
 `MODEL_BASE_URL` is required and must identify an HTTP loopback address. Other
-`*_BASE_URL` values may identify loopback or a hostname declared in `services`
-or `attacker_services`.
+`*_BASE_URL` values may identify loopback or a hostname declared in `services`,
+`identity.issuers`, or `attacker_services`.
 
 OpenAI-compatible applications use `MODEL_BASE_URL` as their SDK base URL.
 Bedrock SDK applications also set `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` to the
@@ -113,16 +116,54 @@ same loopback server without `/v1`, such as `http://127.0.0.1:18080`. Their
 synthetic AWS signing values must be declared under `credentials` with
 `accepted_by: model-proxy`. See [Model providers](model-providers.md).
 
-### HTTP I/O
+### Application interface
 
-The only MVP application interface is HTTP. `application_listen` must be a local
-HTTP URL. `served_routes` lists the only application operations that a tester
-may call through Interceptor. Anything not listed is rejected rather than
-forwarded. Paths must be absolute.
+`interface` tells Interceptor how to invoke the application without requiring
+the application to adopt an Interceptor-specific HTTP server. Exactly one
+matching configuration block is required.
 
-`health_path` is optional. `startup_timeout_ms` controls readiness waiting and
-`turn_timeout_ms` bounds cooperative turns and model calls. Configure both as
-positive values for runnable environments.
+| `kind` | Configuration block | Application shape |
+| --- | --- | --- |
+| `http` | `http` | Existing local HTTP server. |
+| `command` | `command` | Fresh CLI process for every call. |
+| `stdio` | `stdio` | Long-running stdin/stdout process. |
+| `repl` | `stdio` | Interactive process using a Linux pseudo-terminal by default. |
+| `code` | `code` | Imported Python or Node module. |
+| `external` | `external` | Executable implementing Interceptor's JSON-lines adapter protocol. |
+
+Shared fields are:
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `kind` | yes | Selects the adapter. |
+| `operations` | yes | Non-empty allowlist of callable operation IDs. IDs are lowercase identifiers. |
+| `startup_timeout_ms` | yes | Positive readiness deadline, at most 600000. |
+| `turn_timeout_ms` | yes | Positive deadline for one call, at most 600000. It also bounds model calls. |
+
+HTTP operations additionally require `method` and a clean absolute `path`.
+Other operations omit both. Command operations may contain `arguments`; each
+entry has exactly one fixed `literal` or one JSON Pointer `from` the turn's JSON
+input.
+
+The adapter blocks are:
+
+- `http`: required loopback `listen` URL and optional absolute `health_path`;
+- `command`: `stdin` (`raw`, `json`, or `none`), optional
+  `output_media_type`, `success_exit_codes`, and `concurrency` (maximum 32);
+- `stdio`: `transport` (`pipes` or `pty`), `input_suffix`, optional
+  `ready_pattern`, `response_mode` (`line`, `delimiter`, `prompt`, or `idle`),
+  the matching `delimiter`, `terminal_pattern`, or `idle_ms`, optional
+  `strip_echo`, `strip_terminal`, and `output_media_type`;
+- `code`: `language` (`python` or `node`), import `module`, optional
+  `initialize`, required `invoke`, `input_mode` (`single`, or Python-only
+  `kwargs`), optional `init_arguments`, and `concurrency` (Python is limited to
+  one; Node may use up to 32);
+- `external`: exact `protocol: interceptor.application/v1`, optional inline
+  `config`, optional sealed `config_asset`, and `concurrency`.
+
+`config_asset` is part of the Sealed Environment and changing it invalidates
+the seal. See [Application interfaces](application-interfaces.md) for complete
+examples, call framing, response completion rules, and limitations.
 
 ### Persistence and quiescence
 
@@ -188,6 +229,23 @@ included in the seal.
 Every service requires a unique lowercase `id`, a unique loopback `listen`
 address in `host:port` form, and at least one unique hostname containing a dot.
 The hostname resolves only inside the session container.
+
+Any fixture, stateful, or MCP service can require a synthetic bearer identity:
+
+```yaml
+authorization:
+  issuer: sandbox-identity
+  audience: http://tickets.sandbox.local:18100
+  required_scopes: [tickets:read]
+  allow_delegated: true
+```
+
+`issuer` references `identity.issuers[].id`. `audience` is the value required in
+the JWT `aud` claim. Every listed scope must be present in both the token and a
+currently active grant or delegation. `allow_delegated` permits tokens that
+identify a user as the subject and an agent as the actor. Authorization is
+service-wide in the MVP; route- and tool-specific policies are not yet
+supported.
 
 ### `fixture_http`
 
@@ -319,6 +377,136 @@ See [Simulated MCP services](mcp-services.md) for the tool-file syntax and the
 complete supported and unsupported capability list.
 
 Service `options` is reserved in the current MVP and has no implemented behavior.
+
+## Synthetic identity
+
+The optional `identity` section models workload identity, callers, and
+delegated user access. It contains `issuers`, `principals`, `grants`,
+`delegations`, `deliveries`, and an optional `inbound` configuration.
+
+### Issuers
+
+```yaml
+identity:
+  issuers:
+    - id: sandbox-identity
+      kind: oidc
+      listen: 127.0.0.1:18300
+      hostnames: [identity.sandbox.local]
+      issuer_url: http://identity.sandbox.local:18300
+      access_token_ttl_seconds: 900
+```
+
+The MVP supports `kind: oidc`, which provides OAuth discovery, JWKS,
+client-credentials tokens, same-issuer token exchange, and optional AWS
+container credentials. The URL must be an HTTP origin whose port matches
+`listen` and whose hostname is loopback or one of `hostnames`. Token lifetime
+defaults to 900 seconds and may be from 1 to 86,400 seconds.
+
+### Principals, grants, and delegations
+
+```yaml
+identity:
+  principals:
+    - id: support-agent
+      kind: agent
+      issuer: sandbox-identity
+      client_id: support-client
+      client_secret: synthetic-client-secret
+      claims: {name: Support Agent}
+    - id: alice
+      kind: user
+      issuer: sandbox-identity
+      claims: {name: Alice Example}
+  grants:
+    - id: agent-ticket-read
+      principal: support-agent
+      service: tickets
+      scopes: [tickets:read]
+  delegations:
+    - id: alice-ticket-read
+      agent: support-agent
+      user: alice
+      service: tickets
+      scopes: [tickets:read]
+```
+
+Principal `kind` is `agent`, `user`, or `service`. Agent and service principals
+may declare a unique OAuth `client_id` and synthetic `client_secret`; users may
+not. Custom `claims` are copied into issued tokens, but reserved JWT and actor
+claims cannot be overridden.
+
+A grant authorizes the named principal directly. A delegation authorizes an
+agent to act for one user. Delegated agents and users must belong to the same
+issuer. Every target service must declare `authorization` for that issuer, and
+every service and scope reference is checked while validating the Blueprint.
+
+### Credential delivery
+
+OAuth client environment delivery:
+
+```yaml
+deliveries:
+  - id: support-oauth
+    kind: oauth_client
+    issuer: sandbox-identity
+    principal: support-agent
+    client_id_environment: TOOL_CLIENT_ID
+    client_secret_environment: TOOL_CLIENT_SECRET
+    token_url_environment: TOOL_TOKEN_URL
+```
+
+Projected workload token delivery:
+
+```yaml
+deliveries:
+  - id: support-projected-token
+    kind: projected_jwt
+    issuer: sandbox-identity
+    principal: support-agent
+    audience: local-workload
+    path: /run/interceptor-session/identity/support-agent.jwt
+    environment_variable: AGENT_TOKEN_FILE
+```
+
+AWS SDK container-credential delivery:
+
+```yaml
+deliveries:
+  - id: support-aws
+    kind: aws_container_credentials
+    issuer: sandbox-identity
+    principal: support-agent
+    endpoint_environment: AWS_CONTAINER_CREDENTIALS_FULL_URI
+    authorization_token_environment: AWS_CONTAINER_AUTHORIZATION_TOKEN
+```
+
+Delivery-generated environment variable names must be unique and cannot
+conflict with launch variables or static credentials. A projected path must be
+beneath `/run/interceptor-session/identity/`. An AWS container-credential
+delivery generates a loopback URI from the issuer's `listen` address so standard
+SDK endpoint-safety checks accept it.
+
+### Inbound caller identity
+
+```yaml
+inbound:
+  issuer: sandbox-identity
+  audience: support-agent
+  application_header: Authorization
+```
+
+For an HTTP application, a harness can name a user principal with
+`X-Interceptor-Caller` or `caller_principal` in a cooperative turn. Interceptor
+replaces that harness value with a signed user token in the configured
+application header. `audience` must name the agent principal that will receive
+and exchange that caller token. The current automatic delivery supports only the standard
+`Authorization` header and HTTP application interface. Other interfaces can
+request a synthetic caller token explicitly and place it in their declared
+input format.
+
+See [Synthetic identity and delegated access](identity.md) for endpoint details,
+token exchange, evidence, failure injections, snapshots, and limitations.
 
 ## Synthetic credentials
 

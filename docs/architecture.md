@@ -22,8 +22,8 @@ operator / harness
   +---------------------------------------------------------------+
   | sandboxd supervisor                                            |
   |  +-------------+  +----------------+  +---------------------+ |
-  |  | application |  | synthetic HTTP |  | model proxy         | |
-  |  | non-root    |  | services/sinks |  | records exchanges   | |
+  |  | application |  | services, MCP, |  | model proxy         | |
+  |  | non-root    |  | identity/sinks |  | records exchanges   | |
   |  +-------------+  +----------------+  +---------------------+ |
   |       | declared files, mutable roots, state journal, events   |
   +---------------------------------------------------------------+
@@ -59,15 +59,15 @@ Wrapper image
       ▼
 interceptor sandboxd
       ├─ starts simulated services and the model proxy
-      ├─ starts the application as a child process and checks its health
+      ├─ prepares the selected application adapter and checks readiness
       └─ opens the private application/control bridge
 ```
 
 The Interceptor executable is one program with several modes. On the host it
 acts as the CLI and session manager. In the wrapper container it runs in
 `sandboxd` mode as the supervisor. It can also run a restricted helper used by
-command-based snapshot preparation. A separate `sandboxd` executable does not
-need to be installed in the application image.
+one-shot command interfaces and command-based snapshot preparation. A separate
+`sandboxd` executable does not need to be installed in the application image.
 
 `interceptor app build` does not start any services or listeners. It also does
 not copy the Environment Blueprint, session data, or model-provider credentials
@@ -83,10 +83,11 @@ the Sealed Environment and new session storage, and starts the wrapper with the
 ```
 
 The application's original image entrypoint is therefore not used during a
-sandbox session. Instead, `sandboxd` starts the application from
-`application.launch.command` and `application.launch.workdir` in the Blueprint.
-This is why those fields must describe the complete command needed to start the
-application.
+sandbox session. Instead, the selected adapter uses
+`application.launch.command` and `application.launch.workdir` from the
+Blueprint. It may start that command once, use it as the base argv for each
+call, or use it as the Python/Node runtime. This is why those fields must fully
+describe the selected interface's executable.
 
 ## Which process creates each listener
 
@@ -94,8 +95,8 @@ The local interface is split across the host and container:
 
 | Owner | What it starts |
 | --- | --- |
-| Application process | Its own local HTTP listener at `application.io.application_listen`. |
-| `sandboxd` inside the container | Simulated HTTP and MCP services, attacker sinks, the model proxy at `MODEL_BASE_URL`, and the private application/control bridge. |
+| Application process | Its native interface: local HTTP, one-shot command, stdin/stdout or REPL stream, Python/Node module, or external adapter protocol. |
+| `sandboxd` inside the container | The selected application-interface adapter, simulated HTTP and MCP services, synthetic identity issuers, attacker sinks, the model proxy at `MODEL_BASE_URL`, and the private application/control bridge. |
 | `interceptor run` on the host | The printed local application and control URLs, plus the connector that sends approved model requests to the configured provider. |
 
 Requests sent to the printed application or control URL cross the private
@@ -120,6 +121,27 @@ can reach and how many host resources it can consume:
 The supervisor initially uses only the limited capabilities required to set
 identities and coordinate the application. The application runs as a non-root
 user and cannot access the private bridge directories.
+
+## Application-interface adapters
+
+The supervisor has one adapter-neutral invocation contract: a declared
+operation ID, bounded input bytes, media type, deadline, and result. Built-in
+adapters translate that contract to HTTP, a process invocation, a persistent
+byte stream, or a language function call. The external adapter uses the same
+contract over newline-delimited JSON.
+
+This separation keeps session concerns outside the adapters. The supervisor
+continues to enforce turn and wall limits, wait for active calls before a
+snapshot, record downstream model and simulated-service activity, and stop the
+application process group. An adapter is responsible only for readiness,
+invocation, cancellation behavior, and translating a result. Adding a future
+interface therefore does not require a new host/container transport or control
+API.
+
+The printed host application URL remains HTTP because it is a convenient local
+harness boundary. HTTP applications retain their native declared paths.
+Non-HTTP applications receive synthesized `POST /operations/<id>` paths; that
+HTTP request does not imply that the application itself contains a web server.
 
 These controls reduce the chance that model-driven behavior can affect real
 systems. Docker still shares the host's operating-system kernel, so it is not
@@ -174,7 +196,7 @@ The attached host process binds the application and cooperative control servers
 to `127.0.0.1` only. Both are unauthenticated by design; processes running as
 the same local OS user are in the MVP trust boundary.
 
-The application server exposes only the routes approved in the Blueprint. The
+The application bridge exposes only the operations approved in the Blueprint. The
 control server exposes operations suitable for a cooperating test harness.
 Sensitive administrative details—including final evaluation results and the
 complete state-change history—remain available only through CLI commands over
@@ -207,6 +229,29 @@ The application keeps its framework's native API, but the operator must choose
 a compatible host provider. See [Model providers](model-providers.md) for the
 supported pairings and their limits.
 
+## Identity data path
+
+Identity stays entirely inside the simulated environment:
+
+1. At startup, `sandboxd` creates a fresh signing key for each declared issuer
+   and gives the application any declared OAuth settings, projected token path,
+   or AWS container-credential endpoint.
+2. For autonomous work, the application obtains a short-lived token with its
+   synthetic client credentials.
+3. For delegated work, the harness names a synthetic user. Interceptor attaches
+   a caller token to the HTTP application request, and the agent exchanges that
+   token while identifying itself with its own synthetic client credentials.
+4. A protected simulated HTTP or MCP service verifies the token and checks the
+   current grant or delegation before handling the request.
+5. Issuance and authorization decisions are recorded without saving raw tokens
+   or secrets.
+
+The host is not an identity proxy and never exchanges a synthetic token for a
+real credential. This boundary is deliberate: Interceptor tests how the agent
+handles identity and delegated authority within the fake world, not whether a
+production identity provider accepts it. See [Synthetic identity and delegated
+access](identity.md).
+
 ## State and evidence
 
 The Sealed Environment is the unchanged starting point. Interceptor saves each
@@ -216,7 +261,8 @@ editing can be detected. Large request bodies and changed files are stored once
 and referred to by a SHA-256 digital fingerprint.
 
 Each snapshot records the exact position in those histories and the fingerprints
-of the approved application, environment, and saved files. Restore creates a new
-session from the approved starting point and reapplies only changes that were
-successfully recorded. See [Snapshots and
+of the approved application, environment, and saved files. The journal includes
+changes to identity grants, delegations, and issuer failure settings. Restore
+creates a new session from the approved starting point and reapplies only
+changes that were successfully recorded. See [Snapshots and
 restore](snapshots-and-restore.md).

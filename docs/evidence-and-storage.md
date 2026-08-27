@@ -50,14 +50,19 @@ purpose:
 
 | Channel | Examples |
 | --- | --- |
-| `attack` | completed application turns and attacker-sink observations |
+| `attack` | completed cooperative turns, direct application-interface invocations, and attacker-sink observations |
 | `control` | session lifecycle, injection administration, snapshots |
-| `evaluation` | model exchanges, fixture hits/gaps, stateful-service and MCP tool activity |
+| `evaluation` | model exchanges, fixture hits/gaps, stateful-service and MCP tool activity, and identity issuance/authorization decisions |
 
 Each event records when and where something happened, what kind of event it was,
 whether it came from the application, sandbox, or test harness, and any related
 turn or injection. Larger raw content may be stored separately and referenced
 from the event.
+
+Calls through the printed application URL receive an internal request ID and an
+`application_invocation_completed` event. Calls through `/v1/turns` receive the
+public `turn-N` ID and a `turn_completed` event. Both paths participate in turn
+limits, active-call tracking, and downstream model/service evidence.
 
 For a model exchange, the evaluation event identifies the application's native
 codec and selected host provider. It separately references the final injected
@@ -72,6 +77,12 @@ signing internally. Its provider-specific evidence is therefore a canonical
 JSON representation of the SDK Converse input/output rather than a capture of
 the signed wire bytes.
 
+Identity evidence records which synthetic principal, actor, audience, and
+scopes were involved in token issuance or a service authorization decision. It
+uses a SHA-256 token fingerprint to connect related observations without saving
+the bearer token itself. Client secrets, AWS secret values, session tokens, and
+issuer signing keys are also excluded.
+
 The `provenance` field identifies the source of an event—for example, the
 application, the sealed environment, the test harness, an attacker sink, or
 Interceptor itself. Each event also contains a fingerprint of the previous
@@ -84,8 +95,9 @@ operator could still replace the entire evidence set.
 `state.jsonl` is separate because it answers a different question: not “what did
 we observe?” but “which changes must be reapplied to rebuild this state?” It
 contains ordered changes to services, injections, saved files, usage limits,
-oracle results, and virtual time. Like the event log, its entries are linked so
-editing can be detected.
+oracle results, synthetic identity grants and delegations, issuer fault state,
+and virtual time. Like the event log, its entries are linked so editing can be
+detected.
 
 Do not edit either JSONL file. Any modification invalidates the chain and can
 make checkpoints unrestorable.

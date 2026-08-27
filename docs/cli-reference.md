@@ -198,6 +198,26 @@ session may intentionally select a different host provider or either supported
 transport. `--stop-source` stops the source only after the restored session is
 healthy.
 
+## Synthetic caller identity
+
+```sh
+interceptor identity caller-token <session-id> \
+  --principal <user-principal> \
+  [--issuer <issuer-id>] \
+  [--audience <audience>] \
+  [--scope <scope> ...]
+```
+
+Requests a short-lived synthetic user token from a running session and prints
+the JSON response. `--issuer` and `--audience` default from the Blueprint's
+`identity.inbound` declaration. The principal must be a declared `user` owned
+by that issuer. This command is useful when a non-HTTP application expects a
+caller token inside its command or function input; HTTP applications can use
+`X-Interceptor-Caller` instead.
+
+The returned token is not valid outside the sandbox and is not saved in a
+snapshot. See [Synthetic identity and delegated access](identity.md).
+
 ## Evaluation and coverage
 
 ```sh

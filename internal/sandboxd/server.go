@@ -10,7 +10,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/exec"
@@ -28,6 +27,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/environment"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/evaluation"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/identity"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/injection"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/recording"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/services"
@@ -43,58 +43,74 @@ const (
 )
 
 type Server struct {
-	blueprint   *environment.Blueprint
-	metadata    session.Metadata
-	paths       session.Paths
-	recorder    *recording.Writer
-	journal     *statejournal.Writer
-	blobs       *blobstore.Store
-	injections  *injection.Manager
-	services    map[string]services.ManagedHandler
-	sinks       map[string]*services.SinkHandler
-	servers     []*http.Server
-	listeners   []net.Listener
-	app         *exec.Cmd
-	helper      *exec.Cmd
-	helperIn    io.WriteCloser
-	helperOut   *bufio.Reader
-	helperMu    sync.Mutex
-	appTarget   *url.URL
-	appUID      uint32
-	appGID      uint32
-	hostUID     int
-	hostGID     int
-	active      atomic.Int64
-	activityMu  sync.RWMutex
-	metadataMu  sync.RWMutex
-	oracleMu    sync.Mutex
-	oracleState map[string]evaluation.OracleResult
-	virtualMu   sync.RWMutex
-	virtualTime time.Time
-	controlMu   sync.Mutex
-	turnMu      sync.RWMutex
-	turns       map[string]Turn
-	nextTurn    atomic.Uint64
-	done        chan error
-	closeOnce   sync.Once
+	blueprint       *environment.Blueprint
+	metadata        session.Metadata
+	paths           session.Paths
+	recorder        *recording.Writer
+	journal         *statejournal.Writer
+	blobs           *blobstore.Store
+	injections      *injection.Manager
+	identities      map[string]*identity.Authority
+	identityEnv     map[string]string
+	identityFiles   []string
+	identityStop    chan struct{}
+	services        map[string]services.ManagedHandler
+	sinks           map[string]*services.SinkHandler
+	servers         []*http.Server
+	listeners       []net.Listener
+	adapter         applicationAdapter
+	app             *exec.Cmd
+	helper          *exec.Cmd
+	helperIn        io.WriteCloser
+	helperOut       *bufio.Reader
+	helperMu        sync.Mutex
+	helperPendingMu sync.Mutex
+	helperPending   map[string]chan HelperResponse
+	nextHelper      atomic.Uint64
+	appTarget       *url.URL
+	appUID          uint32
+	appGID          uint32
+	hostUID         int
+	hostGID         int
+	active          atomic.Int64
+	activityMu      sync.RWMutex
+	metadataMu      sync.RWMutex
+	oracleMu        sync.Mutex
+	oracleState     map[string]evaluation.OracleResult
+	virtualMu       sync.RWMutex
+	virtualTime     time.Time
+	controlMu       sync.Mutex
+	turnMu          sync.RWMutex
+	turns           map[string]Turn
+	nextTurn        atomic.Uint64
+	nextInvocation  atomic.Uint64
+	done            chan error
+	closeOnce       sync.Once
 }
 
 type TurnRequest struct {
-	Method  string            `json:"method"`
-	Path    string            `json:"path"`
-	Headers map[string]string `json:"headers,omitempty"`
-	Body    []byte            `json:"body,omitempty"`
+	Operation       string            `json:"operation,omitempty"`
+	Input           []byte            `json:"input,omitempty"`
+	MediaType       string            `json:"media_type,omitempty"`
+	Method          string            `json:"method,omitempty"`
+	Path            string            `json:"path,omitempty"`
+	Headers         map[string]string `json:"headers,omitempty"`
+	Body            []byte            `json:"body,omitempty"`
+	CallerPrincipal string            `json:"caller_principal,omitempty"`
 }
 
 type Turn struct {
-	ID       string            `json:"id"`
-	Status   string            `json:"status"`
-	Code     int               `json:"code,omitempty"`
-	Headers  map[string]string `json:"headers,omitempty"`
-	Body     []byte            `json:"body,omitempty"`
-	Error    string            `json:"error,omitempty"`
-	Started  time.Time         `json:"started_at"`
-	Finished time.Time         `json:"finished_at,omitempty"`
+	ID        string            `json:"id"`
+	Operation string            `json:"operation,omitempty"`
+	Status    string            `json:"status"`
+	Code      int               `json:"code,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"`
+	Body      []byte            `json:"body,omitempty"`
+	MediaType string            `json:"media_type,omitempty"`
+	ExitCode  *int              `json:"exit_code,omitempty"`
+	Error     string            `json:"error,omitempty"`
+	Started   time.Time         `json:"started_at"`
+	Finished  time.Time         `json:"finished_at,omitempty"`
 }
 
 func Run(ctx context.Context) error {
@@ -177,7 +193,9 @@ func New() (*Server, error) {
 	appGID := uint32(envInt("INTERCEPTOR_APP_GID", 20000))
 	return &Server{
 		blueprint: report.Blueprint, metadata: metadata, paths: paths, recorder: recorder, journal: journal, blobs: blobs,
-		injections: injection.NewManager(journal, recorder), services: map[string]services.ManagedHandler{}, sinks: map[string]*services.SinkHandler{},
+		injections: injection.NewManager(journal, recorder), identities: map[string]*identity.Authority{}, identityEnv: map[string]string{},
+		identityStop: make(chan struct{}),
+		services:     map[string]services.ManagedHandler{}, sinks: map[string]*services.SinkHandler{},
 		appUID: appUID, appGID: appGID, hostUID: envInt("INTERCEPTOR_HOST_UID", 0), hostGID: envInt("INTERCEPTOR_HOST_GID", 0),
 		turns: map[string]Turn{}, oracleState: map[string]evaluation.OracleResult{}, virtualTime: report.Blueprint.Time.Base.UTC(), done: make(chan error, 1),
 	}, nil
@@ -187,16 +205,40 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := s.prepareMutableRoots(); err != nil {
 		return err
 	}
+	if err := s.startIdentityAuthorities(); err != nil {
+		return err
+	}
 	if err := s.startSyntheticServices(); err != nil {
+		return err
+	}
+	if err := s.prepareIdentityDeliveries(ctx); err != nil {
 		return err
 	}
 	if err := s.startModelProxy(); err != nil {
 		return err
 	}
-	if err := s.startApplication(); err != nil {
+	adapter, err := s.newApplicationAdapter()
+	if err != nil {
 		return err
 	}
-	if err := s.waitForHealth(ctx); err != nil {
+	s.adapter = adapter
+	if err := s.adapter.Start(); err != nil {
+		return err
+	}
+	if s.blueprint.Application.Persistence.Quiesce.Kind == "command" && s.helper == nil {
+		if err := s.startApplicationHelper(false); err != nil {
+			return err
+		}
+	}
+	if err := dropLaunchCapabilities(); err != nil {
+		if s.app != nil && s.app.Process != nil {
+			_ = syscall.Kill(-s.app.Process.Pid, syscall.SIGKILL)
+		}
+		return fmt.Errorf("drop launch capabilities: %w", err)
+	}
+	readyContext, cancel := context.WithTimeout(ctx, s.startupTimeout())
+	defer cancel()
+	if err := s.adapter.WaitReady(readyContext); err != nil {
 		return err
 	}
 	if err := s.startHostBridge(ctx); err != nil {
@@ -209,7 +251,11 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	s.metadataMu.Unlock()
-	_, _ = s.recorder.Append(recording.Draft{Channel: recording.Control, Layer: "sandboxd", Kind: "application_ready", Provenance: recording.SandboxControl, Semantic: map[string]any{"pid": s.app.Process.Pid}})
+	pid := 0
+	if s.app != nil && s.app.Process != nil {
+		pid = s.app.Process.Pid
+	}
+	_, _ = s.recorder.Append(recording.Draft{Channel: recording.Control, Layer: "sandboxd", Kind: "application_ready", Provenance: recording.SandboxControl, Semantic: map[string]any{"pid": pid, "interface": s.adapter.Kind()}})
 	go s.enforceWallLimit()
 	return s.recorder.Flush()
 }
@@ -241,6 +287,13 @@ func (s *Server) startSyntheticServices() error {
 			}
 			s.services[definition.ID], handler = mcp, mcp
 		}
+		if definition.Authorization != nil {
+			authority := s.identities[definition.Authorization.Issuer]
+			if authority == nil {
+				return fmt.Errorf("service %s references unavailable identity issuer %s", definition.ID, definition.Authorization.Issuer)
+			}
+			handler = authority.Authorize(definition.ID, *definition.Authorization, handler)
+		}
 		if err := s.serveTCP(definition.Listen, s.trackActivity(handler)); err != nil {
 			return fmt.Errorf("start service %s: %w", definition.ID, err)
 		}
@@ -266,6 +319,83 @@ func (s *Server) startSyntheticServices() error {
 	return nil
 }
 
+func (s *Server) startIdentityAuthorities() error {
+	for _, definition := range s.blueprint.Identity.Issuers {
+		authority, err := identity.NewAuthority(
+			definition, s.blueprint.Identity.Principals, s.blueprint.Identity.Grants,
+			s.blueprint.Identity.Delegations, s.blueprint.Identity.Deliveries,
+			s.blueprint.Services, s.recorder,
+		)
+		if err != nil {
+			return fmt.Errorf("initialize identity issuer %s: %w", definition.ID, err)
+		}
+		s.identities[definition.ID] = authority
+		s.services[definition.ID] = authority
+		if err := s.serveTCP(definition.Listen, s.trackActivity(authority)); err != nil {
+			return fmt.Errorf("start identity issuer %s: %w", definition.ID, err)
+		}
+	}
+	return nil
+}
+
+func (s *Server) prepareIdentityDeliveries(ctx context.Context) error {
+	for _, delivery := range s.blueprint.Identity.Deliveries {
+		authority := s.identities[delivery.Issuer]
+		if authority == nil {
+			return fmt.Errorf("identity delivery %s references unavailable issuer", delivery.ID)
+		}
+		values, err := authority.DeliveryEnvironment(delivery)
+		if err != nil {
+			return fmt.Errorf("prepare identity delivery %s: %w", delivery.ID, err)
+		}
+		for name, value := range values {
+			s.identityEnv[name] = value
+		}
+		if delivery.Kind != "projected_jwt" {
+			continue
+		}
+		if err := s.writeProjectedToken(authority, delivery); err != nil {
+			return fmt.Errorf("write projected identity %s: %w", delivery.ID, err)
+		}
+		s.identityFiles = append(s.identityFiles, delivery.Path)
+		ttl := time.Duration(15) * time.Minute
+		for _, issuer := range s.blueprint.Identity.Issuers {
+			if issuer.ID == delivery.Issuer && issuer.AccessTokenTTLSeconds > 0 {
+				ttl = time.Duration(issuer.AccessTokenTTLSeconds) * time.Second
+			}
+		}
+		interval := ttl / 2
+		if interval < time.Second {
+			interval = time.Second
+		}
+		go func(authority *identity.Authority, delivery environment.IdentityDelivery, interval time.Duration) {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-s.identityStop:
+					return
+				case <-ticker.C:
+					if err := s.writeProjectedToken(authority, delivery); err != nil {
+						_, _ = s.recorder.Append(recording.Draft{Channel: recording.Evaluation, Layer: "identity", Kind: "identity_projection_failed", Provenance: recording.SandboxControl, Semantic: map[string]any{"delivery": delivery.ID, "error": err.Error()}})
+					}
+				}
+			}
+		}(authority, delivery, interval)
+	}
+	return nil
+}
+
+func (s *Server) writeProjectedToken(authority *identity.Authority, delivery environment.IdentityDelivery) error {
+	token, _, err := authority.ProjectedToken(delivery)
+	if err != nil {
+		return err
+	}
+	return fsutil.WriteFile(delivery.Path, []byte(token+"\n"), 0o640)
+}
+
 func (s *Server) startModelProxy() error {
 	baseValue := s.blueprint.Application.Launch.Environment["MODEL_BASE_URL"]
 	baseURL, err := url.Parse(baseValue)
@@ -282,7 +412,7 @@ func (s *Server) startModelProxy() error {
 		}
 		connector = spoolConnector
 	}
-	proxy, err := bridge.NewModelProxy(s.metadata.ID, connector, s.injections, s.blobs, s.recorder, s.blueprint.Limits.MaxBlobBytes, time.Duration(s.blueprint.Application.IO.TurnTimeoutMS)*time.Millisecond)
+	proxy, err := bridge.NewModelProxy(s.metadata.ID, connector, s.injections, s.blobs, s.recorder, s.blueprint.Limits.MaxBlobBytes, time.Duration(s.blueprint.Application.Interface.TurnTimeoutMS)*time.Millisecond)
 	if err != nil {
 		return err
 	}
@@ -290,119 +420,8 @@ func (s *Server) startModelProxy() error {
 	return s.serveTCP(baseURL.Host, s.trackActivity(proxy))
 }
 
-func (s *Server) startApplication() error {
-	stdout, err := os.OpenFile(filepath.Join(s.paths.Logs, "application.stdout.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640)
-	if err != nil {
-		return err
-	}
-	stderr, err := os.OpenFile(filepath.Join(s.paths.Logs, "application.stderr.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640)
-	if err != nil {
-		stdout.Close()
-		return err
-	}
-	command := s.blueprint.Application.Launch.Command
-	s.app = exec.Command(command[0], command[1:]...)
-	s.app.Dir, s.app.Stdout, s.app.Stderr = s.blueprint.Application.Launch.Workdir, stdout, stderr
-	s.app.Env = []string{}
-	for name, value := range s.blueprint.Application.Launch.Environment {
-		s.app.Env = append(s.app.Env, name+"="+value)
-	}
-	for _, credential := range s.blueprint.Credentials {
-		s.app.Env = append(s.app.Env, credential.EnvironmentVariable+"="+credential.Value)
-	}
-	s.virtualMu.RLock()
-	s.app.Env = append(s.app.Env, "INTERCEPTOR_VIRTUAL_TIME="+s.virtualTime.Format(time.RFC3339Nano))
-	s.virtualMu.RUnlock()
-	s.app.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: s.appUID, Gid: s.appGID}, Setpgid: true}
-	if s.blueprint.Application.Persistence.Quiesce.Kind == "command" {
-		executable, err := os.Executable()
-		if err != nil {
-			return err
-		}
-		s.helper = exec.Command(executable, "app-helper")
-		s.helper.Dir, s.helper.Env = s.app.Dir, s.app.Env
-		s.helper.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: s.appUID, Gid: s.appGID}, Setpgid: true}
-		s.helperIn, err = s.helper.StdinPipe()
-		if err != nil {
-			return err
-		}
-		helperOutput, err := s.helper.StdoutPipe()
-		if err != nil {
-			return err
-		}
-		s.helperOut = bufio.NewReaderSize(helperOutput, 1<<20)
-		if err := s.helper.Start(); err != nil {
-			return fmt.Errorf("start application helper: %w", err)
-		}
-	}
-	oldUmask := syscall.Umask(0o007)
-	startErr := s.app.Start()
-	syscall.Umask(oldUmask)
-	if startErr != nil {
-		stdout.Close()
-		stderr.Close()
-		return fmt.Errorf("start application: %w", startErr)
-	}
-	if err := dropLaunchCapabilities(); err != nil {
-		_ = syscall.Kill(-s.app.Process.Pid, syscall.SIGKILL)
-		return fmt.Errorf("drop launch capabilities: %w", err)
-	}
-	go func() {
-		err := s.app.Wait()
-		stdout.Close()
-		stderr.Close()
-		s.done <- err
-	}()
-	return nil
-}
-
-func (s *Server) waitForHealth(ctx context.Context) error {
-	applicationURL, err := url.Parse(s.blueprint.Application.IO.ApplicationListen)
-	if err != nil {
-		return err
-	}
-	s.appTarget = applicationURL
-	if s.blueprint.Application.IO.HealthPath == "" {
-		return nil
-	}
-	timeout := time.Duration(s.blueprint.Application.IO.StartupTimeoutMS) * time.Millisecond
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-	deadline := time.Now().Add(timeout)
-	client := &http.Client{Timeout: time.Second}
-	for time.Now().Before(deadline) {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case err := <-s.done:
-			return fmt.Errorf("application exited during startup: %w", err)
-		default:
-		}
-		requestURL := *applicationURL
-		requestURL.Path = s.blueprint.Application.IO.HealthPath
-		response, err := client.Get(requestURL.String())
-		if err == nil {
-			io.Copy(io.Discard, response.Body)
-			response.Body.Close()
-			if response.StatusCode >= 200 && response.StatusCode < 300 {
-				return nil
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return errors.New("application health check timed out")
-}
-
 func (s *Server) startHostBridge(ctx context.Context) error {
-	appProxy := httputil.NewSingleHostReverseProxy(s.appTarget)
-	appHandler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if !s.servedRoute(request.Method, request.URL.Path) {
-			writeError(writer, http.StatusNotImplemented, "unsupported_route", "route is not declared by the Sealed Environment")
-			return
-		}
-		appProxy.ServeHTTP(writer, request)
-	})
+	appHandler := s.trackActivity(s.adapter.Handler())
 	controlHandler := s.controlHandler()
 	if s.metadata.BridgeTransport == "unix" {
 		if err := s.serveUnix(filepath.Join(s.paths.Sockets, "application.sock"), appHandler); err != nil {
@@ -443,6 +462,7 @@ func (s *Server) controlHandler() http.Handler {
 	mux.HandleFunc("GET /v1/events", s.eventsHandler)
 	mux.HandleFunc("GET /v1/evaluation", s.evaluationHandler)
 	mux.HandleFunc("GET /v1/state-journal", s.journalHandler)
+	mux.HandleFunc("POST /v1/identity/caller-tokens", s.callerTokenHandler)
 	mux.HandleFunc("POST /v1/logs/verify", s.verifyHandler)
 	mux.HandleFunc("POST /v1/quiesce", s.quiesceHandler)
 	mux.HandleFunc("POST /v1/stop", s.stopHandler)
@@ -470,53 +490,64 @@ func (s *Server) turnHandler(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	var input TurnRequest
-	if err := decodeStrict(request, &input, 2<<20); err != nil {
+	if err := decodeStrict(request, &input, 3<<20); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_turn", err.Error())
 		return
 	}
+	if input.Input != nil && input.Body != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_turn", "input and body may not both be present")
+		return
+	}
+	if len(input.Input) > 2<<20 || len(input.Body) > 2<<20 {
+		writeError(writer, http.StatusRequestEntityTooLarge, "invalid_turn", "decoded turn input exceeds 2 MiB")
+		return
+	}
+	if input.Operation != "" && (input.Method != "" || input.Path != "" || input.Body != nil) {
+		writeError(writer, http.StatusBadRequest, "invalid_turn", "operation may not be combined with method, path, or body")
+		return
+	}
+	if input.Operation == "" && (input.Input != nil || input.MediaType != "") {
+		writeError(writer, http.StatusBadRequest, "invalid_turn", "input and media_type require operation")
+		return
+	}
 	input.Method = strings.ToUpper(input.Method)
-	if !s.servedRoute(input.Method, input.Path) {
+	if input.Operation == "" && s.adapter.Kind() != "http" {
+		writeError(writer, http.StatusBadRequest, "operation_required", "turn requires an operation for this application interface")
+		return
+	}
+	if input.Operation != "" {
+		if _, ok := s.operation(input.Operation); !ok {
+			writeError(writer, http.StatusBadRequest, "unsupported_operation", "turn operation is not declared")
+			return
+		}
+	} else if !s.servedRoute(input.Method, input.Path) {
 		writeError(writer, http.StatusBadRequest, "unsupported_route", "turn route is not declared")
 		return
 	}
-	s.metadataMu.Lock()
-	if s.metadata.Consumed.Turns >= s.metadata.Limits.MaxTurns {
-		s.metadataMu.Unlock()
+	id := fmt.Sprintf("turn-%d", s.nextTurn.Add(1))
+	identityToken, err := s.issueInboundCaller(input.CallerPrincipal, id)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_caller_identity", err.Error())
+		return
+	}
+	if !s.reserveTurn() {
 		writeError(writer, http.StatusTooManyRequests, "turn_limit", "turn limit is exhausted")
 		return
 	}
-	s.metadata.Consumed.Turns++
-	_ = session.Save(s.paths.Metadata, s.metadata)
-	s.metadataMu.Unlock()
-	id := fmt.Sprintf("turn-%d", s.nextTurn.Add(1))
-	turn := Turn{ID: id, Status: "running", Started: time.Now().UTC()}
+	turn := Turn{ID: id, Operation: input.Operation, Status: "running", Started: time.Now().UTC()}
 	s.turnMu.Lock()
 	s.turns[id] = turn
 	s.turnMu.Unlock()
 	s.active.Add(1)
 	defer s.active.Add(-1)
-	target := *s.appTarget
-	target.Path, target.RawQuery = input.Path, ""
-	turnContext, cancel := context.WithTimeout(request.Context(), time.Duration(s.blueprint.Application.IO.TurnTimeoutMS)*time.Millisecond)
+	turnContext, cancel := context.WithTimeout(request.Context(), time.Duration(s.blueprint.Application.Interface.TurnTimeoutMS)*time.Millisecond)
 	defer cancel()
-	forward, err := http.NewRequestWithContext(turnContext, input.Method, target.String(), bytes.NewReader(input.Body))
-	if err == nil {
-		for name, value := range input.Headers {
-			if allowedTurnHeader(name) {
-				forward.Header.Set(name, value)
-			}
-		}
-		forward.Header.Set("X-Interceptor-Turn-ID", id)
-		response, requestErr := http.DefaultClient.Do(forward)
-		if requestErr != nil {
-			err = requestErr
-		} else {
-			turn.Code = response.StatusCode
-			turn.Headers = selectedHeaders(response.Header)
-			turn.Body, err = readBounded(response.Body, 2<<20)
-			response.Body.Close()
-		}
+	body := input.Input
+	if body == nil {
+		body = input.Body
 	}
+	result, err := s.adapter.Invoke(turnContext, applicationInvocation{TurnID: id, Operation: input.Operation, Method: input.Method, Path: input.Path, Headers: input.Headers, Body: body, MediaType: input.MediaType, IdentityToken: identityToken})
+	turn.Code, turn.Headers, turn.Body, turn.MediaType, turn.ExitCode = result.Code, result.Headers, result.Body, result.MediaType, result.ExitCode
 	turn.Finished = time.Now().UTC()
 	if err != nil {
 		turn.Status, turn.Error = "error", err.Error()
@@ -529,6 +560,62 @@ func (s *Server) turnHandler(writer http.ResponseWriter, request *http.Request) 
 	_, _ = s.recorder.Append(recording.Draft{Channel: recording.Attack, Layer: "application_bridge", Kind: "turn_completed", Provenance: recording.Application, TurnID: id, Semantic: map[string]any{"status": turn.Status, "code": turn.Code, "body": string(turn.Body), "error": turn.Error}})
 	_ = s.recorder.Flush()
 	writeJSON(writer, http.StatusOK, turn)
+}
+
+func (s *Server) issueInboundCaller(principalID, turnID string) (string, error) {
+	if principalID == "" {
+		return "", nil
+	}
+	configured := s.blueprint.Identity.Inbound
+	if configured == nil {
+		return "", errors.New("the Environment Blueprint does not configure inbound caller identity")
+	}
+	authority := s.identities[configured.Issuer]
+	if authority == nil {
+		return "", errors.New("the configured inbound identity issuer is unavailable")
+	}
+	token, _, err := authority.IssueCallerToken(principalID, configured.Audience, nil)
+	if err != nil {
+		return "", err
+	}
+	_, _ = s.recorder.Append(recording.Draft{
+		Channel: recording.Attack, Layer: "identity", Kind: "caller_identity_attached", Provenance: recording.HarnessInjected,
+		TurnID: turnID, Semantic: map[string]any{"principal": principalID, "audience": configured.Audience},
+	})
+	return token, nil
+}
+
+func (s *Server) callerTokenHandler(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		Issuer    string   `json:"issuer,omitempty"`
+		Principal string   `json:"principal"`
+		Audience  string   `json:"audience,omitempty"`
+		Scopes    []string `json:"scopes,omitempty"`
+	}
+	if err := decodeStrict(request, &input, 64<<10); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_identity_request", err.Error())
+		return
+	}
+	if input.Issuer == "" && s.blueprint.Identity.Inbound != nil {
+		input.Issuer = s.blueprint.Identity.Inbound.Issuer
+	}
+	if input.Audience == "" && s.blueprint.Identity.Inbound != nil && input.Issuer == s.blueprint.Identity.Inbound.Issuer {
+		input.Audience = s.blueprint.Identity.Inbound.Audience
+	}
+	authority := s.identities[input.Issuer]
+	if authority == nil {
+		writeError(writer, http.StatusBadRequest, "invalid_identity_request", "identity issuer is not declared")
+		return
+	}
+	token, claims, err := authority.IssueCallerToken(input.Principal, input.Audience, input.Scopes)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_identity_request", err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusCreated, map[string]any{
+		"access_token": token, "token_type": "Bearer", "expires_at": claims.ExpiresAt,
+		"subject": claims.Subject, "audience": claims.Audience, "scopes": claims.Scopes,
+	})
 }
 
 func (s *Server) turnStatusHandler(writer http.ResponseWriter, request *http.Request) {
@@ -599,6 +686,11 @@ func (s *Server) fidelityMutation(ctx context.Context, definition injection.Defi
 			return nil, nil, err
 		}
 		operation := statejournal.Operation{Kind: "service_put", Service: selector.Service, Collection: selector.Collection, Key: selector.Key, Value: encoded}
+		if validating, ok := handler.(services.ValidatingManagedHandler); ok {
+			if err := validating.ValidateApply(operation); err != nil {
+				return nil, nil, err
+			}
+		}
 		return []statejournal.Operation{operation}, func() error { return handler.Apply(operation) }, nil
 	}
 	hostPath, ok := resolveMutablePath(s.containerRoots(), selector.Path)
@@ -944,17 +1036,28 @@ func (s *Server) quiesce(ctx context.Context) error {
 func (s *Server) Close(ctx context.Context) error {
 	var result error
 	s.closeOnce.Do(func() {
+		close(s.identityStop)
 		for _, server := range s.servers {
 			result = errors.Join(result, server.Shutdown(ctx))
 		}
 		for _, listener := range s.listeners {
 			_ = listener.Close()
 		}
+		if s.helperIn != nil {
+			_ = s.helperIn.Close()
+			s.helperIn = nil
+		}
 		if s.app != nil && s.app.Process != nil {
 			_ = syscall.Kill(-s.app.Process.Pid, syscall.SIGTERM)
 		}
 		if s.helper != nil && s.helper.Process != nil {
 			_ = syscall.Kill(-s.helper.Process.Pid, syscall.SIGTERM)
+		}
+		for _, path := range s.identityFiles {
+			_ = os.Remove(path)
+		}
+		if len(s.identityFiles) > 0 {
+			_ = os.Remove(filepath.Dir(s.identityFiles[0]))
 		}
 		s.metadataMu.Lock()
 		if s.metadata.Phase != session.Error {
@@ -1006,6 +1109,17 @@ func (s *Server) consumeTokens(tokens int64) {
 		default:
 		}
 	}
+}
+
+func (s *Server) reserveTurn() bool {
+	s.metadataMu.Lock()
+	defer s.metadataMu.Unlock()
+	if s.metadata.Consumed.Turns >= s.metadata.Limits.MaxTurns {
+		return false
+	}
+	s.metadata.Consumed.Turns++
+	_ = session.Save(s.paths.Metadata, s.metadata)
+	return true
 }
 
 func (s *Server) enforceWallLimit() {
@@ -1179,42 +1293,137 @@ func (s *Server) prepareMutableRoots() error {
 	return nil
 }
 
-func (s *Server) runHelperCommand(ctx context.Context, command []string, timeout time.Duration) error {
-	if s.helper == nil || s.helperIn == nil || s.helperOut == nil {
-		return errors.New("application command helper is unavailable")
-	}
-	s.helperMu.Lock()
-	defer s.helperMu.Unlock()
-	request := HelperRequest{Command: command, TimeoutMS: timeout.Milliseconds()}
-	encoded, _ := json.Marshal(request)
-	if _, err := s.helperIn.Write(append(encoded, '\n')); err != nil {
+func (s *Server) startApplicationHelper(asApplication bool) error {
+	executable, err := os.Executable()
+	if err != nil {
 		return err
 	}
-	type result struct {
-		response HelperResponse
-		err      error
+	helper := exec.Command(executable, "app-helper")
+	s.configureApplicationCommand(helper, nil)
+	s.helperIn, err = helper.StdinPipe()
+	if err != nil {
+		return err
 	}
-	channel := make(chan result, 1)
-	go func() {
+	helperOutput, err := helper.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr, err := os.OpenFile(filepath.Join(s.paths.Logs, "application.stderr.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640)
+	if err != nil {
+		return err
+	}
+	helper.Stderr = stderr
+	s.helperOut = bufio.NewReaderSize(helperOutput, 16<<20)
+	s.helperPending = map[string]chan HelperResponse{}
+	oldUmask := syscall.Umask(0o007)
+	err = helper.Start()
+	syscall.Umask(oldUmask)
+	if err != nil {
+		_ = stderr.Close()
+		return fmt.Errorf("start application helper: %w", err)
+	}
+	s.helper = helper
+	go s.readHelperResponses()
+	if asApplication {
+		s.app = helper
+		go func() {
+			err := helper.Wait()
+			_ = stderr.Close()
+			select {
+			case s.done <- err:
+			default:
+			}
+		}()
+	} else {
+		go func() {
+			_ = helper.Wait()
+			_ = stderr.Close()
+		}()
+	}
+	return nil
+}
+
+func (s *Server) readHelperResponses() {
+	for {
 		line, err := s.helperOut.ReadBytes('\n')
-		var response HelperResponse
-		if err == nil {
-			err = json.Unmarshal(line, &response)
+		if err != nil {
+			s.helperPendingMu.Lock()
+			for _, channel := range s.helperPending {
+				select {
+				case channel <- HelperResponse{Error: err.Error()}:
+				default:
+				}
+			}
+			s.helperPendingMu.Unlock()
+			return
 		}
-		channel <- result{response: response, err: err}
+		var response HelperResponse
+		if json.Unmarshal(line, &response) != nil {
+			continue
+		}
+		s.helperPendingMu.Lock()
+		channel := s.helperPending[response.ID]
+		s.helperPendingMu.Unlock()
+		if channel != nil {
+			select {
+			case channel <- response:
+			default:
+			}
+		}
+	}
+}
+
+func (s *Server) callHelper(ctx context.Context, request HelperRequest) (HelperResponse, error) {
+	if s.helper == nil || s.helperIn == nil || s.helperOut == nil {
+		return HelperResponse{}, errors.New("application command helper is unavailable")
+	}
+	request.ID = fmt.Sprintf("helper-%d", s.nextHelper.Add(1))
+	request.Type = "invoke"
+	channel := make(chan HelperResponse, 1)
+	s.helperPendingMu.Lock()
+	s.helperPending[request.ID] = channel
+	s.helperPendingMu.Unlock()
+	defer func() {
+		s.helperPendingMu.Lock()
+		delete(s.helperPending, request.ID)
+		s.helperPendingMu.Unlock()
 	}()
+	encoded, _ := json.Marshal(request)
+	s.helperMu.Lock()
+	if _, err := s.helperIn.Write(append(encoded, '\n')); err != nil {
+		s.helperMu.Unlock()
+		return HelperResponse{}, err
+	}
+	s.helperMu.Unlock()
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
-	case value := <-channel:
-		if value.err != nil {
-			return value.err
+		cancel, _ := json.Marshal(HelperRequest{ID: request.ID, Type: "cancel"})
+		s.helperMu.Lock()
+		_, _ = s.helperIn.Write(append(cancel, '\n'))
+		s.helperMu.Unlock()
+		select {
+		case <-channel:
+		case <-time.After(5 * time.Second):
 		}
-		if !value.response.OK {
-			return fmt.Errorf("quiesce command failed: %s", value.response.Error)
+		return HelperResponse{}, ctx.Err()
+	case response := <-channel:
+		if response.ID == "" && response.Error != "" {
+			return HelperResponse{}, errors.New(response.Error)
 		}
-		return nil
+		return response, nil
 	}
+}
+
+func (s *Server) runHelperCommand(ctx context.Context, command []string, timeout time.Duration) error {
+	response, err := s.callHelper(ctx, HelperRequest{Command: command, TimeoutMS: timeout.Milliseconds()})
+	if err != nil {
+		return err
+	}
+	s.appendApplicationLogs(response.Stdout, response.Stderr)
+	if !response.OK {
+		return fmt.Errorf("quiesce command failed: %s", response.Error)
+	}
+	return nil
 }
 
 func (s *Server) containerRoots() []snapshot.Root {
@@ -1233,12 +1442,8 @@ func (s *Server) scanMutable(ctx context.Context, roots []snapshot.Root) (snapsh
 }
 
 func (s *Server) servedRoute(method, path string) bool {
-	for _, route := range s.blueprint.Application.IO.ServedRoutes {
-		if strings.EqualFold(route.Method, method) && route.Path == path {
-			return true
-		}
-	}
-	return false
+	_, ok := s.routeOperation(method, path)
+	return ok
 }
 
 func optionStrings(value any) []string {

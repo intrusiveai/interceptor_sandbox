@@ -15,6 +15,10 @@ The implementation currently includes:
   bounded resources, and Docker Desktop-safe host relays;
 - fixture, stateful JSON, simulated MCP, and attacker-sink HTTP services that
   fail closed;
+- synthetic agent identities, delegated-user token exchange, protected local
+  services, and injectable/restorable authorization state;
+- adaptable HTTP, CLI command, stdin/stdout, REPL, Python, Node, and custom
+  application invocation surfaces;
 - a protocol-aware inference seam for native Chat Completions, OpenAI
   Responses, Amazon Bedrock Converse, and LiteLLM routes, with provider
   credentials kept outside the container;
@@ -110,7 +114,7 @@ The user documentation starts at [`docs/`](docs/README.md), including the
 [getting-started guide](docs/getting-started.md), [Environment Blueprint
 reference](docs/environment-blueprint.md), [local API](docs/api-reference.md),
 [CLI reference](docs/cli-reference.md), [model providers](docs/model-providers.md),
-and a detailed guide to [logical
+the guide to [synthetic identity and delegated access](docs/identity.md), and a detailed guide to [logical
 snapshots and restore](docs/snapshots-and-restore.md).
 
 ## Storage

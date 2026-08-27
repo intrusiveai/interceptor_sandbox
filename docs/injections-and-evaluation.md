@@ -95,16 +95,24 @@ Existing regular file:
 {"path":"/state/app/context.json"}
 ```
 
-The service must expose managed state through `stateful_http` or a stateful
-`mcp_http` tool; the collection/key must already exist. A file must already
-exist and fall under a declared mutable root. The MVP does not use fidelity
-injection to create a new resource or file.
+The service must expose managed state through `stateful_http`, a stateful
+`mcp_http` tool, or a synthetic identity issuer; the collection/key must already
+exist. A file must already exist and fall under a declared mutable root. The
+MVP does not use fidelity injection to create a new resource or file.
 
 For MCP, fidelity injection changes the record before the application reads it
 through `tools/call`. Transit `model_tool_result` injection remains available
 after the agent framework turns an MCP response into native Chat, Responses, or
 Converse tool-result history. See [Simulated MCP
 services](mcp-services.md#evidence-injections-and-snapshots).
+
+For an identity issuer, the managed collections are `grants`, `delegations`,
+and `faults`. A grant or delegation record can have `active` replaced or its
+`scopes` replaced with a valid subset. The single `faults/issuer` record can
+simulate an unavailable issuer, rejected token exchanges, or expired token
+issuance. These changes exercise the application's ordinary credential and
+authorization paths and are saved in snapshots. See [Identity failure
+injections](identity.md#identity-failure-injections).
 
 ## Placement
 

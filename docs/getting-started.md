@@ -74,8 +74,9 @@ The first `docker build` created the ordinary application image. The
 wrapper keeps the application and its dependencies, adds the Interceptor
 executable, and configures that executable to start `sandboxd` when a session
 runs. `sandboxd` starts the in-container model proxy and simulated services,
-starts the application command from the Blueprint, checks its health, and then
-opens the private application and control bridge. You do not need to add
+prepares the Blueprint's selected application interface, waits for its declared
+readiness condition, and then opens the private application and control bridge.
+You do not need to add
 `sandboxd` to the reference application's Dockerfile or run the wrapper image
 yourself.
 
@@ -114,6 +115,22 @@ curl -sS -X POST "$APPLICATION_URL/api/agent/invoke" \
   --data '{"prompt":"List the open support tickets"}'
 ```
 
+With no caller header, the reference agent uses its own synthetic identity.
+Name the Blueprint's example user to exercise delegated access instead:
+
+```sh
+curl -sS -X POST "$APPLICATION_URL/api/agent/invoke" \
+  -H 'Content-Type: application/json' \
+  -H 'X-Interceptor-Caller: alice' \
+  --data '{"prompt":"List my open support tickets"}'
+```
+
+Interceptor converts that harness-only header into a short-lived caller token.
+The reference agent exchanges it using its own client identity, so the ticket
+service sees Alice as the user and the support agent as the actor. No real user
+or cloud credential is involved. See [Synthetic identity and delegated
+access](identity.md) for the complete flow.
+
 Or use the cooperative control URL to create a tracked turn. This wrapper gives
 the request a turn ID and records a structured result. Because the wrapper can
 carry any kind of request body, its `body` field uses base64 text (`e30=` is
@@ -125,6 +142,7 @@ curl -sS -X POST "$CONTROL_URL/v1/turns" \
   --data '{
     "method":"POST",
     "path":"/api/agent/invoke",
+    "caller_principal":"alice",
     "headers":{"Content-Type":"application/json"},
     "body":"eyJwcm9tcHQiOiJMaXN0IHRoZSBvcGVuIHN1cHBvcnQgdGlja2V0cyJ9"
   }'
@@ -168,9 +186,13 @@ interceptor environment init ./my-environment
 ```
 
 This creates `my-environment/environment.yaml` and refuses to overwrite an
-existing file. Edit the placeholder image, routes, persistence declaration, and
-review metadata; add any referenced assets below the same directory. Continue
-with `environment validate`, `environment seal`, and `app build`.
+existing file. Edit the placeholder image, application interface and
+operations, persistence declaration, and review metadata; add any referenced
+assets below the same directory. The generated file uses HTTP, but an existing
+CLI, REPL, Python module, or Node module does not need to be converted into an
+HTTP server. Choose the matching configuration from [Application
+interfaces](application-interfaces.md). Continue with `environment validate`,
+`environment seal`, and `app build`.
 
 See [Application integration](application-integration.md) before onboarding a
 real target and [Environment Blueprint reference](environment-blueprint.md) for

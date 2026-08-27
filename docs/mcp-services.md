@@ -37,6 +37,36 @@ Configure the agent's MCP client explicitly with the local URL. Interceptor
 does not redirect a hard-coded remote URL and does not copy real MCP
 credentials into the container.
 
+## Optional OAuth protection
+
+An MCP service can require a synthetic identity:
+
+```yaml
+services:
+  - id: knowledge-mcp
+    kind: mcp_http
+    listen: 127.0.0.1:18200
+    hostnames: [knowledge-mcp.sandbox.local]
+    endpoint: /mcp
+    tools: assets/services/knowledge-mcp-tools.yaml
+    authorization:
+      issuer: sandbox-identity
+      audience: http://knowledge-mcp.sandbox.local:18200
+      required_scopes: [knowledge:use]
+      allow_delegated: true
+```
+
+The protected service publishes OAuth Protected Resource Metadata and returns a
+`WWW-Authenticate` discovery hint when authentication is missing. It accepts
+RS256 bearer tokens issued by the declared local identity issuer and checks the
+audience, required scopes, and current grant or delegation before MCP sees the
+request.
+
+This supports configured client-credentials and token-exchange clients. It does
+not yet implement interactive browser authorization, PKCE, dynamic client
+registration, or different scopes for individual tools. See [Synthetic
+identity and delegated access](identity.md).
+
 ## Tool definition file
 
 ```yaml
@@ -214,7 +244,8 @@ The MVP does not support:
 - resources, prompts, completions, sampling, roots, elicitation, subscriptions,
   or cancellation of an in-progress call;
 - image, audio, embedded-resource, or resource-link result content;
-- OAuth discovery, TLS, or MCP transport authentication;
+- interactive OAuth authorization, PKCE, dynamic client registration, TLS, or
+  non-bearer MCP transport authentication;
 - dynamic response templates or arbitrary code in fixture definitions;
 - spawning an MCP implementation from the Blueprint; or
 - forwarding requests to an actual remote MCP server.

@@ -123,6 +123,96 @@ func TestValidateAcceptsSyntheticSDKCredentialsForModelProxy(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsSyntheticIdentityAndDelegation(t *testing.T) {
+	directory := testBlueprint(t, `identity:
+  issuers:
+    - id: sandbox-identity
+      kind: oidc
+      listen: 127.0.0.1:18300
+      hostnames: [identity.sandbox.local]
+      issuer_url: http://identity.sandbox.local:18300
+      access_token_ttl_seconds: 900
+  principals:
+    - id: support-agent
+      kind: agent
+      issuer: sandbox-identity
+      client_id: support-client
+      client_secret: synthetic-support-secret
+    - id: alice
+      kind: user
+      issuer: sandbox-identity
+  grants:
+    - id: agent-read
+      principal: support-agent
+      service: fixture
+      scopes: [fixture:read]
+  delegations:
+    - id: alice-support
+      agent: support-agent
+      user: alice
+      service: fixture
+      scopes: [fixture:read]
+  deliveries:
+    - id: support-oauth
+      kind: oauth_client
+      issuer: sandbox-identity
+      principal: support-agent
+      client_id_environment: TOOL_CLIENT_ID
+      client_secret_environment: TOOL_CLIENT_SECRET
+      token_url_environment: TOOL_TOKEN_URL
+    - id: support-workload-token
+      kind: projected_jwt
+      issuer: sandbox-identity
+      principal: support-agent
+      audience: local-workload
+      path: /run/interceptor-session/identity/support-agent.jwt
+      environment_variable: AGENT_IDENTITY_TOKEN_FILE
+  inbound:
+    issuer: sandbox-identity
+    audience: support-agent
+    application_header: Authorization
+`)
+	path := filepath.Join(directory, BlueprintFile)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = []byte(strings.Replace(string(body), "    fixtures: assets/fixtures.yaml\n", `    fixtures: assets/fixtures.yaml
+    authorization:
+      issuer: sandbox-identity
+      audience: http://fixture.sandbox.local:18100
+      required_scopes: [fixture:read]
+      allow_delegated: true
+`, 1))
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Validate(directory); err != nil {
+		t.Fatalf("valid identity Blueprint was rejected: %v", err)
+	}
+
+	unprotected := strings.Replace(string(body), `    authorization:
+      issuer: sandbox-identity
+      audience: http://fixture.sandbox.local:18100
+      required_scopes: [fixture:read]
+      allow_delegated: true
+`, "", 1)
+	if err := os.WriteFile(path, []byte(unprotected), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Validate(directory); err == nil || !strings.Contains(err.Error(), "does not declare authorization") {
+		t.Fatalf("identity grant to an unprotected service was accepted: %v", err)
+	}
+
+	invalid := strings.Replace(string(body), "user: alice", "user: support-agent", 1)
+	if err := os.WriteFile(path, []byte(invalid), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Validate(directory); err == nil || !strings.Contains(err.Error(), "user must reference a user principal") {
+		t.Fatalf("invalid delegation was accepted: %v", err)
+	}
+}
+
 func testBlueprint(t *testing.T, extra string) string {
 	t.Helper()
 	directory := t.TempDir()
@@ -146,11 +236,14 @@ application:
     workdir: /app
     environment:
       MODEL_BASE_URL: http://127.0.0.1:18080/v1
-  io:
-    adapter: http
-    application_listen: http://127.0.0.1:8080
-    served_routes:
-      - {method: POST, path: /invoke}
+  interface:
+    kind: http
+    operations:
+      - {id: invoke, method: POST, path: /invoke}
+    http:
+      listen: http://127.0.0.1:8080
+    startup_timeout_ms: 30000
+    turn_timeout_ms: 120000
   persistence:
     snapshot_capable: false
     mutable_roots: [/state/app]

@@ -67,6 +67,8 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return logsCommand(arguments[1:], stdout)
 	case "snapshot":
 		return snapshotCommand(arguments[1:], stdout)
+	case "identity":
+		return identityCommand(arguments[1:], stdout)
 	case "restore":
 		return restoreCommand(arguments[1:], stdout)
 	case "stop":
@@ -151,7 +153,7 @@ type stringList []string
 func (values *stringList) String() string { return strings.Join(*values, ",") }
 func (values *stringList) Set(value string) error {
 	if strings.TrimSpace(value) == "" {
-		return errors.New("model name may not be empty")
+		return errors.New("value may not be empty")
 	}
 	*values = append(*values, value)
 	return nil
@@ -690,6 +692,30 @@ func snapshotCommand(arguments []string, stdout io.Writer) error {
 	}
 }
 
+func identityCommand(arguments []string, stdout io.Writer) error {
+	if len(arguments) < 2 || arguments[0] != "caller-token" {
+		return errors.New("usage: interceptor identity caller-token <session-id> --principal <id> [--issuer <id>] [--audience <value>] [--scope <scope>]")
+	}
+	sessionID := arguments[1]
+	flags := flag.NewFlagSet("identity caller-token", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	principal := flags.String("principal", "", "synthetic user principal")
+	issuer := flags.String("issuer", "", "synthetic issuer ID; defaults to identity.inbound.issuer")
+	audience := flags.String("audience", "", "token audience; defaults to identity.inbound.audience")
+	var scopes stringList
+	flags.Var(&scopes, "scope", "caller token scope (repeatable)")
+	if err := flags.Parse(arguments[2:]); err != nil || flags.NArg() != 0 || *principal == "" {
+		return errors.New("usage: interceptor identity caller-token <session-id> --principal <id> [--issuer <id>] [--audience <value>] [--scope <scope>]")
+	}
+	body, _ := json.Marshal(map[string]any{"issuer": *issuer, "principal": *principal, "audience": *audience, "scopes": scopes})
+	result, err := hostrun.CallSession(context.Background(), sessionID, http.MethodPost, "/v1/identity/caller-tokens", body)
+	if err != nil {
+		return err
+	}
+	_, err = stdout.Write(result)
+	return err
+}
+
 func stopCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) != 1 {
 		return errors.New("usage: interceptor stop <session-id>")
@@ -805,13 +831,15 @@ application:
     workdir: /app
     environment:
       MODEL_BASE_URL: http://127.0.0.1:18080/v1
-  io:
-    adapter: http
-    application_listen: http://127.0.0.1:8080
-    served_routes:
-      - method: POST
+  interface:
+    kind: http
+    operations:
+      - id: invoke
+        method: POST
         path: /invoke
-    health_path: /healthz
+    http:
+      listen: http://127.0.0.1:8080
+      health_path: /healthz
     startup_timeout_ms: 30000
     turn_timeout_ms: 120000
   persistence:
@@ -851,6 +879,7 @@ Commands:
   stop <session-id>
   delete <session-id>
   snapshot create|list|inspect
+  identity caller-token <session-id> --principal <id>
   restore <session-id> --checkpoint <checkpoint-id> [--bridge-transport spool|unix]
   evaluate <session-id>
   coverage <session-id>

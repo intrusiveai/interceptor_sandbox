@@ -30,9 +30,10 @@ Errors use:
 
 ## Application interface
 
-The application base URL accepts the application's native request and response
-format. Only method/path pairs declared by `application.io.served_routes` are
-forwarded; undeclared routes return `501`.
+For an HTTP application, the application base URL accepts the application's
+native request and response format. Only method/path pairs declared by
+`application.interface.operations` are forwarded; undeclared routes return
+`501`.
 
 ```sh
 curl -sS -X POST "$APPLICATION_URL/invoke" \
@@ -40,9 +41,28 @@ curl -sS -X POST "$APPLICATION_URL/invoke" \
   --data '{"prompt":"hello"}'
 ```
 
-Use this interface when an existing harness expects the application's natural
-API. Use cooperative turns when you want a turn ID and the structured turn
-envelope.
+When `identity.inbound` is configured for an HTTP application, the harness can
+add `X-Interceptor-Caller: <user-principal>`. Interceptor removes that
+harness-only header and sends the application a freshly signed synthetic bearer
+token instead. If inbound identity is configured and no caller is named, an
+arbitrary caller-supplied `Authorization` header is removed rather than copied
+into the sandbox.
+
+For every other interface kind, Interceptor supplies a small, consistent HTTP
+surface. Post the application's native input to the declared operation:
+
+```sh
+curl -sS -X POST "$APPLICATION_URL/operations/ask" \
+  -H 'Content-Type: application/json' \
+  --data '{"prompt":"hello"}'
+```
+
+The adapter converts that request to a command, stream exchange, function call,
+or external-adapter frame. Use the cooperative control endpoint when you want
+the structured turn envelope and stable turn ID. See [Application
+interfaces](application-interfaces.md). Direct application-URL calls and
+cooperative turns both consume the session's turn limit and are included in
+activity/evidence tracking.
 
 ## Cooperative control endpoints
 
@@ -54,7 +74,23 @@ and local URLs.
 
 ### `POST /v1/turns`
 
-Submits one synchronous application turn:
+Submits one synchronous application turn. The preferred form names a declared
+operation and carries its bytes in `input`:
+
+```json
+{
+  "operation": "invoke",
+  "caller_principal": "alice",
+  "media_type": "application/json",
+  "input": "eyJwcm9tcHQiOiJoZWxsbyJ9"
+}
+```
+
+`input` is base64 because JSON cannot directly represent arbitrary bytes. The
+example decodes to `{"prompt":"hello"}`. On the command line,
+`printf '%s' '{"prompt":"hello"}' | base64` produces it.
+
+HTTP applications also accept the original route form for compatibility:
 
 ```json
 {
@@ -65,12 +101,19 @@ Submits one synchronous application turn:
 }
 ```
 
-JSON cannot directly represent arbitrary file or binary content, so `body` is
-encoded as base64 text. For example, the JSON body `{"prompt":"hello"}` becomes
-`eyJwcm9tcHQiOiJoZWxsbyJ9`. Most language runtimes provide a base64 helper; on
-the command line, `printf '%s' '{"prompt":"hello"}' | base64` produces it. The
-decoded request body is limited to 2 MiB. `method` and `path` must match a
-declared served route. Only `Content-Type`, `Accept`, `If-Match`, and
+Choose one form: `operation`/`input` cannot be combined with `method`/`path` or
+legacy `body`, and `input` and `body` cannot both be present.
+
+`caller_principal` is optional. For an HTTP application with
+`identity.inbound`, it places a synthetic user bearer token in the configured
+application header. Unknown users or a missing inbound identity declaration
+return `400`. Automatic placement is not available for non-HTTP adapters,
+because Interceptor cannot safely guess where a CLI prompt or function argument
+expects a user credential.
+
+In the compatibility form, `body` is also base64. The decoded request is
+limited to 2 MiB. `method` and `path` must match one declared HTTP operation.
+Only `Content-Type`, `Accept`, `If-Match`, and
 `If-None-Match` request headers are forwarded. Interceptor adds
 `X-Interceptor-Turn-ID`.
 
@@ -83,14 +126,15 @@ The response is:
   "code": 200,
   "headers": {"Content-Type":"application/json"},
   "body": "eyJvayI6dHJ1ZX0=",
+  "media_type": "application/json",
   "started_at": "2026-08-25T12:00:00Z",
   "finished_at": "2026-08-25T12:00:01Z"
 }
 ```
 
 `status` is `complete` or `error`; an error turn also contains `error`. Response
-bodies are base64 and bounded at 2 MiB. Only `Content-Type`, `ETag`, and
-`Location` response headers are retained.
+bodies are base64. Command results may also include `exit_code`. Only
+`Content-Type`, `ETag`, and `Location` HTTP response headers are retained.
 
 ### `GET /v1/turns/{turn-id}`
 
@@ -167,6 +211,25 @@ and an optional `body_ref` pointing to separately stored body content.
 Verifies the event chain and returns existing events in the selected channel.
 The default is `attack`. The cooperative interface does not expose the
 `evaluation` channel.
+
+### `POST /v1/identity/caller-tokens`
+
+Creates a short-lived synthetic token for a declared user principal:
+
+```json
+{
+  "principal": "alice",
+  "issuer": "sandbox-identity",
+  "audience": "support-agent",
+  "scopes": ["agent:invoke"]
+}
+```
+
+`issuer` and `audience` default from `identity.inbound` when possible. The
+response contains `access_token`, `token_type`, `expires_at`, `subject`,
+`audience`, and `scopes`. This is a synthetic test credential; the endpoint
+never retrieves or returns an external identity token. The CLI equivalent is
+`interceptor identity caller-token`.
 
 ## Operator-only API
 

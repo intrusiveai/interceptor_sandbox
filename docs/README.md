@@ -11,13 +11,16 @@ Start here:
 2. [Getting started](getting-started.md) — build and run the reference system.
 3. [Application integration](application-integration.md) — requirements for
    onboarding another application.
-4. [Environment Blueprint reference](environment-blueprint.md) — the complete
+4. [Application interfaces](application-interfaces.md) — HTTP, CLI, REPL,
+   direct code, and custom adapter configuration.
+5. [Environment Blueprint reference](environment-blueprint.md) — the complete
    YAML schema and the synthetic capabilities available to an environment.
 
 Reference and operational guides:
 
 - [Architecture](architecture.md)
 - [Model providers](model-providers.md)
+- [Synthetic identity and delegated access](identity.md)
 - [CLI reference](cli-reference.md)
 - [Local API reference](api-reference.md)
 - [Injections and evaluation](injections-and-evaluation.md)
