@@ -13,7 +13,9 @@ sealed, `interceptor app build` creates a second image—the wrapper image—by:
 
 1. using the application image as its starting point;
 2. adding the Linux `interceptor` executable; and
-3. making Interceptor the wrapper image's entrypoint.
+3. when local TLS is enabled, adding the generated public sandbox CA and
+   applying the selected trust mode; and
+4. making Interceptor the wrapper image's entrypoint.
 
 When a session starts, that executable runs in `sandboxd` supervisor mode.
 `sandboxd` starts the model proxy, simulated services, and attacker sinks. It
@@ -85,22 +87,32 @@ are rejected. `MODEL_BASE_URL` must point to a local address. Other names ending
 in `_BASE_URL` may point only to a local address or a hostname belonging to a
 simulated or attacker service declared in the Blueprint.
 
+When `network.tls` is enabled, simulated HTTPS and MCP-over-HTTPS origins use a
+private, build-generated CA. `auto` supplies common runtime trust variables;
+`bundle` exposes `INTERCEPTOR_CA_BUNDLE` and the fixed
+`/opt/interceptor/tls/ca.pem` path; and `application-managed` requires a
+Blueprint probe command for custom stores such as a JVM truststore or pinned
+runtime. Only the public CA enters the wrapper. The server keypair stays in
+protected host data and is mounted for the supervisor at runtime.
+
 Credential-looking variables—names containing `TOKEN`, `SECRET`, `PASSWORD`,
 or ending in `_KEY`—must be declared in `credentials` with the same value and a
 synthetic service or `model-proxy` in `accepted_by`. Use only synthetic secrets
 here.
 
-Real model-provider authentication is different. For OpenAI and LiteLLM, the
-CLI can read a Bearer key from a host environment variable selected by
-`--model-api-key-env`. For Bedrock, the native AWS SDK loads its normal host
-credential chain, including profiles and roles. Interceptor never injects these
-credentials into the application container.
+Real model-provider authentication is different. In production, the host
+controller resolves a stable credential ID from AWS Secrets Manager, Azure Key
+Vault, Google Cloud Secret Manager, or HashiCorp Vault, or uses the provider's
+workload identity. A named host environment variable remains available only
+for local development. Bedrock uses the native AWS SDK credential chain.
+Interceptor never injects these credentials into the application container.
 
-Interceptor does not require an application to convert its model protocol. An
-OpenAI application may use Chat Completions or Responses; a Bedrock application
-may use the Converse API; and LiteLLM accepts either supported OpenAI-compatible
-route. The selected host adapter must match that application API. Cross-protocol
-translation is not part of the MVP.
+Interceptor does not require an application to convert its model protocol. It
+supports native OpenAI Chat Completions and Responses, Azure OpenAI, Anthropic
+Messages, Gemini Developer API and Vertex Gemini `generateContent`, Amazon
+Bedrock Converse, and the two OpenAI-compatible LiteLLM routes. The selected
+host adapter must match the application API. Cross-protocol translation is not
+part of the MVP.
 
 SDKs often insist on an API key or AWS signature before sending even to a local
 endpoint. Give the application a declared synthetic value, never a real

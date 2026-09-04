@@ -109,3 +109,87 @@ func TestRewriteNativeResponsesAndBedrockToolResults(t *testing.T) {
 		t.Fatalf("Bedrock injection failed: err=%v results=%#v body=%s", err, results, rewrittenBedrock)
 	}
 }
+
+func TestResponseInjectionOrderIsStableByID(t *testing.T) {
+	journal, err := statejournal.Open(filepath.Join(t.TempDir(), "state.jsonl"), "sess-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+	manager := NewManager(journal, nil)
+	for _, item := range []struct{ id, payload string }{{"b", `"B"`}, {"a", `"A"`}} {
+		if err := manager.Arm(Definition{ID: item.id, Surface: "service_response", Mode: "simulation", Scope: "standing", Enabled: true, Selector: Selector{Service: "tickets", CallOrdinal: "every"}, Placement: Placement{Operation: "append_text"}, Payload: json.RawMessage(item.payload)}, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	updated, results, err := manager.RewriteResponse("service_response", "tickets", "", ResponseContext{Method: "GET", Path: "/tickets"}, "safe")
+	if err != nil || updated != "safeAB" || len(results) != 2 || results[0].InjectionID != "a" {
+		t.Fatalf("response injection was not deterministic: value=%v results=%#v err=%v", updated, results, err)
+	}
+}
+
+func TestResponseInjectionUsesPerDefinitionRouteOrdinalAndRequestPredicates(t *testing.T) {
+	journal, err := statejournal.Open(filepath.Join(t.TempDir(), "state.jsonl"), "sess-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+	manager := NewManager(journal, nil)
+	definition := Definition{
+		ID: "targeted", Surface: "service_response", Mode: "simulation", Scope: "once", Enabled: true,
+		Selector:  Selector{Service: "c2", Method: "POST", Path: "/poll", CallOrdinal: "first", QueryEqual: map[string]string{"agent": "one"}, RequestBodyPointer: "/state", RequestBodyEqual: json.RawMessage(`"ready"`)},
+		Placement: Placement{Operation: "replace"}, Payload: json.RawMessage(`"task"`),
+	}
+	if err := manager.Arm(definition, ""); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, results, err := manager.RewriteResponse("service_response", "c2", "", ResponseContext{Method: "GET", Path: "/health"}, "safe")
+	if err != nil || unchanged != "safe" || len(results) != 0 {
+		t.Fatalf("unrelated route affected ordinal: value=%v results=%#v err=%v", unchanged, results, err)
+	}
+	updated, results, err := manager.RewriteResponse("service_response", "c2", "", ResponseContext{Method: "POST", Path: "/poll", Query: map[string][]string{"agent": {"one"}}, Body: map[string]any{"state": "ready"}}, "safe")
+	if err != nil || updated != "task" || len(results) != 1 || !results[0].Applied {
+		t.Fatalf("targeted response injection failed: value=%v results=%#v err=%v", updated, results, err)
+	}
+}
+
+func TestResponseInjectionOrdinalProgressReplays(t *testing.T) {
+	journalPath := filepath.Join(t.TempDir(), "state.jsonl")
+	journal, err := statejournal.Open(journalPath, "sess-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(journal, nil)
+	if err := manager.Arm(Definition{ID: "second", Surface: "service_response", Mode: "simulation", Scope: "standing", Enabled: true, Selector: Selector{Service: "c2", Method: "GET", Path: "/poll", CallOrdinal: "2"}, Placement: Placement{Operation: "replace"}, Payload: json.RawMessage(`"task"`)}, ""); err != nil {
+		t.Fatal(err)
+	}
+	request := ResponseContext{Method: "GET", Path: "/poll"}
+	first, results, err := manager.RewriteResponse("service_response", "c2", "", request, "idle")
+	if err != nil || first != "idle" || len(results) != 0 {
+		t.Fatalf("first response unexpectedly matched: value=%v results=%#v err=%v", first, results, err)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	transactions, err := statejournal.VerifyFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoredJournal, err := statejournal.Open(filepath.Join(t.TempDir(), "state.jsonl"), "sess-restored")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restoredJournal.Close()
+	restored := NewManager(restoredJournal, nil)
+	for _, transaction := range transactions {
+		for _, operation := range transaction.Operations {
+			if err := restored.ApplyJournal(operation); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	second, results, err := restored.RewriteResponse("service_response", "c2", "", request, "idle")
+	if err != nil || second != "task" || len(results) != 1 || !results[0].Applied {
+		t.Fatalf("restored ordinal did not advance to its persisted match: value=%v results=%#v err=%v", second, results, err)
+	}
+}

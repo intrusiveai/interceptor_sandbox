@@ -23,6 +23,8 @@ type RunConfig struct {
 	Environment     map[string]string
 	Mounts          []Mount
 	Hostnames       []string
+	DNS             []string
+	Sysctls         map[string]string
 	PIDs            int64
 	MemoryBytes     int64
 	CPUs            string
@@ -131,6 +133,19 @@ func RunArguments(config RunConfig) ([]string, error) {
 	}
 	if config.TmpfsBytes > 0 {
 		arguments = append(arguments, "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,mode=1777,size="+strconv.FormatInt(config.TmpfsBytes, 10))
+	}
+	for _, resolver := range config.DNS {
+		if resolver != "127.0.0.1" {
+			return nil, fmt.Errorf("unsupported container DNS resolver %q", resolver)
+		}
+		arguments = append(arguments, "--dns", resolver)
+	}
+	for _, name := range sortedMapKeys(config.Sysctls) {
+		value := config.Sysctls[name]
+		if name != "net.ipv4.ip_unprivileged_port_start" || value != "53" {
+			return nil, fmt.Errorf("unsupported container sysctl %s=%s", name, value)
+		}
+		arguments = append(arguments, "--sysctl", name+"="+value)
 	}
 	for _, hostname := range sortedKeys(config.Hostnames) {
 		if strings.ContainsAny(hostname, ",:\t\r\n ") {

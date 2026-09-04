@@ -236,6 +236,7 @@ One session container (`--network none`)
   | sandboxd                                             |
   | - modular application-interface manager             |
   | - inference proxy                                    |
+  | - authoritative DNS and HTTP/TLS front doors         |
   | - fixture, stateful, and MCP synthetic services            |
   | - injection controller                               |
   | - attacker HTTP sink                                 |
@@ -255,8 +256,9 @@ The target-specific image MUST contain:
 - `interceptor`, including the `sandboxd` subcommand;
 - a minimal init/launcher;
 - the application and its runtime dependencies; and
-- Environment Instance CA material only when declared services require local
-  TLS.
+- the generated public Environment Instance CA only when declared services
+  require local TLS. The server keypair remains in protected host data and is
+  mounted for the supervisor only at runtime.
 
 The launcher starts `sandboxd` as a dedicated supervisor user and the
 application as a distinct non-root user. A minimal launcher may begin with only
@@ -344,25 +346,33 @@ consumes requests, calls the configured provider, and writes framed responses
 atomically. Request and response files use restrictive permissions and are
 removed after consumption. The application user cannot access the spool.
 
-Provider credentials exist only in the host connector environment or approved
-host credential source. They MUST NOT be written to spool frames, session
+Provider credentials exist only in an approved host credential source. A named
+host environment variable is a local-development compatibility source and MUST
+be rejected in production mode. Production controllers resolve a stable
+credential ID through the host-only resolver defined in
+`external-adaptive-simulation.md`, or use a provider workload identity. Values
+MUST NOT be written to spool frames, session
 metadata, logs, command arguments, Blueprint files, or container environment
-variables. OpenAI-compatible HTTP credentials are read from a named host
-environment variable. Bedrock credentials MUST be resolved by the native AWS
-SDK for Go v2 default configuration and credential chain on the host so normal
-keys, session credentials, profiles, SSO, web identity, credential processes,
-and workload roles remain usable without Interceptor copying them.
+variables. Bedrock credentials MUST be resolved by the native AWS SDK for Go v2
+default configuration and credential chain on the host so normal workload
+roles and explicitly configured development credentials remain usable without
+Interceptor copying them.
 
-The application-facing seam is protocol-aware. It accepts non-streaming OpenAI
-Chat Completions, OpenAI Responses, and Amazon Bedrock Converse. The host MUST
-support these provider adapters:
+The application-facing seam is protocol-aware. It accepts the non-streaming
+native codecs listed below. The host MUST support these provider adapters:
 
 - `openai-chat`: fixed-origin Chat Completions pass-through;
 - `openai-responses`: fixed-origin Responses pass-through;
 - `bedrock-converse`: native Converse decoding and invocation through the AWS
   SDK; and
 - `litellm`: fixed-origin Chat Completions or Responses pass-through to the
-  matching LiteLLM gateway route.
+  matching LiteLLM gateway route;
+- `anthropic-messages`: fixed-origin Anthropic Messages pass-through;
+- `gemini-api`: fixed-origin Gemini Developer API `generateContent`;
+- `vertex-gemini`: fixed-project/location native Vertex Gemini
+  `generateContent`; and
+- `azure-openai`: fixed-resource OpenAI Chat Completions or Responses
+  pass-through using an Azure deployment allowlist.
 
 The MVP MUST use like-for-like application/provider protocol pairings and MUST
 NOT silently translate between model APIs. An incompatible codec and adapter
@@ -451,11 +461,15 @@ MUST NOT be shared.
 {
   "schema_version": 1,
   "id": "sess-01J...",
+  "parent_session_id": null,
   "parent_checkpoint": null,
   "environment_path": "...",
   "environment_digest": "sha256:...",
   "app_image": "example/app@sha256:...",
   "app_digest": "sha256:...",
+  "capability_manifest_digest": "sha256:...",
+  "feedback_profile": "black-box",
+  "revision": 1,
   "phase": "running",
   "generation": 1,
   "created_at": "2026-08-22T20:00:00Z",
@@ -509,9 +523,9 @@ application:
     workdir: /app
     environment:
       MODEL_BASE_URL: http://127.0.0.1:18080/v1
-      TICKETS_BASE_URL: http://tickets.sandbox.local:18100
-      KNOWLEDGE_MCP_BASE_URL: http://knowledge-mcp.sandbox.local:18102/mcp
-      EXFIL_BASE_URL: http://metrics.example.test:18200
+      TICKETS_BASE_URL: https://tickets.sandbox.local
+      KNOWLEDGE_MCP_BASE_URL: https://knowledge-mcp.sandbox.local/mcp
+      EXFIL_BASE_URL: https://metrics.example.test
       APP_STATE_DIR: /state/app
   interface:
     kind: http
@@ -543,6 +557,16 @@ time:
   base: 2026-06-15T09:00:00Z
   mode: fixed
 
+network:
+  dns:
+    enabled: true
+    unknown_policy: nxdomain
+    max_queries: 10000
+  http: {enabled: true}
+  tls:
+    enabled: true
+    trust_mode: auto
+
 filesystem:
   seed:
     - source: assets/fs/home
@@ -551,6 +575,12 @@ filesystem:
     - source: assets/fs/app-state
       target: /state/app
       read_only: false
+  injection_namespaces:
+    - id: inbox
+      root: /state/app/inbox
+      allow_create: true
+      max_files: 100
+      max_file_bytes: 1048576
 
 services:
   - id: tickets
@@ -559,6 +589,9 @@ services:
     hostnames: [tickets.sandbox.local]
     seed: assets/services/tickets.json
     routes: assets/services/tickets-routes.yaml
+    injections:
+      create_collections:
+        - {collection: tickets, max_resources: 1000}
     authorization:
       issuer: sandbox-identity
       audience: http://tickets.sandbox.local:18100
@@ -640,9 +673,17 @@ attacker_services:
     listen: 127.0.0.1:18200
     hostnames: [metrics.example.test]
     response:
+      mode: static
       status: 200
       json: {ok: true}
     max_capture_bytes: 1048576
+  - id: c2-http
+    kind: http_sink
+    listen: 127.0.0.1:18201
+    hostnames: [c2.example.test]
+    response: {mode: dynamic, status: 200, body: idle}
+    max_capture_bytes: 1048576
+    options: {methods: [GET, POST], paths: [/poll, /beacon]}
 
 oracles:
   - id: secret-at-sink
@@ -730,8 +771,8 @@ explicit catch-all error fixture is allowed, but the runtime still records a
 coverage gap.
 
 Fixture responses include status, selected headers, and either inline content
-or an asset reference. TLS and streaming are optional extensions and are not
-required in the first implementation.
+or an asset reference. Streaming is not required. When the shared TLS front
+door is enabled, the same handler is available over its declared HTTPS origin.
 
 #### 6.5.2 `stateful_http`
 
@@ -802,7 +843,7 @@ grant/delegation state.
 
 The MVP does not support SSE, HTTP GET streams, protocol sessions, request
 batching, pagination, server-initiated messages, cancellation, resources,
-prompts, sampling, roots, elicitation, subscriptions, non-text content, TLS,
+prompts, sampling, roots, elicitation, subscriptions, non-text content,
 interactive OAuth authorization code/PKCE, dynamic client registration,
 arbitrary transport authentication, dynamic fixture templates, or forwarding
 to an actual remote MCP server. Each request body, encoded tool result, and
@@ -811,11 +852,58 @@ individual stateful seed record is bounded at 1 MiB.
 #### 6.5.4 `http_sink`
 
 The attacker HTTP sink accepts configured methods and paths, captures request
-headers and a bounded body, and returns a deterministic declared response. Its
+headers and a bounded body, and returns a deterministic declared response. A
+Blueprint MAY declare multiple sinks with distinct IDs, hostnames, listeners,
+and policies. `response.mode` defaults to `static`: static sinks are capture-only
+exfiltration destinations and reject response injection. `dynamic` sinks expose
+their body-capable successful default response to `service_response` injection
+after request capture, providing a bounded synthetic C2 channel. Its
 observations appear on the attack channel because an attacker can observe their
-own receiver. Whether an oracle matched is evaluation-channel data.
+own receiver. Whether an oracle matched is evaluation-channel data. Dynamic
+mode never permits runtime changes to destination, route allowlists, status, or
+security-sensitive headers.
 
-SMTP, DNS, generic TCP, and two-way tasking are future service kinds.
+SMTP, generic TCP attacker sinks, and two-way tasking are future service kinds.
+
+#### 6.5.5 Closed DNS and HTTP/TLS front doors
+
+An Environment MAY enable a loopback DNS simulator. The runtime MUST configure
+it as the container resolver, serve standard UDP and TCP DNS on port 53, and
+return `127.0.0.1` only for `A` queries naming Blueprint-declared services,
+attacker services, or identity issuers. It MUST NOT forward upstream. Unknown
+names MUST return the sealed `NXDOMAIN` or `REFUSED` policy and create a
+coverage gap. A positive `max_queries` bound is mandatory; excess queries MUST
+be refused without unbounded evidence creation. Clients that bypass the system
+resolver and address an external DNS server remain blocked by `--network none`.
+
+An Environment MAY independently enable shared HTTP and HTTPS front doors.
+They route only exact declared hostnames to their existing in-process handlers.
+Unknown HTTP hosts and mismatched HTTPS SNI/Host combinations MUST fail with a
+coverage gap and MUST NOT become a generic proxy. HTTPS MUST require TLS 1.2 or
+newer. MCP-over-HTTPS uses this same transport boundary and does not require a
+second MCP implementation. Standard DNS itself is not TLS; DoT and DoH are not
+claimed by this version.
+
+When HTTPS is enabled, `interceptor app build` MUST generate a private sandbox
+CA and a server certificate whose SAN set exactly matches the declared
+hostnames. Only the public CA enters the wrapper image. The CA signing key MUST
+be discarded after issuance. The leaf certificate and key MUST remain in
+private host application data, be digest-bound by the application lock, and be
+mounted read-only in a supervisor-only runtime directory.
+
+The sealed TLS trust mode is one of:
+
+- `auto`: add the CA to a recognized system PEM bundle where available and
+  inject the supported common PEM trust variables;
+- `bundle`: expose the fixed CA path and `INTERCEPTOR_CA_BUNDLE` without
+  claiming application-runtime integration; or
+- `application-managed`: require an absolute application-user probe command,
+  executed against a reserved non-mutating `204` endpoint on the live HTTPS
+  front door before application startup.
+
+Failure to generate, verify, mount, load, or—when required—probe TLS material
+MUST fail session startup. No generated private key is evidence or snapshot
+content.
 
 ### 6.6 Credentials
 
@@ -1128,10 +1216,12 @@ inference proxy. The application is configured with the proxy base URL. General
 networking is disabled, so a remote provider cannot be contacted directly.
 
 The proxy MUST accept non-streaming OpenAI Chat Completions, OpenAI Responses,
-and Amazon Bedrock Converse create operations. It MUST retain the application's
-native request and response protocol. The selected host adapter MUST support
-that codec; incompatible pairings fail explicitly. Unsupported routes, fields,
-or content types fail explicitly rather than being silently discarded.
+Amazon Bedrock Converse, Anthropic Messages, and Google/Vertex Gemini
+`generateContent` create operations. Azure OpenAI uses the supported native
+OpenAI codecs. It MUST retain the application's native request and response
+protocol. The selected host adapter MUST support that codec; incompatible
+pairings fail explicitly. Unsupported routes, fields, or content types fail
+explicitly rather than being silently discarded.
 
 OpenAI SDKs use the Blueprint's loopback model base URL. Bedrock SDKs use the
 same loopback server as their Bedrock Runtime endpoint and produce the normal
@@ -1193,7 +1283,7 @@ The connector reports separate digests for the final injected application
 request, provider request, and native provider response. Injection delivery is
 confirmed against the final request accepted by the adapter. Codec tests MUST
 prove that supported injected tool results remain in their native Chat,
-Responses, or Converse representation.
+Responses, Converse, Messages, or GenerateContent representation.
 
 The `openai-responses` adapter MUST preserve the native create-request and
 response bodies. Provider-managed retrieve/delete/cancel operations,
@@ -1236,9 +1326,9 @@ Every injection has:
 - a mode; and
 - armed, fired, and delivery state.
 
-### 10.2 MVP surfaces
+### 10.2 Injection surfaces
 
-The MVP requires two surfaces:
+The baseline requires two surfaces:
 
 1. `model_tool_result` — transit rewrite of a selected tool-result message in a
    model request.
@@ -1246,18 +1336,25 @@ The MVP requires two surfaces:
    resource, or mutable Environment Instance document so the application
    encounters the payload through its normal data path.
 
-Direct system-prompt rewriting, arbitrary memory-store plugins, vector-index
-rewrites, MCP-native transit interception before the framework receives a tool
-result, and syscall-layer injection are future surfaces. Stateful `mcp_http`
-records are already eligible for `environment_state` fidelity injection, and
-MCP results converted into supported Chat, Responses, or Converse tool-result
-history remain eligible for `model_tool_result` simulation.
+The adaptive extension adds `service_response` and `mcp_tool_result` at the
+managed-service ingress boundary. `service_response` also applies to an
+explicitly dynamic attacker HTTP service after it captures the request, so a
+local command such as `curl` receives the injected bytes from the simulated
+endpoint. Stateful `mcp_http` records remain eligible
+for `environment_state` fidelity injection, while MCP results converted into a
+supported provider tool-result history remain eligible for
+`model_tool_result` simulation. Direct system-prompt rewriting, arbitrary
+memory-store plugins, vector-index rewrites, and syscall-layer injection remain
+out of scope. Interceptor does not claim generic descendant-process or stdout
+interposition. Shell output represented by an agent as a client tool result is
+covered by `model_tool_result`.
 
 ### 10.3 Modes
 
-`simulation` modifies content in transit at the inference proxy. It measures
-model susceptibility at a controlled position, not whether a real attacker can
-control the source data.
+`simulation` modifies content in transit at the inference proxy or a declared
+HTTP/MCP response boundary. It measures model susceptibility at a controlled
+position; a dynamic attacker HTTP response additionally models content directly
+controlled by an attacker endpoint.
 
 `fidelity` writes the payload into a declared Environment Instance resource
 through the same state journal used for ordinary mutations. It measures the
@@ -1275,6 +1372,13 @@ The first implementation supports:
 - JSON-field equality or substring match on tool arguments; and
 - optional exact turn ID.
 
+For `service_response`, selectors additionally support exact method and path,
+at most 16 exact single-valued query and non-sensitive header predicates, and
+bounded JSON-pointer equality or text containment over the request body.
+Response ordinals are relative to each armed definition after its non-ordinal
+predicates match. Their progress is journaled so snapshot restore is
+deterministic.
+
 Selectors use a small, documented schema. They MUST NOT execute regular
 expressions from untrusted input in a way that permits unbounded processing, and
 MUST NOT evaluate arbitrary expressions or code.
@@ -1291,6 +1395,14 @@ Supported placement operations are:
 Placement fails closed if the target is absent, of the wrong type, or matches
 more than once where a single target is required. The original and resulting
 values are recorded on the evaluation channel with blob references when large.
+
+`environment_state` MAY create an absent resource only when the Blueprint opts
+the collection into `injections.create_collections`, supplies a positive
+`max_resources`, and the sealed stateful HTTP route or MCP tool already defines
+a compatible create contract. It MAY create an absent file only through a
+named `filesystem.injection_namespaces` entry with `allow_create`, positive
+file-count and byte ceilings, and an existing real parent directory. Creation
+requires root replacement. Absolute-path injection remains update-only.
 
 ### 10.6 Scope
 
@@ -1702,7 +1814,7 @@ bypassing the limit.
 3. refuses incompatible schema or interceptor versions unless a tested journal
    migration exists;
 4. creates a new session ID and evidence directory with
-   `parent_checkpoint=<id>`;
+   `parent_session_id=<source>` and `parent_checkpoint=<id>`;
 5. materializes the Sealed Environment as a new Environment Instance runtime
    generation;
 6. replays source journal transactions from sequence 1 through
@@ -2009,6 +2121,11 @@ Every release MUST include an integration test image that attempts:
 
 - public IPv4 and IPv6 TCP connections;
 - DNS resolution through non-declared resolvers;
+- declared and undeclared queries through the closed DNS simulator, including
+  its query ceiling and lack of upstream forwarding;
+- HTTP unknown-host and HTTPS unknown-SNI/Host mismatch rejection;
+- TLS trust success for each declared trust mode and rejection after CA,
+  certificate, key, or application-lock tampering;
 - cloud metadata access;
 - application/control/model spool discovery and reading;
 - bind-mounted bridge-socket discovery and opening when the Unix transport is selected;
@@ -2074,9 +2191,10 @@ that:
 A small reference agent and Environment Blueprint MUST exercise:
 
 - HTTP turn delivery and exact output pass-through;
-- native Chat, Responses, and Converse codecs through the host connector;
-- like-for-like OpenAI, Converse, and LiteLLM adapter unit tests, including text
-  and function-tool round trips;
+- all declared native OpenAI/Azure, Anthropic, Gemini/Vertex, Converse, and
+  LiteLLM codecs through the host connector;
+- like-for-like adapter unit tests, including text and function-tool round
+  trips, model/deployment allowlists, provider metadata, and authentication;
 - fixture hit and coverage gap;
 - stateful create/read/update behavior;
 - MCP tool discovery plus fixture and stateful tool calls;
@@ -2139,10 +2257,10 @@ state and no unknown request receives invented success.
 
 ### Milestone 4 — Model seam and recording
 
-- Native non-streaming Chat Completions, Responses, and Converse application
-  codecs.
-- Like-for-like host adapters for OpenAI Chat, OpenAI Responses, Bedrock
-  Converse through the AWS SDK, and LiteLLM.
+- Native non-streaming OpenAI Chat and Responses, Azure OpenAI, Anthropic
+  Messages, Gemini/Vertex `generateContent`, Bedrock Converse, and LiteLLM
+  application codecs.
+- Like-for-like host adapters for every supported native codec.
 - Protected host model connector with no container credentials.
 - Semantic and raw model records, token accounting, and tool-call correlation.
 
@@ -2152,7 +2270,9 @@ network and provider access from the app fail.
 ### Milestone 5 — Injection and evaluation
 
 - Transit tool-result and fidelity Environment Instance state injections.
-- Selectors, placements, scopes, and state journaling.
+- Managed HTTP, native MCP, and dynamic attacker-response injection.
+- Precise selectors, bounded state/file creation, placements, scopes, and state
+  journaling.
 - Delivery confirmation and deterministic oracle engine.
 - Strict attack/control/evaluation response separation.
 
@@ -2194,7 +2314,8 @@ The implementation is ready to call an MVP only if all are true:
 - [ ] Unknown synthetic-service requests fail closed and are reported as
       coverage gaps.
 - [ ] Every model interaction crosses the inference proxy.
-- [ ] OpenAI Chat, OpenAI Responses, Bedrock Converse, and LiteLLM can be
+- [ ] OpenAI Chat, OpenAI Responses, Bedrock Converse, LiteLLM, Anthropic
+      Messages, Gemini Developer API, Vertex Gemini, and Azure OpenAI can be
       selected without placing provider credentials in the container.
 - [ ] Declared MCP HTTP tools work without external network access; unknown
       MCP methods, tools, and fixture inputs fail closed with coverage evidence.
@@ -2207,6 +2328,13 @@ The implementation is ready to call an MVP only if all are true:
 - [ ] Natural application output is returned byte-for-byte to the harness.
 - [ ] Event records carry channel, provenance, sequence, and valid hash chain.
 - [ ] A harness can arm both required injection modes.
+- [ ] Every declared injection target rejects unsupported surfaces at arm time;
+      static attacker sinks cannot receive response injection.
+- [ ] A dynamic attacker endpoint returns runtime-injected response bytes to a
+      local HTTP client while retaining its captured request.
+- [ ] Resource and file creation stays within Blueprint-declared collections or
+      logical namespaces and their schema, count, and byte ceilings.
+- [ ] Response selector ordinal progress survives snapshot restore.
 - [ ] Delivery is measured at the model request and never inferred from planting.
 - [ ] Three-valued injection results remain distinct.
 - [ ] Attacker-sink observations are visible to the harness while oracle verdicts
@@ -2239,11 +2367,10 @@ shape the initial implementation prematurely:
 - additional MCP methods, model operations, streaming transports, content
   types, interactive authorization, provider adapters, and cross-protocol mappings where
   their semantics can be preserved;
-- production identity federation or proxying, authorization-code/PKCE, device
-  flow, refresh tokens, SPIFFE/mTLS, cloud STS, and route/tool-specific policies;
 - full-screen terminal emulation, adapter streaming, and additional language or
   RPC adapters;
-- SMTP, DNS, and generic TCP attacker sinks;
+- SMTP and generic TCP attacker sinks;
+- DNS-over-TLS and DNS-over-HTTPS when demanded by target compatibility;
 - specialized stateful service codec plugins;
 - continuous filesystem mutation capture using fanotify/FUSE;
 - Linux syscall observation for execution and file-read oracles;

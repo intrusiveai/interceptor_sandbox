@@ -16,6 +16,7 @@ type Blueprint struct {
 	Application      Application       `yaml:"application" json:"application"`
 	Organization     Organization      `yaml:"organization,omitempty" json:"organization,omitempty"`
 	Time             TimeConfig        `yaml:"time,omitempty" json:"time,omitempty"`
+	Network          NetworkSimulation `yaml:"network,omitempty" json:"network,omitempty"`
 	Filesystem       Filesystem        `yaml:"filesystem,omitempty" json:"filesystem,omitempty"`
 	Services         []Service         `yaml:"services,omitempty" json:"services,omitempty"`
 	Identity         Identity          `yaml:"identity,omitempty" json:"identity,omitempty"`
@@ -24,6 +25,7 @@ type Blueprint struct {
 	AttackerServices []AttackerService `yaml:"attacker_services,omitempty" json:"attacker_services,omitempty"`
 	Oracles          []Oracle          `yaml:"oracles,omitempty" json:"oracles,omitempty"`
 	Limits           Limits            `yaml:"limits,omitempty" json:"limits,omitempty"`
+	Adaptive         AdaptiveConfig    `yaml:"adaptive,omitempty" json:"adaptive,omitempty"`
 }
 
 type Metadata struct {
@@ -141,8 +143,46 @@ type TimeConfig struct {
 	Mode string    `yaml:"mode,omitempty" json:"mode,omitempty"`
 }
 
+// NetworkSimulation defines the closed, loopback-only name and HTTP transport
+// plane visible to the application. It never configures upstream forwarding.
+type NetworkSimulation struct {
+	DNS  DNSConfig       `yaml:"dns,omitempty" json:"dns,omitempty"`
+	HTTP FrontDoorConfig `yaml:"http,omitempty" json:"http,omitempty"`
+	TLS  TLSConfig       `yaml:"tls,omitempty" json:"tls,omitempty"`
+}
+
+type DNSConfig struct {
+	Enabled       bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Listen        string `yaml:"listen,omitempty" json:"listen,omitempty"`
+	UnknownPolicy string `yaml:"unknown_policy,omitempty" json:"unknown_policy,omitempty"`
+	MaxQueries    int64  `yaml:"max_queries,omitempty" json:"max_queries,omitempty"`
+}
+
+type FrontDoorConfig struct {
+	Enabled bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Listen  string `yaml:"listen,omitempty" json:"listen,omitempty"`
+}
+
+type TLSConfig struct {
+	Enabled                 bool     `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Listen                  string   `yaml:"listen,omitempty" json:"listen,omitempty"`
+	TrustMode               string   `yaml:"trust_mode,omitempty" json:"trust_mode,omitempty"`
+	ApplicationManagedProbe []string `yaml:"application_managed_probe,omitempty" json:"application_managed_probe,omitempty"`
+}
+
 type Filesystem struct {
-	Seed []SeedEntry `yaml:"seed,omitempty" json:"seed,omitempty"`
+	Seed                []SeedEntry              `yaml:"seed,omitempty" json:"seed,omitempty"`
+	InjectionNamespaces []FileInjectionNamespace `yaml:"injection_namespaces,omitempty" json:"injection_namespaces,omitempty"`
+}
+
+// FileInjectionNamespace exposes a stable logical filesystem target without
+// publishing its container path in the external capability manifest.
+type FileInjectionNamespace struct {
+	ID           string `yaml:"id" json:"id"`
+	Root         string `yaml:"root" json:"root"`
+	AllowCreate  bool   `yaml:"allow_create,omitempty" json:"allow_create,omitempty"`
+	MaxFiles     int    `yaml:"max_files,omitempty" json:"max_files,omitempty"`
+	MaxFileBytes int64  `yaml:"max_file_bytes,omitempty" json:"max_file_bytes,omitempty"`
 }
 
 type SeedEntry struct {
@@ -152,17 +192,27 @@ type SeedEntry struct {
 }
 
 type Service struct {
-	ID            string                `yaml:"id" json:"id"`
-	Kind          string                `yaml:"kind" json:"kind"`
-	Listen        string                `yaml:"listen" json:"listen"`
-	Hostnames     []string              `yaml:"hostnames,omitempty" json:"hostnames,omitempty"`
-	Seed          string                `yaml:"seed,omitempty" json:"seed,omitempty"`
-	Routes        string                `yaml:"routes,omitempty" json:"routes,omitempty"`
-	Fixtures      string                `yaml:"fixtures,omitempty" json:"fixtures,omitempty"`
-	Endpoint      string                `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
-	Tools         string                `yaml:"tools,omitempty" json:"tools,omitempty"`
-	Options       map[string]any        `yaml:"options,omitempty" json:"options,omitempty"`
-	Authorization *ServiceAuthorization `yaml:"authorization,omitempty" json:"authorization,omitempty"`
+	ID            string                 `yaml:"id" json:"id"`
+	Kind          string                 `yaml:"kind" json:"kind"`
+	Listen        string                 `yaml:"listen" json:"listen"`
+	Hostnames     []string               `yaml:"hostnames,omitempty" json:"hostnames,omitempty"`
+	Seed          string                 `yaml:"seed,omitempty" json:"seed,omitempty"`
+	Routes        string                 `yaml:"routes,omitempty" json:"routes,omitempty"`
+	Fixtures      string                 `yaml:"fixtures,omitempty" json:"fixtures,omitempty"`
+	Endpoint      string                 `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
+	Tools         string                 `yaml:"tools,omitempty" json:"tools,omitempty"`
+	Options       map[string]any         `yaml:"options,omitempty" json:"options,omitempty"`
+	Authorization *ServiceAuthorization  `yaml:"authorization,omitempty" json:"authorization,omitempty"`
+	Injections    ServiceInjectionPolicy `yaml:"injections,omitempty" json:"injections,omitempty"`
+}
+
+type ServiceInjectionPolicy struct {
+	CreateCollections []ResourceCreationPolicy `yaml:"create_collections,omitempty" json:"create_collections,omitempty"`
+}
+
+type ResourceCreationPolicy struct {
+	Collection   string `yaml:"collection" json:"collection"`
+	MaxResources int    `yaml:"max_resources" json:"max_resources"`
 }
 
 // Identity describes the synthetic principals and credential issuer available
@@ -263,6 +313,7 @@ type AttackerService struct {
 }
 
 type SinkResponse struct {
+	Mode   string         `yaml:"mode,omitempty" json:"mode,omitempty"`
 	Status int            `yaml:"status" json:"status"`
 	JSON   map[string]any `yaml:"json,omitempty" json:"json,omitempty"`
 	Body   string         `yaml:"body,omitempty" json:"body,omitempty"`
@@ -285,6 +336,24 @@ type Limits struct {
 	MaxPIDs        int64  `yaml:"max_pids,omitempty" json:"max_pids,omitempty"`
 	MemoryBytes    int64  `yaml:"memory_bytes,omitempty" json:"memory_bytes,omitempty"`
 	CPUs           string `yaml:"cpus,omitempty" json:"cpus,omitempty"`
+}
+
+type AdaptiveConfig struct {
+	FeedbackProfiles []string `yaml:"feedback_profiles,omitempty" json:"feedback_profiles,omitempty"`
+	MaxAttempts      int      `yaml:"max_attempts,omitempty" json:"max_attempts,omitempty"`
+	MaxArtifacts     int      `yaml:"max_artifacts,omitempty" json:"max_artifacts,omitempty"`
+}
+
+func (a *AdaptiveConfig) ApplyDefaults() {
+	if len(a.FeedbackProfiles) == 0 {
+		a.FeedbackProfiles = []string{"black-box"}
+	}
+	if a.MaxAttempts == 0 {
+		a.MaxAttempts = 200
+	}
+	if a.MaxArtifacts == 0 {
+		a.MaxArtifacts = 400
+	}
 }
 
 func (l *Limits) ApplyDefaults() {

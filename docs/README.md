@@ -20,6 +20,9 @@ Reference and operational guides:
 
 - [Architecture](architecture.md)
 - [Model providers](model-providers.md)
+- [Adaptive simulation interface](adaptive-simulation.md)
+- [Cross-VM gateway](cross-vm-gateway.md)
+- [Host credential stores](credential-stores.md)
 - [Synthetic identity and delegated access](identity.md)
 - [CLI reference](cli-reference.md)
 - [Local API reference](api-reference.md)
@@ -42,6 +45,11 @@ Reference and operational guides:
 | Checkpoint | The small record that identifies exactly which saved state belongs to a snapshot. |
 | State journal | An ordered history of environment changes used to rebuild saved state. |
 | Digest | A digital fingerprint used to detect whether an image or file changed. |
+| AttemptContext | Immutable producer-neutral identity and ancestry for one payload attempt. |
+| CapabilityManifest | Deterministic, secret-free description of an environment's executable surface. |
+| ObservationView | Feedback-filtered live result visible to an attack harness. |
+| EvidenceBundle | Post-run authoritative attempt, event, snapshot, and artifact index. |
+| ExecutionLease | Short-lived, server-side authorization for a bound set of Cross-VM operations and budgets. |
 | Loopback | A network address available only on the local machine or inside the container, rather than on the wider network. |
 
 Reference pages retain exact field names and implementation terms because users

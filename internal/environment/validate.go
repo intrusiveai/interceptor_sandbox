@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path"
@@ -41,6 +42,19 @@ func Validate(directory string) (*ValidationReport, error) {
 		}
 	}
 	assetSources := []string{}
+	if blueprint.Adaptive.MaxAttempts < 1 || blueprint.Adaptive.MaxAttempts > 100000 || blueprint.Adaptive.MaxArtifacts < 1 || blueprint.Adaptive.MaxArtifacts > 200000 {
+		add(errors.New("adaptive attempt or artifact limit is out of bounds"))
+	}
+	seenProfiles := map[string]bool{}
+	for _, profile := range blueprint.Adaptive.FeedbackProfiles {
+		if profile != "black-box" && profile != "diagnostic" && profile != "oracle-assisted" {
+			add(fmt.Errorf("unsupported adaptive feedback profile %q", profile))
+		}
+		if seenProfiles[profile] {
+			add(fmt.Errorf("adaptive feedback profile %q is duplicated", profile))
+		}
+		seenProfiles[profile] = true
+	}
 
 	if blueprint.APIVersion != APIVersion {
 		add(fmt.Errorf("api_version must be %q", APIVersion))
@@ -128,10 +142,92 @@ func Validate(directory string) (*ValidationReport, error) {
 			add(fmt.Errorf("writable seed target %q is outside application mutable_roots", target))
 		}
 	}
+	fileNamespaceIDs := map[string]struct{}{}
+	fileNamespaceRoots := map[string]struct{}{}
+	for i, namespace := range blueprint.Filesystem.InjectionNamespaces {
+		prefix := fmt.Sprintf("filesystem.injection_namespaces[%d]", i)
+		add(validateID(prefix+".id", namespace.ID, fileNamespaceIDs))
+		root, err := validateContainerPath(prefix+".root", namespace.Root)
+		add(err)
+		if err == nil && !withinAny(root, mutableRoots) {
+			add(fmt.Errorf("%s.root %q is outside application mutable_roots", prefix, root))
+		}
+		if err == nil {
+			for existing := range fileNamespaceRoots {
+				if pathWithin(root, existing) || pathWithin(existing, root) {
+					add(fmt.Errorf("filesystem injection namespace roots %q and %q overlap", root, existing))
+				}
+			}
+			fileNamespaceRoots[root] = struct{}{}
+		}
+		if namespace.AllowCreate {
+			if namespace.MaxFiles < 1 || namespace.MaxFiles > 100000 {
+				add(fmt.Errorf("%s.max_files must be between 1 and 100000 when creation is enabled", prefix))
+			}
+			if namespace.MaxFileBytes < 1 || namespace.MaxFileBytes > blueprint.Limits.MaxBlobBytes {
+				add(fmt.Errorf("%s.max_file_bytes must be positive and no greater than limits.max_blob_bytes", prefix))
+			}
+		} else if namespace.MaxFiles != 0 || namespace.MaxFileBytes != 0 {
+			add(fmt.Errorf("%s creation limits require allow_create", prefix))
+		}
+	}
 
 	serviceIDs := map[string]struct{}{}
 	hostnames := map[string]string{}
 	listens := map[string]string{}
+	if blueprint.Network.DNS.Enabled {
+		add(validateListen("network.dns.listen", blueprint.Network.DNS.Listen, listens, "network-dns"))
+		host, port, err := net.SplitHostPort(blueprint.Network.DNS.Listen)
+		if err == nil && host != "127.0.0.1" {
+			add(errors.New("network.dns.listen must use 127.0.0.1"))
+		}
+		if err == nil && port != "53" {
+			add(errors.New("network.dns.listen must use standard DNS port 53"))
+		}
+		if blueprint.Network.DNS.UnknownPolicy != "nxdomain" && blueprint.Network.DNS.UnknownPolicy != "refused" {
+			add(errors.New("network.dns.unknown_policy must be nxdomain or refused"))
+		}
+		if blueprint.Network.DNS.MaxQueries < 1 || blueprint.Network.DNS.MaxQueries > 1_000_000 {
+			add(errors.New("network.dns.max_queries must be between 1 and 1000000"))
+		}
+	} else if blueprint.Network.DNS.Listen != "" || blueprint.Network.DNS.UnknownPolicy != "" || blueprint.Network.DNS.MaxQueries != 0 {
+		add(errors.New("network.dns settings require enabled: true"))
+	}
+	if blueprint.Network.HTTP.Enabled {
+		add(validateListen("network.http.listen", blueprint.Network.HTTP.Listen, listens, "network-http"))
+		if host, _, err := net.SplitHostPort(blueprint.Network.HTTP.Listen); err == nil && host != "127.0.0.1" {
+			add(errors.New("network.http.listen must use 127.0.0.1"))
+		}
+	} else if blueprint.Network.HTTP.Listen != "" {
+		add(errors.New("network.http.listen requires enabled: true"))
+	}
+	if blueprint.Network.TLS.Enabled {
+		add(validateListen("network.tls.listen", blueprint.Network.TLS.Listen, listens, "network-tls"))
+		if host, _, err := net.SplitHostPort(blueprint.Network.TLS.Listen); err == nil && host != "127.0.0.1" {
+			add(errors.New("network.tls.listen must use 127.0.0.1"))
+		}
+		switch blueprint.Network.TLS.TrustMode {
+		case "auto", "bundle":
+			if len(blueprint.Network.TLS.ApplicationManagedProbe) != 0 {
+				add(errors.New("network.tls.application_managed_probe is valid only with application-managed trust"))
+			}
+		case "application-managed":
+			if len(blueprint.Network.TLS.ApplicationManagedProbe) == 0 {
+				add(errors.New("network.tls.application_managed_probe is required with application-managed trust"))
+			} else if !filepath.IsAbs(blueprint.Network.TLS.ApplicationManagedProbe[0]) {
+				add(errors.New("network.tls.application_managed_probe executable must be an absolute path"))
+			}
+		default:
+			add(errors.New("network.tls.trust_mode must be auto, bundle, or application-managed"))
+		}
+		for index, argument := range blueprint.Network.TLS.ApplicationManagedProbe {
+			if argument == "" || strings.ContainsRune(argument, '\x00') || len(argument) > 4096 {
+				add(fmt.Errorf("network.tls.application_managed_probe[%d] is invalid", index))
+			}
+		}
+	} else if blueprint.Network.TLS.Listen != "" || blueprint.Network.TLS.TrustMode != "" || len(blueprint.Network.TLS.ApplicationManagedProbe) != 0 {
+		add(errors.New("network.tls settings require enabled: true"))
+	}
 	for i, service := range blueprint.Services {
 		prefix := fmt.Sprintf("services[%d]", i)
 		add(validateID(prefix+".id", service.ID, serviceIDs))
@@ -140,6 +236,23 @@ func Validate(directory string) (*ValidationReport, error) {
 		}
 		add(validateListen(prefix+".listen", service.Listen, listens, service.ID))
 		add(validateHostnames(prefix, service.Hostnames, hostnames, service.ID))
+		creationCollections := map[string]struct{}{}
+		for policyIndex, policy := range service.Injections.CreateCollections {
+			policyPrefix := fmt.Sprintf("%s.injections.create_collections[%d]", prefix, policyIndex)
+			if policy.Collection == "" || strings.ContainsAny(policy.Collection, "\x00\r\n/") {
+				add(fmt.Errorf("%s.collection is invalid", policyPrefix))
+			}
+			if _, duplicate := creationCollections[policy.Collection]; duplicate {
+				add(fmt.Errorf("%s.collection %q is duplicated", policyPrefix, policy.Collection))
+			}
+			creationCollections[policy.Collection] = struct{}{}
+			if policy.MaxResources < 1 || policy.MaxResources > 100000 {
+				add(fmt.Errorf("%s.max_resources must be between 1 and 100000", policyPrefix))
+			}
+			if service.Kind != "stateful_http" && service.Kind != "mcp_http" {
+				add(fmt.Errorf("%s is valid only for stateful_http or mcp_http", policyPrefix))
+			}
+		}
 		if service.Kind == "fixture_http" {
 			if service.Fixtures == "" {
 				add(fmt.Errorf("%s.fixtures is required for fixture_http", prefix))
@@ -199,8 +312,30 @@ func Validate(directory string) (*ValidationReport, error) {
 		if service.Response.Status < 100 || service.Response.Status > 599 {
 			add(fmt.Errorf("%s.response.status must be an HTTP status", prefix))
 		}
+		if service.Response.Mode != "static" && service.Response.Mode != "dynamic" {
+			add(fmt.Errorf("%s.response.mode must be static or dynamic", prefix))
+		}
+		if service.Response.Mode == "dynamic" && (service.Response.Status < 200 || service.Response.Status >= 300 || service.Response.Status == http.StatusNoContent || service.Response.Status == http.StatusResetContent) {
+			add(fmt.Errorf("%s dynamic response requires a body-capable 2xx status", prefix))
+		}
 		if service.MaxCaptureBytes < 0 {
 			add(fmt.Errorf("%s.max_capture_bytes must not be negative", prefix))
+		}
+	}
+	if (blueprint.Network.DNS.Enabled || blueprint.Network.HTTP.Enabled || blueprint.Network.TLS.Enabled) && len(hostnames) == 0 {
+		add(errors.New("enabled network simulation requires at least one declared service hostname"))
+	}
+	if blueprint.Network.TLS.Enabled {
+		reservedTrustVariables := map[string]struct{}{"INTERCEPTOR_CA_BUNDLE": {}}
+		if blueprint.Network.TLS.TrustMode == "auto" {
+			for _, name := range []string{"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "AWS_CA_BUNDLE", "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH"} {
+				reservedTrustVariables[name] = struct{}{}
+			}
+		}
+		for name := range reservedTrustVariables {
+			if _, exists := blueprint.Application.Launch.Environment[name]; exists {
+				add(fmt.Errorf("application.launch.environment.%s is managed by network.tls trust mode %s", name, blueprint.Network.TLS.TrustMode))
+			}
 		}
 	}
 	for name, value := range blueprint.Application.Launch.Environment {
@@ -208,11 +343,27 @@ func Validate(directory string) (*ValidationReport, error) {
 			continue
 		}
 		parsed, err := url.Parse(value)
-		if err != nil || parsed.Scheme != "http" || parsed.Host == "" {
-			add(fmt.Errorf("application endpoint %s must be an HTTP URL", name))
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			add(fmt.Errorf("application endpoint %s must be an HTTP or HTTPS URL", name))
 			continue
 		}
+		if parsed.Scheme == "https" && !blueprint.Network.TLS.Enabled {
+			add(fmt.Errorf("application endpoint %s uses HTTPS but network.tls is not enabled", name))
+		}
 		host := strings.ToLower(parsed.Hostname())
+		if parsed.Scheme == "https" {
+			if _, declared := hostnames[host]; !declared {
+				add(fmt.Errorf("application endpoint %s HTTPS host %q must be a declared simulated-service hostname", name, host))
+			}
+			_, tlsPort, _ := net.SplitHostPort(blueprint.Network.TLS.Listen)
+			urlPort := parsed.Port()
+			if urlPort == "" {
+				urlPort = "443"
+			}
+			if urlPort != tlsPort {
+				add(fmt.Errorf("application endpoint %s HTTPS port must match network.tls.listen port %s", name, tlsPort))
+			}
+		}
 		if !isLoopbackHost(host) {
 			if _, declared := hostnames[host]; !declared {
 				add(fmt.Errorf("application endpoint %s points to undeclared non-local hostname %q", name, host))
@@ -283,9 +434,12 @@ func Validate(directory string) (*ValidationReport, error) {
 			if oracle.Value == "" {
 				add(fmt.Errorf("%s.value is required for %s", prefix, oracle.Kind))
 			}
-		case "tool_call_match", "service_state_match", "file_state_match":
+		case "tool_call_match", "service_state_match", "file_state_match", "event_match":
 			if len(oracle.Match) == 0 {
 				add(fmt.Errorf("%s.match is required for %s", prefix, oracle.Kind))
+			}
+			if oracle.Kind == "event_match" {
+				add(validateEventMatch(prefix+".match", oracle.Match))
 			}
 		default:
 			add(fmt.Errorf("%s.kind %q is unsupported", prefix, oracle.Kind))
@@ -304,6 +458,9 @@ func Validate(directory string) (*ValidationReport, error) {
 		blueprint.Limits.MemoryBytes <= 0 {
 		add(errors.New("limits must be positive; max_snapshots may be zero"))
 	}
+	if blueprint.Limits.MaxBlobBytes > 256<<20 {
+		add(errors.New("max_blob_bytes may not exceed 256 MiB"))
+	}
 
 	assets, err := collectAssets(root, assetSources)
 	add(err)
@@ -316,16 +473,30 @@ func Validate(directory string) (*ValidationReport, error) {
 					add(fmt.Errorf("services[%d] fixtures: %w", i, fixtureErr))
 				}
 			case "stateful_http":
-				if _, stateErr := services.LoadStateful(filepath.Join(root, filepath.FromSlash(service.Seed)), filepath.Join(root, filepath.FromSlash(service.Routes)), service.ID, nil, nil); stateErr != nil {
+				stateful, stateErr := services.LoadStateful(filepath.Join(root, filepath.FromSlash(service.Seed)), filepath.Join(root, filepath.FromSlash(service.Routes)), service.ID, nil, nil)
+				if stateErr != nil {
 					add(fmt.Errorf("services[%d] stateful definition: %w", i, stateErr))
+				} else {
+					for _, policy := range service.Injections.CreateCollections {
+						if !stateful.SupportsCreate(policy.Collection) {
+							add(fmt.Errorf("services[%d] injection collection %q has no sealed create route", i, policy.Collection))
+						}
+					}
 				}
 			case "mcp_http":
 				seedPath := ""
 				if service.Seed != "" {
 					seedPath = filepath.Join(root, filepath.FromSlash(service.Seed))
 				}
-				if _, mcpErr := services.LoadMCP(filepath.Join(root, filepath.FromSlash(service.Tools)), seedPath, service.Endpoint, service.ID, nil, nil); mcpErr != nil {
+				mcp, mcpErr := services.LoadMCP(filepath.Join(root, filepath.FromSlash(service.Tools)), seedPath, service.Endpoint, service.ID, nil, nil)
+				if mcpErr != nil {
 					add(fmt.Errorf("services[%d] MCP definition: %w", i, mcpErr))
+				} else {
+					for _, policy := range service.Injections.CreateCollections {
+						if !mcp.SupportsCreate(policy.Collection) {
+							add(fmt.Errorf("services[%d] injection collection %q has no sealed create tool", i, policy.Collection))
+						}
+					}
 				}
 			}
 		}
@@ -339,6 +510,86 @@ func Validate(directory string) (*ValidationReport, error) {
 		return report, errors.Join(failures...)
 	}
 	return report, nil
+}
+
+func validateEventMatch(prefix string, match map[string]any) error {
+	var failures []error
+	allowed := map[string]bool{"channel": true, "layer": true, "kind": true, "provenance": true, "attempt_id": true, "injection_id": true, "predicates": true}
+	for key, value := range match {
+		if !allowed[key] {
+			failures = append(failures, fmt.Errorf("%s.%s is unsupported", prefix, key))
+			continue
+		}
+		if key != "predicates" {
+			if text, ok := value.(string); !ok || text == "" || len(text) > 128 {
+				failures = append(failures, fmt.Errorf("%s.%s must be a bounded non-empty string", prefix, key))
+			}
+		}
+	}
+	rawPredicates, exists := match["predicates"]
+	if !exists {
+		return errors.Join(failures...)
+	}
+	predicates, ok := rawPredicates.([]any)
+	if !ok || len(predicates) == 0 || len(predicates) > 16 {
+		failures = append(failures, fmt.Errorf("%s.predicates must contain 1 through 16 predicates", prefix))
+		return errors.Join(failures...)
+	}
+	for index, raw := range predicates {
+		predicate, ok := raw.(map[string]any)
+		if !ok {
+			failures = append(failures, fmt.Errorf("%s.predicates[%d] must be an object", prefix, index))
+			continue
+		}
+		for key := range predicate {
+			if key != "field" && key != "operator" && key != "value" {
+				failures = append(failures, fmt.Errorf("%s.predicates[%d].%s is unsupported", prefix, index, key))
+			}
+		}
+		field, fieldOK := predicate["field"].(string)
+		if !fieldOK || field == "" || len(field) > 128 || strings.ContainsAny(field, "/.[]") {
+			failures = append(failures, fmt.Errorf("%s.predicates[%d].field must name one top-level scalar field", prefix, index))
+		}
+		operator, _ := predicate["operator"].(string)
+		value, hasValue := predicate["value"]
+		scalar := func(value any) bool {
+			switch value.(type) {
+			case nil, string, bool, int, int64, uint64, float64:
+				return true
+			default:
+				return false
+			}
+		}
+		switch operator {
+		case "exists":
+			if _, ok := value.(bool); !hasValue || !ok {
+				failures = append(failures, fmt.Errorf("%s.predicates[%d].value must be boolean for exists", prefix, index))
+			}
+		case "contains":
+			if text, ok := value.(string); !hasValue || !ok || text == "" {
+				failures = append(failures, fmt.Errorf("%s.predicates[%d].value must be non-empty text for contains", prefix, index))
+			}
+		case "equals":
+			if !hasValue || !scalar(value) {
+				failures = append(failures, fmt.Errorf("%s.predicates[%d].value must be scalar for equals", prefix, index))
+			}
+		case "one_of":
+			values, ok := value.([]any)
+			if !hasValue || !ok || len(values) == 0 || len(values) > 32 {
+				failures = append(failures, fmt.Errorf("%s.predicates[%d].value must contain 1 through 32 scalar values", prefix, index))
+			} else {
+				for _, candidate := range values {
+					if !scalar(candidate) {
+						failures = append(failures, fmt.Errorf("%s.predicates[%d].value must not contain nested values", prefix, index))
+						break
+					}
+				}
+			}
+		default:
+			failures = append(failures, fmt.Errorf("%s.predicates[%d].operator is unsupported", prefix, index))
+		}
+	}
+	return errors.Join(failures...)
 }
 
 func validateCanaryFile(root string, seeds []SeedEntry, canary Canary) error {
@@ -604,10 +855,17 @@ func validateListen(name, value string, seen map[string]string, id string) error
 	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
 		return fmt.Errorf("%s must listen on loopback", name)
 	}
-	if previous, exists := seen[value]; exists {
+	canonicalHost := host
+	if host == "localhost" {
+		canonicalHost = "127.0.0.1"
+	} else if ip != nil {
+		canonicalHost = ip.String()
+	}
+	canonical := net.JoinHostPort(canonicalHost, port)
+	if previous, exists := seen[canonical]; exists {
 		return fmt.Errorf("%s conflicts with service %q", name, previous)
 	}
-	seen[value] = id
+	seen[canonical] = id
 	return nil
 }
 
@@ -618,7 +876,7 @@ func validateHostnames(prefix string, values []string, seen map[string]string, i
 	var failures []error
 	for _, value := range values {
 		name := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(value), "."))
-		if name == "" || strings.ContainsAny(name, "/:@") || !strings.Contains(name, ".") {
+		if !validDNSHostname(name) {
 			failures = append(failures, fmt.Errorf("%s hostname %q is invalid", prefix, value))
 			continue
 		}
@@ -629,6 +887,23 @@ func validateHostnames(prefix string, values []string, seen map[string]string, i
 		seen[name] = id
 	}
 	return errors.Join(failures...)
+}
+
+func validDNSHostname(name string) bool {
+	if len(name) < 3 || len(name) > 253 || !strings.Contains(name, ".") {
+		return false
+	}
+	for _, label := range strings.Split(name, ".") {
+		if len(label) < 1 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, character := range label {
+			if character != '-' && (character < 'a' || character > 'z') && (character < '0' || character > '9') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func validateID(name, value string, seen map[string]struct{}) error {

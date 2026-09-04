@@ -84,7 +84,7 @@ func TestScanRejectsEscapingSymlink(t *testing.T) {
 func TestCheckpointTamperingDetected(t *testing.T) {
 	checkpoint, err := NewCheckpoint(
 		"sess-test", "", digestOf("environment"), digestOf("app"), 2,
-		digestOf("journal"), digestOf("manifest"), 3, "after turn", "0.1.0", fixedTime(),
+		digestOf("journal"), digestOf("manifest"), 0, 3, "after turn", "0.1.0", fixedTime(),
 	)
 	if err != nil {
 		t.Fatal(err)

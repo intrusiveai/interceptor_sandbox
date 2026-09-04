@@ -108,6 +108,37 @@ func TestModelProxyAppliesInjectionBeforeConnector(t *testing.T) {
 	}
 }
 
+func TestModelProxyAppliesNativeAnthropicAndGeminiToolResultInjections(t *testing.T) {
+	tests := []struct{ name, path, body, needle string }{
+		{"anthropic", "/v1/messages", `{"model":"claude-test","max_tokens":100,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call-1","name":"lookup","input":{"q":"old"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"safe"}]}]}`, "safe attack"},
+		{"gemini", "/v1beta/models/gemini-test:generateContent", `{"contents":[{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{"q":"old"}}}]},{"role":"user","parts":[{"functionResponse":{"name":"lookup","response":{"result":"safe"}}}]}]}`, "safe attack"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			journal, err := statejournal.Open(filepath.Join(t.TempDir(), "state.jsonl"), "sess-test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer journal.Close()
+			manager := injection.NewManager(journal, nil)
+			pointer := ""
+			if test.name == "gemini" {
+				pointer = "/result"
+			}
+			if err := manager.Arm(injection.Definition{ID: "inj", Surface: "model_tool_result", Mode: "simulation", Scope: "once", Enabled: true, Selector: injection.Selector{ToolName: "lookup", CallOrdinal: "first"}, Placement: injection.Placement{Operation: "append_text", Pointer: pointer}, Payload: json.RawMessage(`" attack"`)}, ""); err != nil {
+				t.Fatal(err)
+			}
+			connector := &captureConnector{}
+			proxy, _ := NewModelProxy("sess-test", connector, manager, nil, nil, 1<<20, time.Second)
+			response := httptest.NewRecorder()
+			proxy.ServeHTTP(response, httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.body)))
+			if response.Code != 200 || !strings.Contains(string(connector.frame.Body), test.needle) {
+				t.Fatalf("native request was not injected: status=%d body=%s", response.Code, connector.frame.Body)
+			}
+		})
+	}
+}
+
 func TestModelProxyPreservesNativeApplicationRoutes(t *testing.T) {
 	connector := &captureConnector{}
 	proxy, err := NewModelProxy("sess-test", connector, nil, nil, nil, 1<<20, time.Second)
@@ -120,6 +151,8 @@ func TestModelProxyPreservesNativeApplicationRoutes(t *testing.T) {
 		{"/v1/chat/completions", `{"model":"chat-model","messages":[]}`, CodecOpenAIChat},
 		{"/v1/responses", `{"model":"responses-model","input":"hello"}`, CodecOpenAIResponses},
 		{"/model/anthropic.claude-v2%3A1/converse", `{"messages":[{"role":"user","content":[{"text":"hello"}]}]}`, CodecBedrockConverse},
+		{"/v1/messages", `{"model":"claude-test","messages":[]}`, CodecAnthropicMessages},
+		{"/v1beta/models/gemini-test:generateContent", `{"contents":[]}`, CodecGoogleGenerateContent},
 	}
 	for _, test := range tests {
 		response := httptest.NewRecorder()
@@ -148,6 +181,22 @@ func TestModelProxyRejectsStreamingWithoutCallingConnector(t *testing.T) {
 	proxy.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hello","stream":true}`)))
 	if response.Code != http.StatusBadRequest || connector.frame.RequestID != 0 {
 		t.Fatalf("streaming request was not rejected before forwarding: status=%d frame=%#v", response.Code, connector.frame)
+	}
+}
+
+func TestModelProxyRejectsNestedMultimodalFeaturesBeforeProvider(t *testing.T) {
+	tests := []struct{ path, body string }{
+		{"/v1/responses", `{"model":"gpt-test","input":[{"role":"user","content":[{"type":"input_image","image_url":"https://example.invalid/image"}]}]}`},
+		{"/v1beta/models/gemini-test:generateContent", `{"contents":[{"parts":[{"text":"hello"}]}],"generationConfig":{"responseModalities":["IMAGE"]}}`},
+	}
+	for _, test := range tests {
+		connector := &captureConnector{}
+		proxy, _ := NewModelProxy("sess-test", connector, nil, nil, nil, 1<<20, time.Second)
+		response := httptest.NewRecorder()
+		proxy.ServeHTTP(response, httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.body)))
+		if response.Code != http.StatusBadRequest || connector.frame.RequestID != 0 {
+			t.Fatalf("unsupported nested feature reached provider: path=%s status=%d frame=%#v", test.path, response.Code, connector.frame)
+		}
 	}
 }
 

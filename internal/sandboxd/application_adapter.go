@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/intrusive-ai/interceptor-sandbox/internal/appimage"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/environment"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/recording"
 )
@@ -163,7 +164,17 @@ func (s *Server) startupTimeout() time.Duration {
 }
 
 func (s *Server) applicationEnvironment(extra []string) []string {
-	result := make([]string, 0, len(s.blueprint.Application.Launch.Environment)+len(s.blueprint.Credentials)+len(s.identityEnv)+len(extra)+1)
+	result := make([]string, 0, len(s.blueprint.Application.Launch.Environment)+len(s.blueprint.Credentials)+len(s.identityEnv)+len(extra)+8)
+	if s.blueprint.Network.TLS.Enabled {
+		result = append(result, "INTERCEPTOR_CA_BUNDLE="+appimage.ContainerCABundle)
+		if s.blueprint.Network.TLS.TrustMode == "auto" {
+			for _, name := range []string{"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "AWS_CA_BUNDLE", "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH"} {
+				if _, overridden := s.blueprint.Application.Launch.Environment[name]; !overridden {
+					result = append(result, name+"="+appimage.ContainerCABundle)
+				}
+			}
+		}
+	}
 	for name, value := range s.blueprint.Application.Launch.Environment {
 		result = append(result, name+"="+value)
 	}

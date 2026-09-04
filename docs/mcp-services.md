@@ -194,8 +194,12 @@ returned synthetic result. It does not record transport authorization headers.
 The existing injection surfaces apply without an MCP-specific injection API:
 
 - `environment_state` can change an existing record owned by a stateful MCP
-  tool. A later `get`, `list`, or other stateful action encounters that changed
-  record through the real MCP data path.
+  tool. It can create a missing record only when the service explicitly opts
+  that collection into injection creation and a sealed MCP create tool validates
+  the complete new object. A later `get`, `list`, or other stateful action
+  encounters that changed record through the real MCP data path.
+- `mcp_tool_result` can rewrite a successful native result after the real MCP
+  tool executes and before the MCP client receives it.
 - `model_tool_result` can still change the tool-result content immediately
   before an agent sends it to the model. This works after the framework
   converts its MCP result into native Chat, Responses, or Converse conversation
@@ -244,7 +248,7 @@ The MVP does not support:
 - resources, prompts, completions, sampling, roots, elicitation, subscriptions,
   or cancellation of an in-progress call;
 - image, audio, embedded-resource, or resource-link result content;
-- interactive OAuth authorization, PKCE, dynamic client registration, TLS, or
+- interactive OAuth authorization, PKCE, dynamic client registration, or
   non-bearer MCP transport authentication;
 - dynamic response templates or arbitrary code in fixture definitions;
 - spawning an MCP implementation from the Blueprint; or
@@ -254,3 +258,8 @@ An unsupported method fails explicitly and creates a coverage gap. If one of
 these capabilities is necessary to the legitimate application workflow, use a
 reviewed local MCP server bundled in the application image or extend the
 `mcp_http` service before treating the environment as complete.
+
+When `network.tls` is enabled, the same MCP handler is available through the
+shared HTTPS hostname front door with the generated sandbox certificate. This
+adds MCP-over-HTTPS transport without changing the supported MCP method or
+content subset.

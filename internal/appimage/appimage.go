@@ -32,7 +32,16 @@ type Lock struct {
 	InterceptorBinary    string    `json:"interceptor_binary_digest"`
 	BlueprintSchema      string    `json:"blueprint_schema"`
 	JournalSchemaVersion int       `json:"journal_schema_version"`
+	TLS                  *TLSLock  `json:"tls,omitempty"`
 	ConstructedAt        time.Time `json:"constructed_at"`
+}
+
+type TLSLock struct {
+	TrustMode               string   `json:"trust_mode"`
+	Hostnames               []string `json:"hostnames"`
+	RootCertificateDigest   string   `json:"root_certificate_digest"`
+	ServerCertificateDigest string   `json:"server_certificate_digest"`
+	ServerPrivateKeyDigest  string   `json:"server_private_key_digest"`
 }
 
 func LockPath(dataRoot string, blueprint *environment.Blueprint) string {
@@ -69,7 +78,25 @@ func Build(ctx context.Context, directory, dataRoot, tag, version string, docker
 			sourceReference = localTag
 		}
 	}
-	dockerfile := fmt.Sprintf("FROM %s\nCOPY --chmod=0555 interceptor /usr/local/bin/interceptor\nENTRYPOINT [\"/usr/local/bin/interceptor\"]\n", sourceReference)
+	dockerfile := fmt.Sprintf("FROM %s\nCOPY --chmod=0555 interceptor /usr/local/bin/interceptor\n", sourceReference)
+	var material tlsMaterial
+	var tlsLock *TLSLock
+	if report.Blueprint.Network.TLS.Enabled {
+		hostnames := simulatedHostnames(report.Blueprint)
+		material, err = generateTLSMaterial(time.Now().UTC(), hostnames)
+		if err != nil {
+			return Lock{}, fmt.Errorf("generate sandbox TLS material: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(temporary, "interceptor-ca.pem"), material.ca, 0o600); err != nil {
+			return Lock{}, err
+		}
+		dockerfile += "COPY --chmod=0444 interceptor-ca.pem " + ContainerCABundle + "\n"
+		if report.Blueprint.Network.TLS.TrustMode == "auto" {
+			dockerfile += "RUN [\"/usr/local/bin/interceptor\",\"image-install-ca\",\"" + ContainerCABundle + "\"]\n"
+		}
+		tlsLock = &TLSLock{TrustMode: report.Blueprint.Network.TLS.TrustMode, Hostnames: hostnames, RootCertificateDigest: digest.Bytes(material.ca), ServerCertificateDigest: digest.Bytes(material.certificate), ServerPrivateKeyDigest: digest.Bytes(material.privateKey)}
+	}
+	dockerfile += "ENTRYPOINT [\"/usr/local/bin/interceptor\"]\n"
 	if err := os.WriteFile(filepath.Join(temporary, "Dockerfile"), []byte(dockerfile), 0o600); err != nil {
 		return Lock{}, err
 	}
@@ -85,7 +112,12 @@ func Build(ctx context.Context, directory, dataRoot, tag, version string, docker
 		SourceImage: report.Blueprint.Application.Image, SourceDigest: environmentLock.ApplicationDigest,
 		WrapperImage: tag, WrapperDigest: wrapperDigest, InterceptorVersion: version,
 		InterceptorBinary: digest.Bytes(binary), BlueprintSchema: environment.APIVersion,
-		JournalSchemaVersion: 1, ConstructedAt: time.Now().UTC(),
+		JournalSchemaVersion: 1, TLS: tlsLock, ConstructedAt: time.Now().UTC(),
+	}
+	if report.Blueprint.Network.TLS.Enabled {
+		if err := persistTLSMaterial(dataRoot, report.Blueprint, material); err != nil {
+			return Lock{}, fmt.Errorf("persist sandbox TLS material: %w", err)
+		}
 	}
 	if err := fsutil.WriteJSON(LockPath(dataRoot, report.Blueprint), lock, 0o640); err != nil {
 		return Lock{}, err
@@ -109,6 +141,9 @@ func Load(path string) (Lock, error) {
 	}
 	if lock.SchemaVersion != 1 || lock.WrapperImage == "" || !digest.Valid(lock.WrapperDigest) || !digest.Valid(lock.SourceDigest) || !digest.Valid(lock.EnvironmentDigest) || !digest.Valid(lock.InterceptorBinary) {
 		return Lock{}, errors.New("invalid application lock")
+	}
+	if lock.TLS != nil && (lock.TLS.TrustMode == "" || len(lock.TLS.Hostnames) == 0 || !digest.Valid(lock.TLS.RootCertificateDigest) || !digest.Valid(lock.TLS.ServerCertificateDigest) || !digest.Valid(lock.TLS.ServerPrivateKeyDigest)) {
+		return Lock{}, errors.New("invalid application TLS lock")
 	}
 	return lock, nil
 }

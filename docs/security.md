@@ -39,6 +39,25 @@ shares only declared files with the container. Simulated service names resolve
 only inside the container. If a simulated service does not understand a request,
 it rejects it instead of forwarding it to a real service.
 
+When closed DNS simulation is enabled, the container resolver points to
+`127.0.0.1`. The resolver returns loopback only for declared names, has no
+upstream, records bounded query evidence, and fails unknown names. A client that
+hard-codes an external resolver is still blocked by `--network none`; Interceptor
+does not add packet-redirection or firewall authority merely to disguise that
+failure as a local DNS response.
+
+Local TLS is termination by the simulated-service front door, not a proxy to a
+real origin. A build-generated private CA signs a certificate limited to
+declared hostnames. Only the public CA enters the wrapper image. The server
+private key is stored under the private host data root and mounted read-only in
+a supervisor-only directory. The CA signing key is discarded after issuance.
+TLS requires version 1.2 or newer, and mismatched SNI/Host requests fail closed.
+
+Dynamic attacker HTTP services are still sealed loopback destinations. Runtime
+injection may change only a successful response body; it cannot add a listener,
+route, redirect, upstream destination, or generic proxy behavior. Static
+attacker sinks reject response injection.
+
 The only intended external request path is:
 
 ```text
@@ -55,11 +74,13 @@ request signing performed by the host AWS SDK.
 
 ## Credentials
 
-OpenAI and gateway keys are read from a host environment variable and retained
-by the attached host connector. Bedrock credentials are loaded and refreshed by
-the AWS SDK's host credential chain. Neither form is passed in the Docker
-command, container environment, session metadata, bridge request files, logs,
-checkpoints, or exports.
+Local development may read an API key from a named host environment variable.
+Production mode rejects that source. It resolves an approved stable credential
+ID through AWS Secrets Manager, Azure Key Vault, Google Cloud Secret Manager,
+or Vault KV v2, or uses direct Bedrock/Vertex/Azure workload identity. Values
+remain in bounded host memory and are excluded from Docker configuration,
+session metadata, bridge frames, logs, checkpoints, and exports. See [Host
+credential stores](credential-stores.md).
 
 All Blueprint credentials must be synthetic. Credential-like application
 variables must be explicitly declared and tied to a synthetic service or the
@@ -76,8 +97,8 @@ for a real service credential. Raw tokens and private signing keys are excluded
 from evidence and snapshots; projected token files are refreshed atomically and
 removed during a normal stop.
 
-Avoid placing credentials directly on a shell command line. Use a dedicated
-host environment variable and, if desired:
+Avoid placing credentials directly on a shell command line. For local
+development only, use a dedicated host environment variable:
 
 ```sh
 interceptor run ... --model-api-key-env MY_PROVIDER_API_KEY
@@ -94,6 +115,16 @@ operating system choose unused local ports.
 Operator-only endpoints remain behind protected bridge files or sockets and are
 not routed by the local control server. Filesystem permissions are part of this
 boundary, so keep the data root private and do not relax its modes.
+
+The optional per-session Cross-VM gateway is a distinct production boundary.
+It is a private HTTP backend intended to sit behind an enterprise-managed TLS
+load balancer; never expose it directly to an untrusted network. Lease
+administration requires a shared integration bearer token resolved from a host
+secret store. Typed execution requires a separate, short-lived opaque lease
+token issued by the gateway. The service stores token digests for lookup,
+supports immediate lease revocation, and never forwards a caller-supplied URL,
+path, header, command, or generic proxy request. Environment token storage is
+available only for local development and is rejected by `--production`.
 
 ## Transport selection
 
@@ -118,13 +149,17 @@ back or enabling container networking when the socket cannot be reached.
 - Sensitive model/application data is recorded unredacted in local evidence.
 - Shared large-content files are retained after session deletion.
 - Docker Desktop and the Docker daemon are part of the trusted computing base.
-- The MVP does not provide remote authentication, authorization, tenancy,
-  encrypted evidence, secure deletion, or a secret manager integration.
+- The Cross-VM interface is single-installation and session scoped; it is not a
+  multi-tenant control plane. Evidence encryption and secure deletion remain
+  deployment responsibilities.
 - Synthetic identity implements client credentials and same-issuer delegated
   token exchange, not interactive login, production federation, or live
   identity-provider proxying.
 - Snapshot restore covers declared logical state, not live process or kernel
   state.
+- Interceptor observes declared HTTP/MCP boundaries and model client-tool
+  results; it does not interpose on arbitrary descendant process execution or
+  private stdout pipes.
 
 Run Interceptor on a dedicated development machine or appropriately isolated CI
 worker when the target image is not trusted. Keep Docker, the host OS, and the

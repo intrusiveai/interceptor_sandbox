@@ -12,17 +12,25 @@ import (
 )
 
 type HTTPProviderConfig struct {
-	BaseURL string
-	APIKey  string
-	Client  *http.Client
+	BaseURL          string
+	APIKey           string
+	CredentialHeader string
+	CredentialPrefix string
+	Headers          map[string]string
+	Metadata         map[string]string
+	Client           *http.Client
 }
 
 type httpModelProvider struct {
-	name      string
-	endpoints map[string]string
-	baseURL   *url.URL
-	apiKey    string
-	client    *http.Client
+	name             string
+	endpoints        map[string]string
+	baseURL          *url.URL
+	apiKey           string
+	credentialHeader string
+	credentialPrefix string
+	headers          map[string]string
+	metadata         map[string]string
+	client           *http.Client
 }
 
 func NewOpenAIChatProvider(config HTTPProviderConfig) (ModelProvider, error) {
@@ -37,6 +45,39 @@ func NewLiteLLMProvider(config HTTPProviderConfig) (ModelProvider, error) {
 
 func NewOpenAIResponsesProvider(config HTTPProviderConfig) (ModelProvider, error) {
 	return newHTTPModelProvider(ProviderOpenAIResponses, map[string]string{CodecOpenAIResponses: "responses"}, config)
+}
+
+func NewAnthropicMessagesProvider(config HTTPProviderConfig) (ModelProvider, error) {
+	if config.CredentialHeader == "" {
+		config.CredentialHeader = "X-Api-Key"
+	}
+	if config.Headers == nil {
+		config.Headers = map[string]string{}
+	}
+	if config.Headers["Anthropic-Version"] == "" {
+		config.Headers["Anthropic-Version"] = "2023-06-01"
+	}
+	return newHTTPModelProvider(ProviderAnthropicMessages, map[string]string{CodecAnthropicMessages: "v1/messages"}, config)
+}
+
+func NewGeminiAPIProvider(config HTTPProviderConfig) (ModelProvider, error) {
+	if config.CredentialHeader == "" {
+		config.CredentialHeader = "X-Goog-Api-Key"
+	}
+	return newHTTPModelProvider(ProviderGeminiAPI, map[string]string{CodecGoogleGenerateContent: "models/{model}:generateContent"}, config)
+}
+
+func NewVertexGeminiProvider(config HTTPProviderConfig) (ModelProvider, error) {
+	return newHTTPModelProvider(ProviderVertexGemini, map[string]string{CodecGoogleGenerateContent: "publishers/google/models/{model}:generateContent"}, config)
+}
+
+func NewAzureOpenAIProvider(config HTTPProviderConfig) (ModelProvider, error) {
+	if config.CredentialHeader == "" && config.APIKey != "" {
+		config.CredentialHeader = "Api-Key"
+	}
+	return newHTTPModelProvider(ProviderAzureOpenAI, map[string]string{
+		CodecOpenAIChat: "chat/completions", CodecOpenAIResponses: "responses",
+	}, config)
 }
 
 func newHTTPModelProvider(name string, endpoints map[string]string, config HTTPProviderConfig) (ModelProvider, error) {
@@ -62,7 +103,23 @@ func newHTTPModelProvider(name string, endpoints map[string]string, config HTTPP
 		}
 		return nil
 	}
-	return &httpModelProvider{name: name, endpoints: endpoints, baseURL: baseURL, apiKey: config.APIKey, client: &copyClient}, nil
+	credentialHeader := config.CredentialHeader
+	credentialPrefix := config.CredentialPrefix
+	if credentialHeader == "" {
+		credentialHeader, credentialPrefix = "Authorization", "Bearer "
+	}
+	headers := make(map[string]string, len(config.Headers))
+	for name, value := range config.Headers {
+		if strings.TrimSpace(name) == "" || strings.ContainsAny(name, "\r\n") || strings.ContainsAny(value, "\r\n") {
+			return nil, errors.New("provider headers must not contain empty names or line breaks")
+		}
+		headers[http.CanonicalHeaderKey(name)] = value
+	}
+	metadata := make(map[string]string, len(config.Metadata))
+	for key, value := range config.Metadata {
+		metadata[key] = value
+	}
+	return &httpModelProvider{name: name, endpoints: endpoints, baseURL: baseURL, apiKey: config.APIKey, credentialHeader: http.CanonicalHeaderKey(credentialHeader), credentialPrefix: credentialPrefix, headers: headers, metadata: metadata, client: &copyClient}, nil
 }
 
 func (p *httpModelProvider) Name() string { return p.name }
@@ -81,6 +138,12 @@ func (p *httpModelProvider) Complete(ctx context.Context, input ProviderRequest)
 	if int64(len(body)) > input.MaxBodyBytes {
 		return ProviderResponse{}, errors.New("provider request exceeds connector body limit")
 	}
+	if strings.Contains(endpoint, "{model}") {
+		if input.Model == "" || strings.ContainsAny(input.Model, "/?#") {
+			return ProviderResponse{}, errors.New("provider model identifier is invalid for a constructed route")
+		}
+		endpoint = strings.ReplaceAll(endpoint, "{model}", url.PathEscape(input.Model))
+	}
 	destination := *p.baseURL
 	if strings.HasSuffix(strings.TrimSuffix(destination.Path, "/"), "/v1") {
 		endpoint = strings.TrimPrefix(endpoint, "v1/")
@@ -91,13 +154,16 @@ func (p *httpModelProvider) Complete(ctx context.Context, input ProviderRequest)
 		return ProviderResponse{}, err
 	}
 	request.Header.Set("Content-Type", "application/json")
+	for name, value := range p.headers {
+		request.Header.Set(name, value)
+	}
 	for _, name := range []string{"OpenAI-Organization", "OpenAI-Project"} {
 		if value := input.Headers[name]; value != "" {
 			request.Header.Set(name, value)
 		}
 	}
 	if p.apiKey != "" {
-		request.Header.Set("Authorization", "Bearer "+p.apiKey)
+		request.Header.Set(p.credentialHeader, p.credentialPrefix+p.apiKey)
 	}
 	response, err := p.client.Do(request)
 	if err != nil {
@@ -117,5 +183,5 @@ func (p *httpModelProvider) Complete(ctx context.Context, input ProviderRequest)
 	if headers["Content-Type"] == "" && response.StatusCode >= 200 && response.StatusCode < 300 {
 		headers["Content-Type"] = "application/json"
 	}
-	return ProviderResponse{Status: response.StatusCode, Headers: headers, Body: responseBody, RequestBody: body, RawBody: append([]byte(nil), responseBody...)}, nil
+	return ProviderResponse{Status: response.StatusCode, Headers: headers, Body: responseBody, RequestBody: body, RawBody: append([]byte(nil), responseBody...), Metadata: p.metadata}, nil
 }

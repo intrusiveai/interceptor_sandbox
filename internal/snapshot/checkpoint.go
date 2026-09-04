@@ -29,6 +29,7 @@ type Checkpoint struct {
 	JournalSeq           uint64    `json:"journal_seq"`
 	JournalHash          string    `json:"journal_hash"`
 	FileManifestDigest   string    `json:"file_manifest_digest"`
+	CanonicalSizeBytes   int64     `json:"canonical_size_bytes"`
 	EventSeq             uint64    `json:"event_seq"`
 	CreatedAt            time.Time `json:"created_at"`
 	InterceptorVersion   string    `json:"interceptor_version"`
@@ -37,7 +38,7 @@ type Checkpoint struct {
 	Hash                 string    `json:"hash"`
 }
 
-func NewCheckpoint(sessionID, parent, environmentDigest, appDigest string, journalSeq uint64, journalHash, manifestDigest string, eventSeq uint64, label, interceptorVersion string, now time.Time) (Checkpoint, error) {
+func NewCheckpoint(sessionID, parent, environmentDigest, appDigest string, journalSeq uint64, journalHash, manifestDigest string, canonicalSizeBytes int64, eventSeq uint64, label, interceptorVersion string, now time.Time) (Checkpoint, error) {
 	id, err := checkpointID(now)
 	if err != nil {
 		return Checkpoint{}, err
@@ -45,7 +46,7 @@ func NewCheckpoint(sessionID, parent, environmentDigest, appDigest string, journ
 	checkpoint := Checkpoint{
 		SchemaVersion: 1, ID: id, Label: label, SourceSessionID: sessionID, ParentCheckpoint: parent,
 		EnvironmentDigest: environmentDigest, AppDigest: appDigest, JournalSeq: journalSeq,
-		JournalHash: journalHash, FileManifestDigest: manifestDigest, EventSeq: eventSeq,
+		JournalHash: journalHash, FileManifestDigest: manifestDigest, CanonicalSizeBytes: canonicalSizeBytes, EventSeq: eventSeq,
 		CreatedAt: now.UTC(), InterceptorVersion: interceptorVersion, JournalSchemaVersion: 1, Status: "ready",
 	}
 	checkpoint.Hash, err = checkpointDigest(checkpoint)

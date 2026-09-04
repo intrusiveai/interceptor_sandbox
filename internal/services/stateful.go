@@ -289,6 +289,40 @@ func (h *StatefulHandler) Apply(operation statejournal.Operation) error {
 	return nil
 }
 
+func (h *StatefulHandler) SupportsCreate(collection string) bool {
+	for _, route := range h.routes {
+		if route.Action == "create" && route.Collection == collection {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *StatefulHandler) ValidateCreate(operation statejournal.Operation) error {
+	if operation.Kind != "service_put" || operation.Service != h.serviceID || operation.Collection == "" || operation.Key == "" || !json.Valid(operation.Value) {
+		return errors.New("stateful resource creation requires a valid service_put operation")
+	}
+	if _, exists := h.get(operation.Collection, operation.Key); exists {
+		return errors.New("stateful resource already exists")
+	}
+	var object map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(operation.Value))
+	decoder.UseNumber()
+	if decoder.Decode(&object) != nil || object == nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return errors.New("stateful resource creation requires exactly one JSON object")
+	}
+	for _, route := range h.routes {
+		if route.Action != "create" || route.Collection != operation.Collection {
+			continue
+		}
+		key, exists := object[route.KeyField]
+		if exists && fmt.Sprint(key) == operation.Key {
+			return nil
+		}
+	}
+	return fmt.Errorf("created resource does not satisfy a sealed create route for collection %q", operation.Collection)
+}
+
 func (h *StatefulHandler) Snapshot() map[string]map[string]json.RawMessage {
 	h.mu.RLock()
 	defer h.mu.RUnlock()

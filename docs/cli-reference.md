@@ -67,7 +67,10 @@ interceptor app build \
 ```
 
 Builds an application-specific wrapper image and records its lock under the
-data root. `--tag` is required.
+data root. `--tag` is required. If the sealed Blueprint enables local TLS, this
+also generates the sandbox CA/server certificate, embeds only the public CA,
+stores the server keypair under private host application data, and records all
+material digests in the application lock.
 
 ```sh
 interceptor app verify \
@@ -85,11 +88,16 @@ a particular wrapper image name.
 ```sh
 interceptor run \
   --environment <directory> \
-  [--model-provider openai-chat|openai-responses|bedrock-converse|litellm] \
+  [--model-provider <adapter>] \
   --allow-model <model> \
   [--allow-model <model> ...] \
   [--provider-base-url <http-or-https-url>] \
   [--model-api-key-env <variable>] \
+  [--model-credential-id <id> --credential-config <file>] \
+  [--provider-auth none|api-key|workload-token|workload-identity] \
+  [--provider-api-version <version>] \
+  [--feedback-profile black-box|diagnostic|oracle-assisted] \
+  [--production] \
   [--aws-region <region>] \
   [--aws-profile <profile>] \
   [--app-port 0] \
@@ -104,15 +112,18 @@ Required:
 
 Provider options:
 
-- `--model-provider` defaults to `openai-chat`. The other choices are
-  `openai-responses`, `bedrock-converse`, and `litellm`.
+- `--model-provider` defaults to `openai-chat`. Supported choices also include
+  `openai-responses`, `bedrock-converse`, `litellm`, `anthropic-messages`,
+  `gemini-api`, `vertex-gemini`, and `azure-openai`.
 - `--provider-base-url` fixes the HTTP provider or gateway origin and base
   path. It is required except for Bedrock and defaults from
   `INTERCEPTOR_PROVIDER_BASE_URL`.
-- OpenAI providers read `OPENAI_API_KEY` by default. `--model-api-key-env`
-  selects a different host variable.
-- LiteLLM sends no authorization header unless `--model-api-key-env` names a
-  non-empty gateway-key variable.
+- Environment API keys are local-development compatibility. Production uses
+  `--model-credential-id` with `--credential-config`, or a supported workload
+  identity selected with `--provider-auth`. `--production` rejects environment
+  credentials.
+- LiteLLM supports explicit `--provider-auth none`; otherwise it sends no
+  authorization header unless a host credential source is selected.
 - Bedrock ignores API-key and base-URL options. `--aws-region` and
   `--aws-profile` optionally override values loaded by the AWS SDK's normal
   host configuration chain.
@@ -123,6 +134,9 @@ for `openai-chat`, Responses for `openai-responses`, Converse for
 See [Model providers](model-providers.md) for endpoint setup, authentication,
 and current feature limits.
 
+`--feedback-profile` chooses one profile declared by the sealed Environment and
+cannot change during the session. The default is `black-box`.
+
 Ports default to `0`, allowing the OS to choose unused loopback ports. The
 bridge defaults to portable `spool`. Select `unix` only on a compatible native
 Linux Docker host; see [Architecture](architecture.md#hostcontainer-transports).
@@ -130,6 +144,30 @@ Linux Docker host; see [Architecture](architecture.md#hostcontainer-transports).
 The process stays open while the session runs because it provides the local URLs
 and the carefully limited connection to the model provider. Closing it requests
 a graceful stop.
+
+## Capabilities and Cross-VM gateway
+
+```sh
+interceptor capabilities --environment <directory>
+```
+
+Prints the deterministic CapabilityManifest without starting a session.
+
+```sh
+interceptor gateway <session-id> \
+  --listen <host:port> \
+  --auth-principal <id> \
+  [--production --auth-token-credential-id <id> --credential-config <file> | \
+   --auth-token-env <name>]
+```
+
+Serves typed Operator operations for one running session. In production this is
+a private HTTP backend behind an enterprise-managed TLS load balancer. The
+shared integration token comes from a supported host secret store and is used
+only to issue, inspect, and revoke short-lived opaque execution leases. The
+environment-variable source defaults to `INTERCEPTOR_GATEWAY_TOKEN`, is for
+development only, and is rejected by `--production`. See [Cross-VM
+gateway](cross-vm-gateway.md).
 
 ## Inspect sessions
 
@@ -177,11 +215,16 @@ restore point. Inspect always prints the detailed checkpoint JSON.
 ```sh
 interceptor restore <source-session-id> \
   --checkpoint <checkpoint-id> \
-  [--model-provider openai-chat|openai-responses|bedrock-converse|litellm] \
+  [--model-provider openai-chat|openai-responses|bedrock-converse|litellm|anthropic-messages|gemini-api|vertex-gemini|azure-openai] \
   --allow-model <model> \
   [--allow-model <model> ...] \
   [--provider-base-url <url>] \
   [--model-api-key-env <variable>] \
+  [--model-credential-id <id> --credential-config <file>] \
+  [--provider-auth none|api-key|workload-token|workload-identity] \
+  [--provider-api-version <version>] \
+  [--feedback-profile <profile>] \
+  [--production] \
   [--aws-region <region>] \
   [--aws-profile <profile>] \
   [--app-port 0] \

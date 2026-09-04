@@ -3,14 +3,20 @@ package bridge
 import "context"
 
 const (
-	CodecOpenAIChat      = "openai_chat_completions"
-	CodecOpenAIResponses = "openai_responses"
-	CodecBedrockConverse = "aws_bedrock_converse"
+	CodecOpenAIChat            = "openai_chat_completions"
+	CodecOpenAIResponses       = "openai_responses"
+	CodecBedrockConverse       = "aws_bedrock_converse"
+	CodecAnthropicMessages     = "anthropic_messages"
+	CodecGoogleGenerateContent = "google_generate_content"
 
-	ProviderOpenAIChat      = "openai-chat"
-	ProviderOpenAIResponses = "openai-responses"
-	ProviderBedrockConverse = "bedrock-converse"
-	ProviderLiteLLM         = "litellm"
+	ProviderOpenAIChat        = "openai-chat"
+	ProviderOpenAIResponses   = "openai-responses"
+	ProviderBedrockConverse   = "bedrock-converse"
+	ProviderLiteLLM           = "litellm"
+	ProviderAnthropicMessages = "anthropic-messages"
+	ProviderGeminiAPI         = "gemini-api"
+	ProviderVertexGemini      = "vertex-gemini"
+	ProviderAzureOpenAI       = "azure-openai"
 )
 
 type ProviderRequest struct {
@@ -28,6 +34,7 @@ type ProviderResponse struct {
 	Body        []byte
 	RequestBody []byte
 	RawBody     []byte
+	Metadata    map[string]string
 }
 
 // ModelProvider runs on the host. Implementations may hold credentials, SDK

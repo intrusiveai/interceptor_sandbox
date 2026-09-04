@@ -57,14 +57,16 @@ Inside the container, the supervisor starts:
 - a synthetic identity issuer that can grant, exchange, and verify short-lived
   local credentials;
 - endpoints that capture attempted data theft;
+- an optional authoritative DNS resolver and exact-host HTTP/HTTPS front doors;
 - a model proxy that understands the supported native application APIs; and
 - private application and control bridge endpoints.
 
 The container has no general network. A host-side connector accepts only the
-supported model routes and explicitly allowed model names. Chat Completions,
-OpenAI Responses, and Amazon Bedrock Converse remain in their native shapes;
-LiteLLM accepts the supported OpenAI-compatible routes. Provider keys and real
-AWS credentials remain on the host.
+supported model routes and explicitly allowed model names. OpenAI Chat and
+Responses, Azure OpenAI, Anthropic Messages, Gemini/Vertex `generateContent`,
+Amazon Bedrock Converse, and LiteLLM remain in their native shapes. Provider
+credentials remain on the host and production secrets can be resolved from a
+supported secret store or provider workload identity.
 
 While `run` or `restore` remains open, the host process exposes two local-only
 URLs that do not require passwords:
@@ -96,13 +98,19 @@ The MVP favors understandable local mechanisms:
 
 Test harnesses connect to Interceptor over a local HTTP URL, while the
 application itself may use HTTP, a CLI, stdin/stdout, a REPL, Python/Node calls,
-or a small external adapter. The application's model connection
-may use non-streaming Chat Completions, OpenAI Responses, or Amazon Bedrock
-Converse; the selected host adapter must support the same native protocol.
+or a small external adapter. The application's model connection may use a
+supported non-streaming OpenAI, Azure OpenAI, Anthropic Messages,
+Gemini/Vertex, Bedrock Converse, or LiteLLM route; the selected host adapter
+must support the same native protocol.
 Simulated services are
 `fixture_http`, `stateful_http`, and the non-streaming MCP subset provided by
 `mcp_http`; those services can optionally enforce synthetic agent or delegated
-user permissions. Attacker capture uses `http_sink`; virtual time is fixed.
+user permissions. `http_sink` supports multiple static capture destinations and
+explicitly enabled dynamic response endpoints for bounded C2 simulation.
+Declared hostnames may resolve through a recorded loopback DNS service with no
+upstream forwarding, and the same HTTP/MCP handlers may be exposed through a
+TLS 1.2+ hostname router using a build-generated sandbox CA.
+Virtual time is fixed.
 Docker is the supported container runtime for the MVP.
 
 Snapshots capture declared saved state, not information that exists only in

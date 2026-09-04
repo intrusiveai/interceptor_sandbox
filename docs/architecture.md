@@ -22,12 +22,29 @@ operator / harness
   +---------------------------------------------------------------+
   | sandboxd supervisor                                            |
   |  +-------------+  +----------------+  +---------------------+ |
-  |  | application |  | services, MCP, |  | model proxy         | |
-  |  | non-root    |  | identity/sinks |  | records exchanges   | |
+  |  | application |  | DNS + HTTP/TLS |  | model proxy         | |
+  |  | non-root    |  | service plane  |  | records exchanges   | |
   |  +-------------+  +----------------+  +---------------------+ |
   |       | declared files, mutable roots, state journal, events   |
   +---------------------------------------------------------------+
 ```
+
+For production Operator integration, the attack engine does not receive the
+local control URL. A trusted Operator Runtime uses the separately authenticated
+Cross-VM gateway, whose typed dispatcher is the only path to the private
+control bridge:
+
+```text
+Operator guest -> authenticated Operator broker -> TLS load balancer
+               -> private Cross-VM HTTP gateway
+               -> typed local control operation -> sandboxd
+```
+
+A secret-store-backed integration token lets the trusted broker request a
+short-lived opaque ExecutionLease. Its distinct bearer token binds the path to
+one Operator VM, campaign, session, sealed environment/application, capability
+manifest, feedback profile, operation set, and budget. AEF is a pre/post-run
+consumer, not a live caller. See [Cross-VM gateway](cross-vm-gateway.md).
 
 The same compiled Go program is both the host command-line tool and the
 in-container supervisor. The wrapper image combines that program with the exact
@@ -42,7 +59,8 @@ There are two related container images:
    the application and its normal runtime dependencies.
 2. The **wrapper image** is built by `interceptor app build`. It starts from the
    application image, adds the Linux `interceptor` executable, and makes that
-   executable the container entrypoint.
+   executable the container entrypoint. When local TLS is enabled it also
+   contains the generated public sandbox CA, but no TLS private key.
 
 The build and startup sequence is:
 
@@ -70,9 +88,10 @@ one-shot command interfaces and command-based snapshot preparation. A separate
 `sandboxd` executable does not need to be installed in the application image.
 
 `interceptor app build` does not start any services or listeners. It also does
-not copy the Environment Blueprint, session data, or model-provider credentials
-into the image. It creates the reusable wrapper image and records which exact
-application, Interceptor build, and Sealed Environment it belongs to.
+not copy the Environment Blueprint, session data, model-provider credentials,
+or TLS private keys into the image. It creates the reusable wrapper image and
+records which exact application, Interceptor build, Sealed Environment, and
+public TLS identity it belongs to.
 
 When `interceptor run` starts a session, it verifies that wrapper record, mounts
 the Sealed Environment and new session storage, and starts the wrapper with the
@@ -96,8 +115,9 @@ The local interface is split across the host and container:
 | Owner | What it starts |
 | --- | --- |
 | Application process | Its native interface: local HTTP, one-shot command, stdin/stdout or REPL stream, Python/Node module, or external adapter protocol. |
-| `sandboxd` inside the container | The selected application-interface adapter, simulated HTTP and MCP services, synthetic identity issuers, attacker sinks, the model proxy at `MODEL_BASE_URL`, and the private application/control bridge. |
+| `sandboxd` inside the container | The selected application-interface adapter, closed DNS resolver, HTTP/HTTPS hostname routers, simulated HTTP and MCP services, synthetic identity issuers, attacker sinks, the model proxy at `MODEL_BASE_URL`, and the private application/control bridge. |
 | `interceptor run` on the host | The printed local application and control URLs, plus the connector that sends approved model requests to the configured provider. |
+| Optional `interceptor gateway` host process | Integration-token-authenticated, lease-limited typed operations for a separate Operator Runtime. |
 
 Requests sent to the printed application or control URL cross the private
 bridge to `sandboxd`. Model requests travel in the other direction: the
@@ -116,7 +136,14 @@ can reach and how many host resources it can consume:
 - PID, memory, CPU, turn, token, wall-time, snapshot, and blob limits;
 - access only to the approved environment files, recorded session data, and
   declared writable folders; and
-- simulated service hostnames that resolve only inside the container.
+- a loopback-only DNS resolver with no upstream forwarding, plus simulated
+  service hostnames that resolve only inside the container.
+
+When enabled, standard application DNS uses UDP/TCP 53 on loopback. Declared
+names resolve to `127.0.0.1`; unknown names fail and create coverage evidence.
+A namespaced low-port setting lets the unprivileged supervisor bind ports
+53/80/443 without granting the application a network capability. HTTP routes
+by exact `Host`; HTTPS terminates TLS 1.2+ and requires matching SNI and `Host`.
 
 The supervisor initially uses only the limited capabilities required to set
 identities and coordinate the application. The application runs as a non-root
@@ -205,9 +232,9 @@ the private bridge.
 ## Model data path
 
 1. The application calls the Blueprint's local-only `MODEL_BASE_URL`.
-2. The in-container proxy recognizes native Chat Completions, OpenAI Responses,
-   and Amazon Bedrock Converse routes. It rejects unsupported and streaming
-   routes.
+2. The in-container proxy recognizes the supported native OpenAI/Azure,
+   Anthropic Messages, Gemini/Vertex, Bedrock Converse, and LiteLLM routes. It
+   rejects unsupported and streaming routes.
 3. It applies matching tool-result injections using that protocol's own tool
    representation and stores larger recorded content separately.
 4. A model frame crosses the selected private bridge.
@@ -215,12 +242,13 @@ the private bridge.
    arrives in the expected order and format, stays within size limits, uses a
    model explicitly allowed by the operator, and matches the selected provider
    adapter.
-6. The adapter keeps the request like-for-like: Chat goes to Chat, Responses to
-   Responses, and Converse to the host AWS SDK's `Converse` operation. LiteLLM
-   accepts either supported OpenAI-compatible route. HTTP adapters use the fixed
-   `--provider-base-url`.
-7. The adapter adds host-only authentication. HTTP redirects to another origin
-   are rejected, and AWS credentials remain within the SDK on the host.
+6. The adapter keeps the request like-for-like: each native API goes to its
+   matching provider operation; Converse uses the host AWS SDK and LiteLLM
+   accepts either supported OpenAI-compatible route. HTTP adapters use a fixed
+   `--provider-base-url` and provider-specific resource bindings.
+7. The adapter adds host-only authentication from a configured credential
+   store, workload identity, or development-only environment source. HTTP
+   redirects to another origin are rejected.
 8. The native response is recorded and returned in the same protocol the
    application used. The proxy records usage and confirmed injection delivery
    before returning it.

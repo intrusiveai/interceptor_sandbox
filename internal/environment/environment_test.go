@@ -40,10 +40,98 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestEventMatchValidationRejectsNestedAndExecutableSelectors(t *testing.T) {
+	invalid := map[string]any{"regex": ".*", "predicates": []any{map[string]any{"field": "request.body", "operator": "equals", "value": map[string]any{"nested": true}}}}
+	if err := validateEventMatch("oracles[0].match", invalid); err == nil {
+		t.Fatal("expected unsafe event matcher to be rejected")
+	}
+	valid := map[string]any{"kind": "service_request", "predicates": []any{map[string]any{"field": "operation", "operator": "one_of", "value": []any{"get", "list"}}}}
+	if err := validateEventMatch("oracles[0].match", valid); err != nil {
+		t.Fatalf("valid bounded matcher was rejected: %v", err)
+	}
+}
+
 func TestValidateRejectsWritableSeedOutsideMutableRoots(t *testing.T) {
 	directory := testBlueprint(t, "filesystem:\n  seed:\n    - source: assets/fixtures.yaml\n      target: /elsewhere/file\n      read_only: false\n")
 	if _, err := Validate(directory); err == nil || !strings.Contains(err.Error(), "outside application mutable_roots") {
 		t.Fatalf("expected mutable-root validation error, got %v", err)
+	}
+}
+
+func TestValidateAcceptsBoundedFileNamespaceAndDynamicAttackerService(t *testing.T) {
+	directory := testBlueprint(t, `filesystem:
+  injection_namespaces:
+    - id: inbox
+      root: /state/app/inbox
+      allow_create: true
+      max_files: 20
+      max_file_bytes: 65536
+attacker_services:
+  - id: c2
+    kind: http_sink
+    listen: 127.0.0.1:18120
+    hostnames: [c2.sandbox.local]
+    response: {mode: dynamic, status: 200, body: idle}
+`)
+	if _, err := Validate(directory); err != nil {
+		t.Fatalf("valid dynamic injection capabilities were rejected: %v", err)
+	}
+	path := filepath.Join(directory, BlueprintFile)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = []byte(strings.Replace(string(body), "mode: dynamic, status: 200", "mode: dynamic, status: 204", 1))
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Validate(directory); err == nil || !strings.Contains(err.Error(), "body-capable 2xx") {
+		t.Fatalf("dynamic bodyless sink status was accepted: %v", err)
+	}
+}
+
+func TestAttackerResponseDefaultsToStatic(t *testing.T) {
+	directory := testBlueprint(t, `attacker_services:
+  - id: exfil
+    kind: http_sink
+    listen: 127.0.0.1:18121
+    hostnames: [exfil.sandbox.local]
+    response: {status: 204}
+`)
+	blueprint, err := Load(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blueprint.AttackerServices[0].Response.Mode != "static" {
+		t.Fatalf("attacker response mode defaulted to %q", blueprint.AttackerServices[0].Response.Mode)
+	}
+}
+
+func TestValidateAcceptsClosedDNSAndTLSFrontDoors(t *testing.T) {
+	directory := testBlueprint(t, `network:
+  dns: {enabled: true, unknown_policy: nxdomain}
+  http: {enabled: true}
+  tls: {enabled: true, trust_mode: auto}
+`)
+	report, err := Validate(directory)
+	if err != nil {
+		t.Fatalf("valid network simulation was rejected: %v", err)
+	}
+	if report.Blueprint.Network.DNS.Listen != "127.0.0.1:53" || report.Blueprint.Network.DNS.MaxQueries != 10_000 || report.Blueprint.Network.HTTP.Listen != "127.0.0.1:80" || report.Blueprint.Network.TLS.Listen != "127.0.0.1:443" {
+		t.Fatalf("network defaults were not applied: %#v", report.Blueprint.Network)
+	}
+
+	path := filepath.Join(directory, BlueprintFile)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = []byte(strings.Replace(string(body), "trust_mode: auto", "trust_mode: application-managed", 1))
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Validate(directory); err == nil || !strings.Contains(err.Error(), "application_managed_probe is required") {
+		t.Fatalf("application-managed trust without a probe was accepted: %v", err)
 	}
 }
 

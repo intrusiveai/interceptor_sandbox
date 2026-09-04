@@ -72,8 +72,11 @@ interceptor app verify --environment examples/reference-environment
 The first `docker build` created the ordinary application image. The
 `interceptor app build` command creates a second **wrapper image** from it. The
 wrapper keeps the application and its dependencies, adds the Interceptor
-executable, and configures that executable to start `sandboxd` when a session
-runs. `sandboxd` starts the in-container model proxy and simulated services,
+executable, generates the reference environment's private TLS identity, embeds
+only its public CA, and configures that executable to start `sandboxd` when a
+session runs. The protected server keypair remains under Interceptor's host
+data root. `sandboxd` starts the in-container DNS resolver, HTTP/HTTPS front
+doors, model proxy, and simulated services,
 prepares the Blueprint's selected application interface, waits for its declared
 readiness condition, and then opens the private application and control bridge.
 You do not need to add

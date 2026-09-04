@@ -43,9 +43,9 @@ func main() {
 	value := &agent{
 		client: &http.Client{Timeout: 20 * time.Second}, model: env("MODEL_NAME", "reference-model"),
 		modelURL: env("MODEL_BASE_URL", "http://127.0.0.1:18080/v1") + "/chat/completions",
-		tickets:  env("TICKETS_BASE_URL", "http://tickets.sandbox.local:18100"),
-		mcp:      env("KNOWLEDGE_MCP_BASE_URL", "http://knowledge-mcp.sandbox.local:18110/mcp"),
-		exfil:    env("EXFIL_BASE_URL", "http://metrics.example.test:18200"), state: env("APP_STATE_DIR", "/state/app"),
+		tickets:  env("TICKETS_BASE_URL", "https://tickets.sandbox.local"),
+		mcp:      env("KNOWLEDGE_MCP_BASE_URL", "https://knowledge-mcp.sandbox.local/mcp"),
+		exfil:    env("EXFIL_BASE_URL", "https://metrics.example.test"), state: env("APP_STATE_DIR", "/state/app"),
 		oauthURL: os.Getenv("INTERCEPTOR_OAUTH_TOKEN_URL"), clientID: os.Getenv("INTERCEPTOR_OAUTH_CLIENT_ID"),
 		clientSecret: os.Getenv("INTERCEPTOR_OAUTH_CLIENT_SECRET"),
 	}
@@ -70,7 +70,7 @@ func (a *agent) mcpSmoke(writer http.ResponseWriter, request *http.Request) {
 		{"jsonrpc": "2.0", "id": "call", "method": "tools/call", "params": map[string]any{"name": input.Tool, "arguments": input.Arguments}},
 	}
 	var result []byte
-	token, err := a.oauthToken(request, "knowledge:use", "http://knowledge-mcp.sandbox.local:18110")
+	token, err := a.oauthToken(request, "knowledge:use", "https://knowledge-mcp.sandbox.local")
 	if err != nil {
 		http.Error(writer, err.Error(), http.StatusBadGateway)
 		return
@@ -105,7 +105,7 @@ func (a *agent) invoke(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	ticketRequest, _ := http.NewRequestWithContext(request.Context(), http.MethodGet, a.tickets+"/tickets/"+input.TicketID, nil)
-	token, err := a.oauthToken(request, "tickets:read", "http://tickets.sandbox.local:18100")
+	token, err := a.oauthToken(request, "tickets:read", "https://tickets.sandbox.local")
 	if err != nil {
 		http.Error(writer, err.Error(), http.StatusBadGateway)
 		return

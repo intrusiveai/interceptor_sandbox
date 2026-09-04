@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,27 +17,37 @@ import (
 )
 
 type Definition struct {
-	ID        string          `json:"id"`
-	Surface   string          `json:"surface"`
-	Mode      string          `json:"mode"`
-	Scope     string          `json:"scope"`
-	Enabled   bool            `json:"enabled"`
-	Selector  Selector        `json:"selector"`
-	Placement Placement       `json:"placement"`
-	Payload   json.RawMessage `json:"payload"`
+	ID            string          `json:"id"`
+	Surface       string          `json:"surface"`
+	Mode          string          `json:"mode"`
+	Scope         string          `json:"scope"`
+	Enabled       bool            `json:"enabled"`
+	Selector      Selector        `json:"selector"`
+	Placement     Placement       `json:"placement"`
+	Payload       json.RawMessage `json:"payload"`
+	AttemptID     string          `json:"attempt_id,omitempty"`
+	PayloadDigest string          `json:"payload_digest,omitempty"`
 }
 
 type Selector struct {
-	ToolName         string          `json:"tool_name"`
-	CallOrdinal      string          `json:"call_ordinal"`
-	ArgumentsPointer string          `json:"arguments_pointer,omitempty"`
-	ArgumentsEqual   json.RawMessage `json:"arguments_equal,omitempty"`
-	ArgumentsContain string          `json:"arguments_contain,omitempty"`
-	TurnID           string          `json:"turn_id,omitempty"`
-	Service          string          `json:"service,omitempty"`
-	Collection       string          `json:"collection,omitempty"`
-	Key              string          `json:"key,omitempty"`
-	Path             string          `json:"path,omitempty"`
+	ToolName           string            `json:"tool_name"`
+	CallOrdinal        string            `json:"call_ordinal"`
+	ArgumentsPointer   string            `json:"arguments_pointer,omitempty"`
+	ArgumentsEqual     json.RawMessage   `json:"arguments_equal,omitempty"`
+	ArgumentsContain   string            `json:"arguments_contain,omitempty"`
+	TurnID             string            `json:"turn_id,omitempty"`
+	Service            string            `json:"service,omitempty"`
+	Collection         string            `json:"collection,omitempty"`
+	Key                string            `json:"key,omitempty"`
+	Path               string            `json:"path,omitempty"`
+	Method             string            `json:"method,omitempty"`
+	QueryEqual         map[string]string `json:"query_equal,omitempty"`
+	HeadersEqual       map[string]string `json:"headers_equal,omitempty"`
+	RequestBodyPointer string            `json:"request_body_pointer,omitempty"`
+	RequestBodyEqual   json.RawMessage   `json:"request_body_equal,omitempty"`
+	RequestBodyContain string            `json:"request_body_contain,omitempty"`
+	FileNamespace      string            `json:"file_namespace,omitempty"`
+	RelativePath       string            `json:"relative_path,omitempty"`
 }
 
 type Placement struct {
@@ -59,6 +70,16 @@ type EvaluationState struct {
 	Delivery           string `json:"delivery"`
 	DeliveryObservable bool   `json:"delivery_observable"`
 	Fingerprint        string `json:"fingerprint"`
+	ResponseCandidates int    `json:"response_candidates,omitempty"`
+}
+
+type ResponseContext struct {
+	Method    string
+	Path      string
+	Query     map[string][]string
+	Headers   map[string][]string
+	Body      any
+	Arguments any
 }
 
 type OperatorState struct {
@@ -94,21 +115,33 @@ func Validate(definition Definition) error {
 	if definition.ID == "" || strings.ContainsAny(definition.ID, "/\\") {
 		return errors.New("injection id is required and may not contain path separators")
 	}
-	if definition.Surface != "model_tool_result" && definition.Surface != "environment_state" {
+	if definition.Surface != "model_tool_result" && definition.Surface != "environment_state" && definition.Surface != "service_response" && definition.Surface != "mcp_tool_result" {
 		return fmt.Errorf("unsupported injection surface %q", definition.Surface)
 	}
-	if definition.Surface == "model_tool_result" && definition.Mode != "simulation" || definition.Surface == "environment_state" && definition.Mode != "fidelity" {
+	if (definition.Surface == "model_tool_result" || definition.Surface == "service_response" || definition.Surface == "mcp_tool_result") && definition.Mode != "simulation" || definition.Surface == "environment_state" && definition.Mode != "fidelity" {
 		return fmt.Errorf("mode %q is invalid for surface %q", definition.Mode, definition.Surface)
 	}
 	if definition.Scope != "once" && definition.Scope != "next_turn" && definition.Scope != "standing" {
 		return fmt.Errorf("unsupported injection scope %q", definition.Scope)
 	}
+	if (definition.Surface == "service_response" || definition.Surface == "mcp_tool_result") && definition.Scope == "next_turn" {
+		return errors.New("response injection cannot use next_turn because managed service requests have no trusted turn binding")
+	}
 	if len(definition.Payload) == 0 || !json.Valid(definition.Payload) {
 		return errors.New("payload must be valid JSON")
 	}
-	if definition.Surface == "model_tool_result" {
-		if definition.Selector.ToolName == "" {
-			return errors.New("model_tool_result selector requires tool_name")
+	if definition.Surface == "model_tool_result" || definition.Surface == "mcp_tool_result" || definition.Surface == "service_response" {
+		if definition.Surface != "model_tool_result" && definition.Selector.TurnID != "" {
+			return errors.New("response injection cannot select an untrusted turn ID")
+		}
+		if definition.Surface != "service_response" && definition.Selector.ToolName == "" {
+			return errors.New("tool-result selector requires tool_name")
+		}
+		if definition.Surface != "model_tool_result" && definition.Selector.Service == "" {
+			return errors.New("response selector requires stable service ID")
+		}
+		if definition.Surface == "service_response" && definition.Selector.ToolName != "" {
+			return errors.New("service response selector may not name a tool")
 		}
 		ordinal := definition.Selector.CallOrdinal
 		if ordinal != "first" && ordinal != "every" {
@@ -118,12 +151,31 @@ func Validate(definition Definition) error {
 			}
 		}
 	}
+	if definition.Surface == "service_response" {
+		if err := validateHTTPSelector(definition.Selector); err != nil {
+			return err
+		}
+	} else if definition.Surface != "environment_state" && (definition.Selector.Path != "" || definition.Selector.Method != "" || len(definition.Selector.QueryEqual) > 0 || len(definition.Selector.HeadersEqual) > 0 || definition.Selector.RequestBodyPointer != "" || len(definition.Selector.RequestBodyEqual) > 0 || definition.Selector.RequestBodyContain != "") {
+		return errors.New("HTTP request predicates are valid only for service_response")
+	}
+	if definition.Surface != "environment_state" && (definition.Selector.Collection != "" || definition.Selector.Key != "") {
+		return errors.New("collection and key selectors are valid only for environment_state")
+	}
+	if definition.Surface == "model_tool_result" && definition.Selector.Service != "" {
+		return errors.New("model tool-result selector may not name a service")
+	}
+	if (definition.AttemptID == "") != (definition.PayloadDigest == "") || definition.PayloadDigest != "" && !digest.Valid(definition.PayloadDigest) {
+		return errors.New("attempt_id and valid payload_digest must be supplied together")
+	}
 	if definition.Surface == "environment_state" {
 		serviceTarget := definition.Selector.Service != "" || definition.Selector.Collection != "" || definition.Selector.Key != ""
 		fileTarget := definition.Selector.Path != ""
-		if serviceTarget == fileTarget || serviceTarget && (definition.Selector.Service == "" || definition.Selector.Collection == "" || definition.Selector.Key == "") || fileTarget && !strings.HasPrefix(definition.Selector.Path, "/") {
-			return errors.New("environment_state selector requires either service/collection/key or one absolute path")
+		namespaceTarget := definition.Selector.FileNamespace != "" || definition.Selector.RelativePath != ""
+		if boolCount(serviceTarget, fileTarget, namespaceTarget) != 1 || serviceTarget && (definition.Selector.Service == "" || definition.Selector.Collection == "" || definition.Selector.Key == "") || fileTarget && !strings.HasPrefix(definition.Selector.Path, "/") || namespaceTarget && (definition.Selector.FileNamespace == "" || !validRelativePath(definition.Selector.RelativePath)) {
+			return errors.New("environment_state selector requires service/collection/key, one absolute path, or file_namespace/relative_path")
 		}
+	} else if definition.Selector.FileNamespace != "" || definition.Selector.RelativePath != "" {
+		return errors.New("file namespace selectors are valid only for environment_state")
 	}
 	if definition.Placement.Pointer != "" && !strings.HasPrefix(definition.Placement.Pointer, "/") {
 		return errors.New("placement pointer must be empty or a JSON Pointer")
@@ -131,6 +183,9 @@ func Validate(definition Definition) error {
 	switch definition.Placement.Operation {
 	case "replace", "append_text", "prepend_text":
 	case "insert_array":
+		if definition.Surface == "service_response" || definition.Surface == "mcp_tool_result" {
+			return errors.New("response injection does not support insert_array")
+		}
 		if definition.Placement.Index < 0 || definition.Placement.Index > 10000 {
 			return errors.New("array insertion index is out of bounds")
 		}
@@ -142,6 +197,208 @@ func Validate(definition Definition) error {
 		return fmt.Errorf("unsupported placement operation %q", definition.Placement.Operation)
 	}
 	return nil
+}
+
+func boolCount(values ...bool) int {
+	count := 0
+	for _, value := range values {
+		if value {
+			count++
+		}
+	}
+	return count
+}
+
+func validRelativePath(value string) bool {
+	return value != "" && !strings.HasPrefix(value, "/") && path.Clean(value) == value && value != "." && value != ".." && !strings.HasPrefix(value, "../") && !strings.ContainsAny(value, "\\\x00\r\n")
+}
+
+func validateHTTPSelector(selector Selector) error {
+	if selector.Method != "" {
+		if len(selector.Method) > 16 || strings.ToUpper(selector.Method) != selector.Method {
+			return errors.New("HTTP selector method must be an uppercase token")
+		}
+		for _, value := range selector.Method {
+			if value < 'A' || value > 'Z' {
+				return errors.New("HTTP selector method must contain only A-Z")
+			}
+		}
+	}
+	if selector.Path != "" && (!strings.HasPrefix(selector.Path, "/") || len(selector.Path) > 2048 || strings.ContainsAny(selector.Path, "\x00\r\n?#")) {
+		return errors.New("HTTP selector path must be a clean absolute request path")
+	}
+	if len(selector.QueryEqual) > 16 || len(selector.HeadersEqual) > 16 {
+		return errors.New("HTTP selectors permit at most 16 query and 16 header predicates")
+	}
+	for name, value := range selector.QueryEqual {
+		if name == "" || len(name) > 128 || len(value) > 1024 || strings.ContainsAny(name+value, "\x00\r\n") {
+			return errors.New("HTTP query predicate is invalid")
+		}
+	}
+	for name, value := range selector.HeadersEqual {
+		canonical := httpHeaderName(name)
+		if canonical == "" || len(name) > 128 || len(value) > 1024 || strings.ContainsAny(value, "\x00\r\n") {
+			return errors.New("HTTP header predicate is invalid")
+		}
+		switch canonical {
+		case "Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie":
+			return fmt.Errorf("HTTP selector may not inspect sensitive header %q", canonical)
+		}
+	}
+	if selector.RequestBodyPointer != "" && !strings.HasPrefix(selector.RequestBodyPointer, "/") {
+		return errors.New("request_body_pointer must be a JSON Pointer")
+	}
+	if len(selector.RequestBodyEqual) > 0 && !json.Valid(selector.RequestBodyEqual) {
+		return errors.New("request_body_equal must be valid JSON")
+	}
+	if len(selector.RequestBodyContain) > 4096 {
+		return errors.New("request_body_contain exceeds 4096 bytes")
+	}
+	return nil
+}
+
+func httpHeaderName(value string) string {
+	parts := strings.Split(strings.ToLower(value), "-")
+	for index, part := range parts {
+		if part == "" {
+			return ""
+		}
+		for _, character := range part {
+			if character < 'a' || character > 'z' && (character < '0' || character > '9') {
+				return ""
+			}
+		}
+		parts[index] = strings.ToUpper(part[:1]) + part[1:]
+	}
+	return strings.Join(parts, "-")
+}
+
+// RewriteResponse applies simulation-mode ingress mutation after a successful
+// managed service or native MCP operation and before the application sees it.
+func (m *Manager) RewriteResponse(surface, service, tool string, request ResponseContext, candidate any) (any, []Result, error) {
+	if surface != "service_response" && surface != "mcp_tool_result" {
+		return nil, nil, errors.New("invalid response-injection surface")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	updated := candidate
+	results := []Result{}
+	for _, item := range m.orderedItems() {
+		definition := item.definition
+		if !item.evaluation.Armed || !definition.Enabled || definition.Surface != surface || definition.Selector.Service != service || !responseRequestMatches(definition.Selector, request) {
+			continue
+		}
+		if !selectorTargetMatches(definition.Selector, toolCall{name: tool, arguments: request.Arguments}) {
+			continue
+		}
+		ordinal, needsProgress := nextResponseOrdinal(item)
+		if ordinal == 0 {
+			continue
+		}
+		call := toolCall{name: tool, arguments: request.Arguments, ordinal: ordinal}
+		if !selectorMatches(definition.Selector, call) {
+			if needsProgress {
+				if err := m.persistProgress(item); err != nil {
+					return nil, nil, err
+				}
+			}
+			continue
+		}
+		result := Result{InjectionID: definition.ID, Matched: true}
+		item.evaluation.Matched = true
+		value, err := Apply(updated, definition.Placement, definition.Payload)
+		if err != nil {
+			result.Error = err.Error()
+		} else {
+			updated = value
+			result.Applied = true
+			item.evaluation.Fired = true
+		}
+		results = append(results, result)
+		if definition.Scope != "standing" {
+			if err := m.persistDisabled(item); err != nil {
+				return nil, nil, err
+			}
+		} else {
+			if err := m.persistProgress(item); err != nil {
+				return nil, nil, err
+			}
+		}
+		m.record("injection_applied", definition.ID, map[string]any{"surface": surface, "service": service, "tool_name": tool, "method": request.Method, "path": request.Path, "applied": result.Applied, "error": result.Error})
+	}
+	return updated, results, nil
+}
+
+func nextResponseOrdinal(item *managed) (int, bool) {
+	ordinal := item.definition.Selector.CallOrdinal
+	if ordinal == "every" {
+		return 1, false
+	}
+	wanted := 1
+	if ordinal != "first" {
+		wanted, _ = strconv.Atoi(ordinal)
+	}
+	if item.evaluation.ResponseCandidates >= wanted {
+		return 0, false
+	}
+	item.evaluation.ResponseCandidates++
+	return item.evaluation.ResponseCandidates, true
+}
+
+func responseRequestMatches(selector Selector, request ResponseContext) bool {
+	if selector.Path != "" && selector.Path != request.Path || selector.Method != "" && selector.Method != request.Method {
+		return false
+	}
+	for name, expected := range selector.QueryEqual {
+		values := request.Query[name]
+		if len(values) != 1 || values[0] != expected {
+			return false
+		}
+	}
+	for name, expected := range selector.HeadersEqual {
+		values := request.Headers[httpHeaderName(name)]
+		if len(values) != 1 || values[0] != expected {
+			return false
+		}
+	}
+	if selector.RequestBodyPointer == "" && len(selector.RequestBodyEqual) == 0 && selector.RequestBodyContain == "" {
+		return true
+	}
+	value := request.Body
+	if selector.RequestBodyPointer != "" {
+		var err error
+		value, err = pointerGet(value, selector.RequestBodyPointer)
+		if err != nil {
+			return false
+		}
+	}
+	if len(selector.RequestBodyEqual) > 0 {
+		encoded, _ := json.Marshal(value)
+		if !bytes.Equal(encoded, selector.RequestBodyEqual) {
+			return false
+		}
+	}
+	if selector.RequestBodyContain != "" {
+		encoded, _ := json.Marshal(value)
+		text := string(encoded)
+		if stringValue, ok := value.(string); ok {
+			text = stringValue
+		}
+		if !strings.Contains(text, selector.RequestBodyContain) {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *Manager) persistProgress(item *managed) error {
+	encoded, _ := json.Marshal(struct {
+		Definition   Definition      `json:"definition"`
+		EligibleTurn string          `json:"eligible_turn,omitempty"`
+		Evaluation   EvaluationState `json:"evaluation"`
+	}{item.definition, item.eligibleTurn, item.evaluation})
+	_, err := m.journal.Append("injection_progress", []statejournal.Operation{{Kind: "injection_put", ID: item.definition.ID, Value: encoded}})
+	return err
 }
 
 func (m *Manager) Arm(definition Definition, eligibleTurn string) error {
@@ -200,7 +457,7 @@ func (m *Manager) ListPublic() []PublicState {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	result := make([]PublicState, 0, len(m.items))
-	for _, item := range m.items {
+	for _, item := range m.orderedItems() {
 		result = append(result, PublicState{Definition: item.definition})
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Definition.ID < result[j].Definition.ID })
@@ -211,7 +468,7 @@ func (m *Manager) Evaluation() []EvaluationState {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	result := make([]EvaluationState, 0, len(m.items))
-	for _, item := range m.items {
+	for _, item := range m.orderedItems() {
 		result = append(result, item.evaluation)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
@@ -227,6 +484,23 @@ func (m *Manager) OperatorEvaluation() []OperatorState {
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Definition.ID < result[j].Definition.ID })
 	return result
+}
+
+func (m *Manager) Attribution(ids []string) (string, string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	attempt, payload := "", ""
+	for _, id := range ids {
+		item := m.items[id]
+		if item == nil || item.definition.AttemptID == "" {
+			continue
+		}
+		if attempt != "" && (attempt != item.definition.AttemptID || payload != item.definition.PayloadDigest) {
+			return "", ""
+		}
+		attempt, payload = item.definition.AttemptID, item.definition.PayloadDigest
+	}
+	return attempt, payload
 }
 
 func (m *Manager) RewriteOpenAI(request []byte, turnID string) ([]byte, []Result, error) {
@@ -275,6 +549,30 @@ func (m *Manager) RewriteBedrockConverse(request []byte, turnID string) ([]byte,
 	return m.rewriteToolResults(envelope, collectBedrockToolCalls(messages), turnID)
 }
 
+func (m *Manager) RewriteAnthropicMessages(request []byte, turnID string) ([]byte, []Result, error) {
+	envelope, err := decodeEnvelope(request)
+	if err != nil {
+		return nil, nil, err
+	}
+	messages, ok := envelope["messages"].([]any)
+	if !ok {
+		return request, nil, nil
+	}
+	return m.rewriteToolResults(envelope, collectAnthropicToolCalls(messages), turnID)
+}
+
+func (m *Manager) RewriteGoogleGenerateContent(request []byte, turnID string) ([]byte, []Result, error) {
+	envelope, err := decodeEnvelope(request)
+	if err != nil {
+		return nil, nil, err
+	}
+	contents, ok := envelope["contents"].([]any)
+	if !ok {
+		return request, nil, nil
+	}
+	return m.rewriteToolResults(envelope, collectGoogleToolCalls(contents), turnID)
+}
+
 func decodeEnvelope(request []byte) (map[string]any, error) {
 	var envelope map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(request))
@@ -289,7 +587,7 @@ func (m *Manager) rewriteToolResults(envelope map[string]any, calls []toolCall, 
 	results := []Result{}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, item := range m.items {
+	for _, item := range m.orderedItems() {
 		definition := item.definition
 		if !item.evaluation.Armed || !definition.Enabled || definition.Surface != "model_tool_result" || definition.Selector.TurnID != "" && definition.Selector.TurnID != turnID {
 			continue
@@ -411,7 +709,7 @@ func (m *Manager) ObservableFidelityIDs(turnID string) []string {
 func (m *Manager) CompleteFidelityTurn(turnID string, confirmed []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, item := range m.items {
+	for _, item := range m.orderedItems() {
 		if !item.definition.Enabled || item.definition.Mode != "fidelity" {
 			continue
 		}
@@ -432,6 +730,21 @@ func containsID(values []string, id string) bool {
 		}
 	}
 	return false
+}
+
+// orderedItems is called only while m.mu is held. Stable ID order makes the
+// result deterministic when more than one standing injection matches.
+func (m *Manager) orderedItems() []*managed {
+	ids := make([]string, 0, len(m.items))
+	for id := range m.items {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	items := make([]*managed, 0, len(ids))
+	for _, id := range ids {
+		items = append(items, m.items[id])
+	}
+	return items
 }
 
 func (m *Manager) ApplyJournal(operation statejournal.Operation) error {
@@ -466,7 +779,13 @@ func (m *Manager) record(kind, id string, semantic map[string]any) {
 	if m.recorder == nil {
 		return
 	}
-	_, _ = m.recorder.Append(recording.Draft{Channel: recording.Evaluation, Layer: "injection", Kind: kind, Provenance: recording.HarnessInjected, InjectionID: id, Semantic: semantic})
+	item := m.items[id]
+	draft := recording.Draft{Channel: recording.Evaluation, Layer: "injection", Kind: kind, Provenance: recording.HarnessInjected, InjectionID: id, Semantic: semantic}
+	if item != nil {
+		draft.AttemptID = item.definition.AttemptID
+		draft.PayloadDigest = item.definition.PayloadDigest
+	}
+	_, _ = m.recorder.Append(draft)
 }
 
 type toolCall struct {
@@ -599,6 +918,84 @@ func collectBedrockToolCalls(messages []any) []toolCall {
 	return result
 }
 
+func collectAnthropicToolCalls(messages []any) []toolCall {
+	metadata := map[string]toolCall{}
+	counts := map[string]int{}
+	for _, raw := range messages {
+		message, _ := raw.(map[string]any)
+		content, _ := message["content"].([]any)
+		for _, rawBlock := range content {
+			block, _ := rawBlock.(map[string]any)
+			if block["type"] != "tool_use" {
+				continue
+			}
+			id, _ := block["id"].(string)
+			name, _ := block["name"].(string)
+			counts[name]++
+			metadata[id] = toolCall{id: id, name: name, arguments: block["input"], ordinal: counts[name]}
+		}
+	}
+	result := []toolCall{}
+	for _, raw := range messages {
+		message, _ := raw.(map[string]any)
+		content, _ := message["content"].([]any)
+		for _, rawBlock := range content {
+			block, _ := rawBlock.(map[string]any)
+			if block["type"] != "tool_result" {
+				continue
+			}
+			id, _ := block["tool_use_id"].(string)
+			call := metadata[id]
+			call.target = block
+			call.targetField = "content"
+			result = append(result, call)
+		}
+	}
+	return result
+}
+
+func collectGoogleToolCalls(contents []any) []toolCall {
+	counts := map[string]int{}
+	pending := map[string][]toolCall{}
+	for _, raw := range contents {
+		content, _ := raw.(map[string]any)
+		parts, _ := content["parts"].([]any)
+		for _, rawPart := range parts {
+			part, _ := rawPart.(map[string]any)
+			function, _ := part["functionCall"].(map[string]any)
+			if function == nil {
+				continue
+			}
+			name, _ := function["name"].(string)
+			counts[name]++
+			pending[name] = append(pending[name], toolCall{name: name, arguments: function["args"], ordinal: counts[name]})
+		}
+	}
+	result := []toolCall{}
+	for _, raw := range contents {
+		content, _ := raw.(map[string]any)
+		parts, _ := content["parts"].([]any)
+		for _, rawPart := range parts {
+			part, _ := rawPart.(map[string]any)
+			response, _ := part["functionResponse"].(map[string]any)
+			if response == nil {
+				continue
+			}
+			name, _ := response["name"].(string)
+			queue := pending[name]
+			call := toolCall{name: name, ordinal: 1}
+			if len(queue) > 0 {
+				call = queue[0]
+				pending[name] = queue[1:]
+			}
+			call.target = response
+			call.targetField = "response"
+			result = append(result, call)
+		}
+	}
+	return result
+}
+
 func decodeArguments(raw any) any {
 	if text, ok := raw.(string); ok {
 		var decoded any
@@ -610,15 +1007,11 @@ func decodeArguments(raw any) any {
 }
 
 func selectorMatches(selector Selector, call toolCall) bool {
+	return selectorTargetMatches(selector, call) && selectorOrdinalMatches(selector, call.ordinal)
+}
+
+func selectorTargetMatches(selector Selector, call toolCall) bool {
 	if call.name != selector.ToolName {
-		return false
-	}
-	if selector.CallOrdinal != "every" && selector.CallOrdinal != "first" {
-		ordinal, _ := strconv.Atoi(selector.CallOrdinal)
-		if call.ordinal != ordinal {
-			return false
-		}
-	} else if selector.CallOrdinal == "first" && call.ordinal != 1 {
 		return false
 	}
 	if selector.ArgumentsPointer == "" {
@@ -638,4 +1031,15 @@ func selectorMatches(selector Selector, call toolCall) bool {
 		return false
 	}
 	return true
+}
+
+func selectorOrdinalMatches(selector Selector, callOrdinal int) bool {
+	if selector.CallOrdinal == "every" {
+		return true
+	}
+	if selector.CallOrdinal == "first" {
+		return callOrdinal == 1
+	}
+	ordinal, _ := strconv.Atoi(selector.CallOrdinal)
+	return callOrdinal == ordinal
 }

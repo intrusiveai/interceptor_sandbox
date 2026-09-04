@@ -28,7 +28,9 @@ directly.
 The in-container proxy recognizes these non-streaming native application APIs:
 
 - OpenAI Chat Completions;
-- OpenAI Responses; and
+- OpenAI Responses and the corresponding Azure OpenAI routes;
+- Anthropic Messages;
+- Gemini Developer API and Vertex Gemini `generateContent`; and
 - Amazon Bedrock Converse.
 
 The host offers explicit, compatible adapters:
@@ -36,19 +38,27 @@ The host offers explicit, compatible adapters:
 - `openai-chat`: Chat Completions pass-through to a fixed HTTP origin;
 - `openai-responses`: Responses pass-through to a fixed HTTP origin;
 - `bedrock-converse`: native Converse decoding followed by the AWS SDK for Go
-  v2 `Converse` operation; and
+  v2 `Converse` operation;
 - `litellm`: Chat Completions or Responses pass-through to the matching LiteLLM
-  gateway route.
+  gateway route;
+- `anthropic-messages`: Messages pass-through to a fixed HTTP origin;
+- `gemini-api`: Developer API `generateContent` at a fixed origin;
+- `vertex-gemini`: `generateContent` constrained to a fixed project, location,
+  and publisher; and
+- `azure-openai`: supported OpenAI routes constrained to a fixed Azure
+  resource and deployment allowlist.
 
 The MVP uses like-for-like pairings and performs no cross-protocol model
 translation. An incompatible application codec and host adapter fails
 explicitly. Streaming and `ConverseStream` are outside the initial complete-
 frame bridge.
 
-The operator selects an exact model allowlist for every run or restore. HTTP
-endpoints and Bearer credentials are host configuration. Bedrock uses the host
-AWS SDK configuration and credential chain. No real provider credential crosses
-the container boundary.
+The operator selects an exact model or deployment allowlist for every run or
+restore. HTTP endpoints and authentication are host configuration. Production
+credentials come from a supported host secret store or provider workload
+identity; named environment variables are development-only. Bedrock uses the
+host AWS SDK configuration and credential chain. No real provider credential
+crosses the container boundary.
 
 Application SDKs may require an authentication value before they will send a
 request to a custom local endpoint. The Blueprint may therefore declare fake

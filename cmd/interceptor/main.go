@@ -8,20 +8,26 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/intrusive-ai/interceptor-sandbox/internal/adaptive"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/appimage"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/blobstore"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/bridge"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/buildinfo"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/credentials"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/environment"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/evaluation"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/gatewayhost"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/hostrun"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/ociruntime"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/recording"
@@ -59,6 +65,11 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return sandboxdCommand(arguments[1:])
 	case "app-helper":
 		return sandboxd.RunHelper()
+	case "image-install-ca":
+		if len(arguments) != 2 {
+			return errors.New("image-install-ca requires one CA path")
+		}
+		return appimage.InstallSystemCA(arguments[1])
 	case "status":
 		return statusCommand(arguments[1:], stdout)
 	case "list":
@@ -79,6 +90,10 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return sessionAPICommand(arguments[1:], stdout, "/v1/evaluation")
 	case "coverage":
 		return coverageCommand(arguments[1:], stdout)
+	case "capabilities":
+		return capabilitiesCommand(arguments[1:], stdout)
+	case "gateway":
+		return gatewayCommand(arguments[1:], stdout)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return nil
@@ -86,6 +101,146 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		usage(stderr)
 		return fmt.Errorf("unknown command %q", arguments[0])
 	}
+}
+
+func gatewayCommand(arguments []string, stdout io.Writer) error {
+	if len(arguments) == 0 {
+		return errors.New("usage: interceptor gateway <session-id> --listen <private-address> --auth-principal <id> [--auth-token-credential-id <id> --credential-config <file> --production | --auth-token-env <name>]")
+	}
+	sessionID := arguments[0]
+	flags := flag.NewFlagSet("gateway", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	address := flags.String("listen", "", "private HTTP backend listen address")
+	authPrincipal := flags.String("auth-principal", "", "identity assigned to the configured integration token")
+	credentialConfig := flags.String("credential-config", "", "host secret-store profile and credential-reference YAML")
+	credentialID := flags.String("auth-token-credential-id", "", "stable credential ID for the integration token")
+	credentialEnvironment := flags.String("auth-token-env", "INTERCEPTOR_GATEWAY_TOKEN", "development-only integration-token environment variable")
+	production := flags.Bool("production", false, "require a host secret-store integration token")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return err
+	}
+	authTokenEnvSet := false
+	flags.Visit(func(value *flag.Flag) {
+		if value.Name == "auth-token-env" {
+			authTokenEnvSet = true
+		}
+	})
+	if flags.NArg() != 0 || *address == "" || *authPrincipal == "" {
+		return errors.New("gateway requires --listen and --auth-principal")
+	}
+	if *credentialID != "" && authTokenEnvSet {
+		return errors.New("--auth-token-env and --auth-token-credential-id are mutually exclusive")
+	}
+	if _, _, err := net.SplitHostPort(*address); err != nil {
+		return fmt.Errorf("gateway listen address: %w", err)
+	}
+	root, err := session.DataRoot()
+	if err != nil {
+		return err
+	}
+	metadata, _, err := session.Load(root, sessionID)
+	if err != nil {
+		return err
+	}
+	if metadata.Phase != session.Running {
+		return fmt.Errorf("gateway session is not running: %s", metadata.Phase)
+	}
+	_, report, err := environment.Verify(metadata.EnvironmentPath)
+	if err != nil {
+		return err
+	}
+	token, source, err := resolveGatewayToken(context.Background(), *credentialConfig, *credentialID, *credentialEnvironment, *production)
+	if err != nil {
+		return err
+	}
+	if source == "environment" {
+		fmt.Fprintln(stdout, "warning: using a development-only environment integration token; use --production with a host credential ID for production")
+	}
+	leaseLimits := adaptive.Limits{
+		MaximumAttempts: int64(report.Blueprint.Adaptive.MaxAttempts), MaximumConcurrentInvocations: 1,
+		MaximumArtifactBytes: boundedProduct(metadata.Limits.MaxBlobBytes, int64(report.Blueprint.Adaptive.MaxArtifacts), 1<<40),
+		MaximumWallSeconds:   metadata.Limits.MaxWallSeconds, MaximumSnapshotCreations: metadata.Limits.MaxSnapshots,
+		MaximumCumulativeSnapshotBytes: boundedProduct(metadata.Limits.MaxBlobBytes, metadata.Limits.MaxSnapshots, 16<<40),
+	}
+	tokenBytes := []byte(token)
+	token = ""
+	gateway, err := adaptive.NewGateway(adaptive.GatewayConfig{SessionID: metadata.ID, EnvironmentDigest: metadata.EnvironmentDigest, ApplicationDigest: metadata.AppDigest, CapabilityManifestDigest: metadata.CapabilityManifestDigest, FeedbackProfile: metadata.FeedbackProfile, IntegrationPrincipal: *authPrincipal, IntegrationToken: tokenBytes, Executor: gatewayhost.NewExecutor(), MaximumLeaseLimits: leaseLimits, MaxFrameBytes: adaptive.ArtifactEnvelopeLimit(metadata.Limits.MaxBlobBytes)})
+	for index := range tokenBytes {
+		tokenBytes[index] = 0
+	}
+	if err != nil {
+		return err
+	}
+	server := &http.Server{Addr: *address, Handler: gateway, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	go func() {
+		<-ctx.Done()
+		shutdown, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		_ = server.Shutdown(shutdown)
+	}()
+	fmt.Fprintf(stdout, "Cross-VM gateway for %s listening on private HTTP backend %s\n", sessionID, *address)
+	err = server.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+func resolveGatewayToken(ctx context.Context, credentialConfig, credentialID, credentialEnvironment string, production bool) (string, string, error) {
+	if credentialID != "" {
+		if credentialConfig == "" {
+			return "", "", errors.New("--auth-token-credential-id requires --credential-config")
+		}
+		value, err := resolveStoredCredential(ctx, credentialConfig, credentialID)
+		return value, "secret-store", err
+	}
+	if credentialConfig != "" {
+		return "", "", errors.New("--credential-config requires --auth-token-credential-id")
+	}
+	if production {
+		return "", "", errors.New("environment-based gateway tokens are disabled in production mode; use --auth-token-credential-id")
+	}
+	if credentialEnvironment == "" {
+		return "", "", errors.New("--auth-token-env may not be empty")
+	}
+	value := os.Getenv(credentialEnvironment)
+	if value == "" {
+		return "", "", fmt.Errorf("gateway token environment variable %s is empty", credentialEnvironment)
+	}
+	return value, "environment", nil
+}
+
+func boundedProduct(left, right, maximum int64) int64 {
+	if left <= 0 || right <= 0 {
+		return 1
+	}
+	if left > maximum/right {
+		return maximum
+	}
+	return left * right
+}
+
+func capabilitiesCommand(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("capabilities", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	directory := flags.String("environment", "", "Environment Blueprint directory")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *directory == "" {
+		return errors.New("usage: interceptor capabilities --environment <directory>")
+	}
+	lock, report, err := environment.Verify(*directory)
+	if err != nil {
+		return err
+	}
+	manifest, err := adaptive.BuildCapabilityManifest(report.Blueprint, lock.EnvironmentDigest, lock.ApplicationDigest)
+	if err != nil {
+		return err
+	}
+	return writeJSON(stdout, manifest)
 }
 
 func appCommand(arguments []string, stdout io.Writer) error {
@@ -138,6 +293,9 @@ func appCommand(arguments []string, stdout io.Writer) error {
 		if err := appimage.Verify(context.Background(), lock, environmentLock, docker); err != nil {
 			return err
 		}
+		if err := appimage.VerifyTLSMaterial(dataRoot, report.Blueprint, lock); err != nil {
+			return err
+		}
 		if *jsonOutput {
 			return writeJSON(stdout, map[string]any{"valid": true, "lock": lock})
 		}
@@ -166,11 +324,17 @@ func runCommand(arguments []string, stdout io.Writer) error {
 	applicationPort := flags.Int("app-port", 0, "application bridge port")
 	controlPort := flags.Int("control-port", 0, "control bridge port")
 	bridgeTransport := flags.String("bridge-transport", "spool", "host/container bridge transport: spool or unix")
-	providerType := flags.String("model-provider", bridge.ProviderOpenAIChat, "host provider: openai-chat, openai-responses, bedrock-converse, or litellm")
+	providerType := flags.String("model-provider", bridge.ProviderOpenAIChat, "host model-provider adapter")
 	providerURL := flags.String("provider-base-url", os.Getenv("INTERCEPTOR_PROVIDER_BASE_URL"), "fixed provider base URL")
 	credentialEnvironment := flags.String("model-api-key-env", "", "host environment variable containing provider credential (defaults to OPENAI_API_KEY for OpenAI providers)")
+	credentialConfig := flags.String("credential-config", "", "host secret-store profile and credential-reference YAML")
+	credentialID := flags.String("model-credential-id", "", "stable host credential ID used by the model provider")
+	production := flags.Bool("production", false, "enforce production credential policy")
+	feedbackProfile := flags.String("feedback-profile", "", "immutable adaptive feedback profile (default black-box)")
 	awsRegion := flags.String("aws-region", "", "AWS Region override for bedrock-converse")
 	awsProfile := flags.String("aws-profile", "", "AWS shared configuration profile for bedrock-converse")
+	providerAPIVersion := flags.String("provider-api-version", "", "pinned provider API version (Anthropic only in this release)")
+	providerAuthMode := flags.String("provider-auth", "", "provider authentication mode: none, api-key, workload-token, or workload-identity")
 	var allowedModels stringList
 	flags.Var(&allowedModels, "allow-model", "allowed model identifier (repeatable)")
 	if err := flags.Parse(arguments); err != nil {
@@ -179,9 +343,15 @@ func runCommand(arguments []string, stdout io.Writer) error {
 	if flags.NArg() != 0 || *directory == "" || len(allowedModels) == 0 {
 		return errors.New("usage: interceptor run --environment <directory> --model-provider <type> --allow-model <model> [provider options]")
 	}
-	apiKey, err := validateProviderOptions(*providerType, *providerURL, *credentialEnvironment)
+	if *production && strings.TrimSpace(*awsProfile) != "" {
+		return errors.New("--aws-profile is a development credential source and is disabled in production mode")
+	}
+	apiKey, err := resolveProviderOptions(context.Background(), *providerType, *providerURL, *credentialEnvironment, *credentialConfig, *credentialID, *providerAuthMode, *production)
 	if err != nil {
 		return err
+	}
+	if *credentialID == "" && apiKey != "" {
+		fmt.Fprintln(stdout, "warning: using a development-only environment credential; use --production with a host credential ID or workload identity for production")
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -189,7 +359,10 @@ func runCommand(arguments []string, stdout io.Writer) error {
 		EnvironmentDirectory: *directory, ApplicationPort: *applicationPort, ControlPort: *controlPort,
 		ProviderType: *providerType, ProviderURL: *providerURL, ProviderAPIKey: apiKey,
 		AWSRegion: *awsRegion, AWSProfile: *awsProfile, AllowedModels: allowedModels,
-		BridgeTransport: *bridgeTransport, Docker: ociruntime.Docker{}, Output: stdout,
+		ProviderAPIVersion: *providerAPIVersion,
+		ProviderAuthMode:   *providerAuthMode,
+		BridgeTransport:    *bridgeTransport, Docker: ociruntime.Docker{}, Output: stdout,
+		FeedbackProfile: *feedbackProfile,
 	})
 	return err
 }
@@ -205,11 +378,17 @@ func restoreCommand(arguments []string, stdout io.Writer) error {
 	applicationPort := flags.Int("app-port", 0, "application bridge port")
 	controlPort := flags.Int("control-port", 0, "control bridge port")
 	bridgeTransport := flags.String("bridge-transport", "spool", "host/container bridge transport: spool or unix")
-	providerType := flags.String("model-provider", bridge.ProviderOpenAIChat, "host provider: openai-chat, openai-responses, bedrock-converse, or litellm")
+	providerType := flags.String("model-provider", bridge.ProviderOpenAIChat, "host model-provider adapter")
 	providerURL := flags.String("provider-base-url", os.Getenv("INTERCEPTOR_PROVIDER_BASE_URL"), "fixed provider base URL")
 	credentialEnvironment := flags.String("model-api-key-env", "", "host environment variable containing provider credential (defaults to OPENAI_API_KEY for OpenAI providers)")
+	credentialConfig := flags.String("credential-config", "", "host secret-store profile and credential-reference YAML")
+	credentialID := flags.String("model-credential-id", "", "stable host credential ID used by the model provider")
+	production := flags.Bool("production", false, "enforce production credential policy")
+	feedbackProfile := flags.String("feedback-profile", "", "immutable adaptive feedback profile (defaults to source session)")
 	awsRegion := flags.String("aws-region", "", "AWS Region override for bedrock-converse")
 	awsProfile := flags.String("aws-profile", "", "AWS shared configuration profile for bedrock-converse")
+	providerAPIVersion := flags.String("provider-api-version", "", "pinned provider API version (Anthropic only in this release)")
+	providerAuthMode := flags.String("provider-auth", "", "provider authentication mode: none, api-key, workload-token, or workload-identity")
 	stopSource := flags.Bool("stop-source", false, "stop source after restored session becomes healthy")
 	var allowedModels stringList
 	flags.Var(&allowedModels, "allow-model", "allowed model identifier (repeatable)")
@@ -219,16 +398,25 @@ func restoreCommand(arguments []string, stdout io.Writer) error {
 	if flags.NArg() != 0 || *checkpointID == "" || len(allowedModels) == 0 {
 		return errors.New("usage: interceptor restore <session-id> --checkpoint <id> --model-provider <type> --allow-model <model> [provider options]")
 	}
-	apiKey, err := validateProviderOptions(*providerType, *providerURL, *credentialEnvironment)
+	if *production && strings.TrimSpace(*awsProfile) != "" {
+		return errors.New("--aws-profile is a development credential source and is disabled in production mode")
+	}
+	apiKey, err := resolveProviderOptions(context.Background(), *providerType, *providerURL, *credentialEnvironment, *credentialConfig, *credentialID, *providerAuthMode, *production)
 	if err != nil {
 		return err
+	}
+	if *credentialID == "" && apiKey != "" {
+		fmt.Fprintln(stdout, "warning: using a development-only environment credential; use --production with a host credential ID or workload identity for production")
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	config := hostrun.Config{
 		ApplicationPort: *applicationPort, ControlPort: *controlPort, ProviderType: *providerType, ProviderURL: *providerURL,
 		ProviderAPIKey: apiKey, AWSRegion: *awsRegion, AWSProfile: *awsProfile,
-		AllowedModels: allowedModels, BridgeTransport: *bridgeTransport, Docker: ociruntime.Docker{}, Output: stdout,
+		ProviderAPIVersion: *providerAPIVersion,
+		ProviderAuthMode:   *providerAuthMode,
+		AllowedModels:      allowedModels, BridgeTransport: *bridgeTransport, Docker: ociruntime.Docker{}, Output: stdout,
+		FeedbackProfile: *feedbackProfile,
 	}
 	if *stopSource {
 		config.OnReady = func(session.Metadata) error { return stopCommand([]string{sourceSessionID}, stdout) }
@@ -241,28 +429,120 @@ func restoreCommand(arguments []string, stdout io.Writer) error {
 }
 
 func validateProviderOptions(providerType, providerURL, credentialEnvironment string) (string, error) {
+	return resolveProviderOptions(context.Background(), providerType, providerURL, credentialEnvironment, "", "", "", false)
+}
+
+func resolveProviderOptions(ctx context.Context, providerType, providerURL, credentialEnvironment, credentialConfig, credentialID, authMode string, production bool) (string, error) {
 	providerType = strings.ToLower(strings.TrimSpace(providerType))
 	switch providerType {
 	case bridge.ProviderBedrockConverse:
+		if providerURL != "" || credentialEnvironment != "" || credentialConfig != "" || credentialID != "" || authMode != "" && authMode != "workload-identity" {
+			return "", errors.New("bedrock-converse uses the host AWS SDK identity and accepts no HTTP credential or endpoint options")
+		}
 		return "", nil
-	case bridge.ProviderOpenAIChat, bridge.ProviderOpenAIResponses, bridge.ProviderLiteLLM:
+	case bridge.ProviderOpenAIChat, bridge.ProviderOpenAIResponses, bridge.ProviderLiteLLM,
+		bridge.ProviderAnthropicMessages, bridge.ProviderGeminiAPI, bridge.ProviderVertexGemini, bridge.ProviderAzureOpenAI:
 		if strings.TrimSpace(providerURL) == "" {
 			return "", fmt.Errorf("--provider-base-url is required for model provider %s", providerType)
 		}
 	default:
 		return "", fmt.Errorf("unsupported model provider %q", providerType)
 	}
-	if credentialEnvironment == "" && providerType == bridge.ProviderLiteLLM {
+	if authMode == "" {
+		if providerType == bridge.ProviderVertexGemini {
+			authMode = "workload-identity"
+		} else if providerType == bridge.ProviderLiteLLM && credentialConfig == "" && credentialID == "" && credentialEnvironment == "" {
+			authMode = "none"
+		} else {
+			authMode = "api-key"
+		}
+	}
+	apiKeyProvider := providerType == bridge.ProviderOpenAIChat || providerType == bridge.ProviderOpenAIResponses || providerType == bridge.ProviderLiteLLM || providerType == bridge.ProviderAnthropicMessages || providerType == bridge.ProviderGeminiAPI || providerType == bridge.ProviderAzureOpenAI
+	validAuth := apiKeyProvider && authMode == "api-key" || providerType == bridge.ProviderLiteLLM && authMode == "none" || providerType == bridge.ProviderAnthropicMessages && authMode == "workload-token" || (providerType == bridge.ProviderVertexGemini || providerType == bridge.ProviderAzureOpenAI) && authMode == "workload-identity"
+	if !validAuth {
+		return "", fmt.Errorf("authentication mode %q is invalid for provider %s", authMode, providerType)
+	}
+	if authMode == "none" {
+		if credentialConfig != "" || credentialID != "" || credentialEnvironment != "" {
+			return "", errors.New("unauthenticated provider mode may not be combined with a stored or environment credential")
+		}
+		return "", nil
+	}
+	if authMode == "workload-identity" {
+		if credentialConfig != "" || credentialID != "" || credentialEnvironment != "" {
+			return "", errors.New("workload identity may not be combined with a stored or environment credential")
+		}
+		return "", nil
+	}
+	if credentialID != "" {
+		if credentialConfig == "" {
+			return "", errors.New("--model-credential-id requires --credential-config")
+		}
+		return resolveStoredCredential(ctx, credentialConfig, credentialID)
+	}
+	if credentialConfig != "" {
+		return "", errors.New("--credential-config requires --model-credential-id")
+	}
+	if production {
+		return "", errors.New("environment-based provider credentials are disabled in production mode; use --model-credential-id")
+	}
+	if credentialEnvironment == "" && (providerType == bridge.ProviderLiteLLM || providerType == bridge.ProviderVertexGemini) {
 		return "", nil
 	}
 	if credentialEnvironment == "" {
-		credentialEnvironment = "OPENAI_API_KEY"
+		switch providerType {
+		case bridge.ProviderAnthropicMessages:
+			credentialEnvironment = "ANTHROPIC_API_KEY"
+		case bridge.ProviderGeminiAPI:
+			credentialEnvironment = "GEMINI_API_KEY"
+		case bridge.ProviderAzureOpenAI:
+			credentialEnvironment = "AZURE_OPENAI_API_KEY"
+		default:
+			credentialEnvironment = "OPENAI_API_KEY"
+		}
 	}
 	apiKey := os.Getenv(credentialEnvironment)
 	if apiKey == "" {
 		return "", fmt.Errorf("provider credential environment variable %s is empty", credentialEnvironment)
 	}
 	return apiKey, nil
+}
+
+func resolveStoredCredential(ctx context.Context, credentialConfig, credentialID string) (string, error) {
+	config, err := credentials.Load(credentialConfig)
+	if err != nil {
+		return "", err
+	}
+	resolver, err := credentials.New(config, nil)
+	if err != nil {
+		return "", err
+	}
+	profileID := ""
+	for _, reference := range config.Credentials {
+		if reference.CredentialID == credentialID {
+			profileID = reference.StoreProfileID
+			break
+		}
+	}
+	resolved, err := resolver.Resolve(ctx, credentialID)
+	audit := credentials.AuditEvent{CredentialID: credentialID, ProfileID: profileID, ResolvedAt: time.Now().UTC(), Outcome: "failed"}
+	if err == nil {
+		audit.ProfileID = resolved.ProfileID
+		audit.BackendVersion = resolved.BackendVersion
+		audit.ResolvedAt = resolved.ResolvedAt
+		audit.Outcome = "resolved"
+	}
+	dataRoot, rootErr := session.DataRoot()
+	if rootErr != nil {
+		return "", rootErr
+	}
+	if auditErr := credentials.AppendAudit(dataRoot, audit); auditErr != nil {
+		return "", fmt.Errorf("record credential resolution audit: %w", auditErr)
+	}
+	if err != nil {
+		return "", err
+	}
+	return resolved.Value, nil
 }
 
 func sandboxdCommand(arguments []string) error {
@@ -529,6 +809,30 @@ func exportEvidence(dataRoot string, metadata session.Metadata, paths session.Pa
 	if err != nil {
 		return err
 	}
+	artifactRegistry, err := adaptive.OpenArtifactRegistry(filepath.Join(paths.Root, "artifacts.json"), store, metadata.Limits.MaxBlobBytes)
+	if err != nil {
+		return err
+	}
+	attemptRegistry, err := adaptive.OpenAttemptRegistry(filepath.Join(paths.Root, "attempts.json"), metadata.FeedbackProfile, 100000, artifactRegistry)
+	if err != nil {
+		return err
+	}
+	finalReport := evaluation.Report{Oracles: []evaluation.OracleResult{}, Injections: []evaluation.InjectionResult{}, Coverage: []string{}}
+	evaluationComplete := false
+	if content, readErr := os.ReadFile(paths.Evaluation); readErr == nil {
+		decoder := json.NewDecoder(strings.NewReader(string(content)))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&finalReport); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+			return errors.New("final evaluation is malformed")
+		}
+		evaluationComplete = true
+	} else if !os.IsNotExist(readErr) {
+		return readErr
+	}
+	evidenceBundle, err := adaptive.BuildEvidenceBundle(metadata, attemptRegistry.List(), artifactRegistry.List(), events, checkpoints, finalReport, evaluationComplete)
+	if err != nil {
+		return err
+	}
 	references := map[string]struct{}{}
 	for _, event := range events {
 		eventReferences, err := recording.References(event)
@@ -545,6 +849,9 @@ func exportEvidence(dataRoot string, metadata session.Metadata, paths session.Pa
 				references[operation.Blob] = struct{}{}
 			}
 		}
+	}
+	for _, artifact := range artifactRegistry.List() {
+		references[artifact.Digest] = struct{}{}
 	}
 	directory := filepath.Dir(output)
 	if err := os.MkdirAll(directory, 0o750); err != nil {
@@ -568,13 +875,36 @@ func exportEvidence(dataRoot string, metadata session.Metadata, paths session.Pa
 	if err := addBytes("manifest.json", append(manifest, '\n'), 0o640); err != nil {
 		return err
 	}
-	for name, path := range map[string]string{"session.json": paths.Metadata, "events.jsonl": paths.Events, "state.jsonl": paths.Journal, "file-manifest.json": paths.FileManifest} {
-		content, err := os.ReadFile(path)
+	bundleBytes, _ := json.MarshalIndent(evidenceBundle, "", "  ")
+	if err := addBytes("evidence-bundle.json", append(bundleBytes, '\n'), 0o640); err != nil {
+		return err
+	}
+	for _, file := range []struct{ name, path string }{{"session.json", paths.Metadata}, {"events.jsonl", paths.Events}, {"state.jsonl", paths.Journal}, {"file-manifest.json", paths.FileManifest}} {
+		content, err := os.ReadFile(file.path)
 		if err != nil {
 			return err
 		}
-		if err := addBytes(name, content, 0o640); err != nil {
+		if err := addBytes(file.name, content, 0o640); err != nil {
 			return err
+		}
+	}
+	if evaluationComplete {
+		content, err := os.ReadFile(paths.Evaluation)
+		if err != nil {
+			return err
+		}
+		if err := addBytes("final-evaluation.json", content, 0o640); err != nil {
+			return err
+		}
+	}
+	for _, name := range []string{"artifacts.json", "attempts.json"} {
+		content, readErr := os.ReadFile(filepath.Join(paths.Root, name))
+		if readErr == nil {
+			if err := addBytes(name, content, 0o640); err != nil {
+				return err
+			}
+		} else if !os.IsNotExist(readErr) {
+			return readErr
 		}
 	}
 	checkpointFiles, err := os.ReadDir(paths.Checkpoints)
@@ -593,7 +923,12 @@ func exportEvidence(dataRoot string, metadata session.Metadata, paths session.Pa
 			return err
 		}
 	}
+	orderedReferences := make([]string, 0, len(references))
 	for reference := range references {
+		orderedReferences = append(orderedReferences, reference)
+	}
+	sort.Strings(orderedReferences)
+	for _, reference := range orderedReferences {
 		reader, object, err := store.Open(reference)
 		if err != nil {
 			return err
@@ -874,6 +1209,8 @@ Commands:
   environment init|validate|seal|inspect
   app build|verify
   run --environment <directory> --model-provider <type> --allow-model <model> [provider options]
+  capabilities --environment <directory>
+  gateway <session-id> --listen <private-address> --auth-principal <id> [gateway authentication options]
   list
   status <session-id>
   stop <session-id>

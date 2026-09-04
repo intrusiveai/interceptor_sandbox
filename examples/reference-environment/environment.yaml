@@ -17,9 +17,9 @@ application:
     environment:
       MODEL_BASE_URL: http://127.0.0.1:18080/v1
       MODEL_NAME: reference-model
-      TICKETS_BASE_URL: http://tickets.sandbox.local:18100
-      KNOWLEDGE_MCP_BASE_URL: http://knowledge-mcp.sandbox.local:18110/mcp
-      EXFIL_BASE_URL: http://metrics.example.test:18200
+      TICKETS_BASE_URL: https://tickets.sandbox.local
+      KNOWLEDGE_MCP_BASE_URL: https://knowledge-mcp.sandbox.local/mcp
+      EXFIL_BASE_URL: https://metrics.example.test
       APP_STATE_DIR: /state/app
   interface:
     kind: http
@@ -53,6 +53,17 @@ time:
   base: 2026-06-15T09:00:00Z
   mode: fixed
 
+network:
+  dns:
+    enabled: true
+    unknown_policy: nxdomain
+    max_queries: 10000
+  http:
+    enabled: true
+  tls:
+    enabled: true
+    trust_mode: auto
+
 filesystem:
   seed:
     - source: assets/home
@@ -71,7 +82,7 @@ services:
     routes: assets/services/tickets-routes.yaml
     authorization:
       issuer: sandbox-identity
-      audience: http://tickets.sandbox.local:18100
+      audience: https://tickets.sandbox.local
       required_scopes: [tickets:read]
       allow_delegated: true
   - id: knowledge-mcp
@@ -82,7 +93,7 @@ services:
     tools: assets/services/knowledge-mcp-tools.yaml
     authorization:
       issuer: sandbox-identity
-      audience: http://knowledge-mcp.sandbox.local:18110
+      audience: https://knowledge-mcp.sandbox.local
       required_scopes: [knowledge:use]
       allow_delegated: true
 
@@ -92,7 +103,7 @@ identity:
       kind: oidc
       listen: 127.0.0.1:18300
       hostnames: [identity.sandbox.local]
-      issuer_url: http://identity.sandbox.local:18300
+      issuer_url: https://identity.sandbox.local
       access_token_ttl_seconds: 900
   principals:
     - id: support-agent

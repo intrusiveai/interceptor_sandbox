@@ -17,6 +17,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"golang.org/x/oauth2/google"
+
+	"github.com/intrusive-ai/interceptor-sandbox/internal/adaptive"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/appimage"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/blobstore"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/bridge"
@@ -37,11 +43,14 @@ type Config struct {
 	ProviderAPIKey       string
 	AWSRegion            string
 	AWSProfile           string
+	ProviderAPIVersion   string
+	ProviderAuthMode     string
 	AllowedModels        []string
 	BridgeTransport      string
 	Docker               ociruntime.Docker
 	Output               io.Writer
 	OnReady              func(session.Metadata) error
+	FeedbackProfile      string
 }
 
 type Running struct {
@@ -73,11 +82,17 @@ func Run(ctx context.Context, config Config) (session.Metadata, error) {
 	if err := appimage.Verify(ctx, applicationLock, lock, config.Docker); err != nil {
 		return session.Metadata{}, err
 	}
+	if err := appimage.VerifyTLSMaterial(dataRoot, report.Blueprint, applicationLock); err != nil {
+		return session.Metadata{}, err
+	}
 	metadata, err := session.NewMetadata(config.EnvironmentDirectory, lock, report.Blueprint, time.Now())
 	if err != nil {
 		return session.Metadata{}, err
 	}
 	metadata.BridgeTransport = transport
+	if err := bindAdaptiveMetadata(&metadata, report.Blueprint, config.FeedbackProfile); err != nil {
+		return session.Metadata{}, err
+	}
 	paths := session.PathsFor(dataRoot, metadata.ID)
 	for _, directory := range []string{paths.Root, paths.Checkpoints, paths.Generations, paths.Logs, paths.Sockets} {
 		if err := os.MkdirAll(directory, 0o750); err != nil {
@@ -152,6 +167,9 @@ func Restore(ctx context.Context, config Config, sourceSessionID, checkpointID s
 	if err := appimage.Verify(ctx, applicationLock, environmentLock, config.Docker); err != nil {
 		return session.Metadata{}, err
 	}
+	if err := appimage.VerifyTLSMaterial(dataRoot, report.Blueprint, applicationLock); err != nil {
+		return session.Metadata{}, err
+	}
 	transactions, err := statejournal.VerifyFile(sourcePaths.Journal)
 	if err != nil {
 		return session.Metadata{}, err
@@ -171,7 +189,14 @@ func Restore(ctx context.Context, config Config, sourceSessionID, checkpointID s
 		return session.Metadata{}, err
 	}
 	metadata.ParentCheckpoint = checkpoint.ID
+	metadata.ParentSessionID = source.ID
 	metadata.BridgeTransport = transport
+	if config.FeedbackProfile == "" {
+		config.FeedbackProfile = source.FeedbackProfile
+	}
+	if err := bindAdaptiveMetadata(&metadata, report.Blueprint, config.FeedbackProfile); err != nil {
+		return session.Metadata{}, err
+	}
 	paths := session.PathsFor(dataRoot, metadata.ID)
 	for _, directory := range []string{paths.Root, paths.Checkpoints, paths.Generations, paths.Logs, paths.Sockets} {
 		if err := os.MkdirAll(directory, 0o750); err != nil {
@@ -219,6 +244,9 @@ func Restore(ctx context.Context, config Config, sourceSessionID, checkpointID s
 		if err := snapshot.ReplayFilesystem(ctx, roots, blobs, transactions, checkpoint.JournalSeq); err != nil {
 			return metadata, err
 		}
+	}
+	if err := adaptive.RestoreRegistries(paths.Root, transactions[:checkpoint.JournalSeq]); err != nil {
+		return metadata, err
 	}
 	restoredManifest := snapshot.EmptyManifest()
 	if len(roots) > 0 {
@@ -303,6 +331,9 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		{Source: paths.Root, Target: "/run/interceptor-session"},
 		{Source: filepath.Join(dataRoot, "blobs"), Target: "/run/interceptor-blobs"},
 	}
+	if blueprint.Network.TLS.Enabled {
+		mounts = append(mounts, ociruntime.Mount{Source: appimage.TLSMaterialDirectory(dataRoot, blueprint), Target: "/run/interceptor-tls", ReadOnly: true})
+	}
 	for _, root := range roots {
 		mounts = append(mounts, ociruntime.Mount{Source: root.HostPath, Target: root.ContainerPath})
 	}
@@ -312,14 +343,23 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		}
 	}
 	hostnames := []string{}
-	for _, service := range blueprint.Services {
-		hostnames = append(hostnames, service.Hostnames...)
+	if !blueprint.Network.DNS.Enabled {
+		for _, service := range blueprint.Services {
+			hostnames = append(hostnames, service.Hostnames...)
+		}
+		for _, service := range blueprint.AttackerServices {
+			hostnames = append(hostnames, service.Hostnames...)
+		}
+		for _, issuer := range blueprint.Identity.Issuers {
+			hostnames = append(hostnames, issuer.Hostnames...)
+		}
 	}
-	for _, service := range blueprint.AttackerServices {
-		hostnames = append(hostnames, service.Hostnames...)
+	dns, sysctls := []string{}, map[string]string{}
+	if blueprint.Network.DNS.Enabled {
+		dns = []string{"127.0.0.1"}
 	}
-	for _, issuer := range blueprint.Identity.Issuers {
-		hostnames = append(hostnames, issuer.Hostnames...)
+	if blueprint.Network.DNS.Enabled || blueprint.Network.HTTP.Enabled || blueprint.Network.TLS.Enabled {
+		sysctls["net.ipv4.ip_unprivileged_port_start"] = "53"
 	}
 	containerID, err := config.Docker.Run(ctx, ociruntime.RunConfig{
 		Name: containerName, Image: applicationLock.WrapperImage, User: "0:0",
@@ -328,7 +368,7 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 			"INTERCEPTOR_APP_UID": "20000", "INTERCEPTOR_APP_GID": strconv.Itoa(os.Getgid()),
 			"INTERCEPTOR_BRIDGE_TRANSPORT": config.BridgeTransport,
 		},
-		Mounts: mounts, Hostnames: hostnames, PIDs: metadata.Limits.MaxPIDs, MemoryBytes: metadata.Limits.MemoryBytes,
+		Mounts: mounts, Hostnames: hostnames, DNS: dns, Sysctls: sysctls, PIDs: metadata.Limits.MaxPIDs, MemoryBytes: metadata.Limits.MemoryBytes,
 		CPUs: metadata.Limits.CPUs, ReadOnly: true, NetworkNone: true, NoNewPrivileges: true, DropAllCaps: true,
 		AddCaps: []string{"SETUID", "SETGID", "KILL"}, TmpfsBytes: 64 << 20,
 	})
@@ -346,9 +386,8 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 	}
 	metadata, _, _ = session.Load(dataRoot, metadata.ID)
 	var applicationServer, controlServer *http.Server
-	var spoolClient *bridge.HTTPSpoolClient
 	if config.BridgeTransport == "unix" {
-		if _, probeErr := callUnix(ctx, filepath.Join(paths.Sockets, "control.sock"), http.MethodGet, "/v1/status", nil); probeErr != nil {
+		if _, probeErr := callUnix(ctx, filepath.Join(paths.Sockets, "control.sock"), http.MethodGet, "/v1/status", nil, 1<<20); probeErr != nil {
 			metadata.Phase, metadata.TerminationReason = session.Error, "selected Unix bridge is unavailable: "+probeErr.Error()
 			_ = session.Save(paths.Metadata, metadata)
 			_ = config.Docker.Stop(context.Background(), containerID, 5*time.Second)
@@ -358,20 +397,23 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		applicationServer = unixProxyServer(applicationListener, filepath.Join(paths.Sockets, "application.sock"), nil)
 		controlServer = unixProxyServer(controlListener, filepath.Join(paths.Sockets, "control.sock"), cooperativeRoute)
 	} else {
-		client, clientErr := bridge.NewHTTPSpoolClient(filepath.Join(paths.Sockets, "http-spool"), blueprint.Limits.MaxBlobBytes, time.Duration(blueprint.Application.Interface.TurnTimeoutMS)*time.Millisecond)
+		applicationClient, clientErr := bridge.NewHTTPSpoolClient(filepath.Join(paths.Sockets, "http-spool"), blueprint.Limits.MaxBlobBytes, time.Duration(blueprint.Application.Interface.TurnTimeoutMS)*time.Millisecond)
 		if clientErr != nil {
 			return metadata, clientErr
 		}
-		spoolClient = client
-		if _, probeErr := spoolClient.Do(ctx, bridge.ControlChannel, http.MethodGet, "/v1/status", nil, nil); probeErr != nil {
+		controlClient, clientErr := bridge.NewHTTPSpoolClient(filepath.Join(paths.Sockets, "http-spool"), adaptive.ArtifactEnvelopeLimit(blueprint.Limits.MaxBlobBytes), time.Duration(blueprint.Application.Interface.TurnTimeoutMS)*time.Millisecond)
+		if clientErr != nil {
+			return metadata, clientErr
+		}
+		if _, probeErr := controlClient.Do(ctx, bridge.ControlChannel, http.MethodGet, "/v1/status", nil, nil); probeErr != nil {
 			metadata.Phase, metadata.TerminationReason = session.Error, "default spool bridge is unavailable: "+probeErr.Error()
 			_ = session.Save(paths.Metadata, metadata)
 			_ = config.Docker.Stop(context.Background(), containerID, 5*time.Second)
 			_ = config.Docker.Remove(context.Background(), containerID)
 			return metadata, errors.New(metadata.TerminationReason)
 		}
-		applicationServer = spoolProxyServer(applicationListener, spoolClient, bridge.ApplicationChannel, nil)
-		controlServer = spoolProxyServer(controlListener, spoolClient, bridge.ControlChannel, cooperativeRoute)
+		applicationServer = spoolProxyServer(applicationListener, applicationClient, bridge.ApplicationChannel, blueprint.Limits.MaxBlobBytes, nil)
+		controlServer = spoolProxyServer(controlListener, controlClient, bridge.ControlChannel, adaptive.ArtifactEnvelopeLimit(blueprint.Limits.MaxBlobBytes), cooperativeRoute)
 	}
 	defer applicationServer.Close()
 	defer controlServer.Close()
@@ -441,9 +483,90 @@ func modelProvider(ctx context.Context, config Config) (bridge.ModelProvider, er
 		return bridge.NewLiteLLMProvider(httpConfig)
 	case bridge.ProviderBedrockConverse:
 		return bridge.LoadBedrockConverseProvider(ctx, bridge.BedrockProviderConfig{Region: config.AWSRegion, Profile: config.AWSProfile})
+	case bridge.ProviderAnthropicMessages:
+		if config.ProviderAuthMode == "workload-token" {
+			httpConfig.CredentialHeader = "Authorization"
+			httpConfig.CredentialPrefix = "Bearer "
+		}
+		if config.ProviderAPIVersion != "" {
+			httpConfig.Headers = map[string]string{"Anthropic-Version": config.ProviderAPIVersion}
+		}
+		version := config.ProviderAPIVersion
+		if version == "" {
+			version = "2023-06-01"
+		}
+		httpConfig.Metadata = map[string]string{"api_version": version}
+		return bridge.NewAnthropicMessagesProvider(httpConfig)
+	case bridge.ProviderGeminiAPI:
+		return bridge.NewGeminiAPIProvider(httpConfig)
+	case bridge.ProviderVertexGemini:
+		if config.ProviderAPIKey == "" {
+			client, err := google.DefaultClient(ctx, "https://www.googleapis.com/auth/cloud-platform")
+			if err != nil {
+				return nil, fmt.Errorf("initialize Vertex workload identity: %w", err)
+			}
+			httpConfig.Client = client
+		}
+		return bridge.NewVertexGeminiProvider(httpConfig)
+	case bridge.ProviderAzureOpenAI:
+		if config.ProviderAuthMode == "workload-identity" {
+			credential, err := azureWorkloadCredential()
+			if err != nil {
+				return nil, fmt.Errorf("initialize Azure workload identity: %w", err)
+			}
+			httpConfig.APIKey = ""
+			httpConfig.Client = &http.Client{Transport: &azureBearerTransport{credential: credential, base: http.DefaultTransport}}
+		}
+		return bridge.NewAzureOpenAIProvider(httpConfig)
 	default:
 		return nil, fmt.Errorf("unsupported model provider %q", config.ProviderType)
 	}
+}
+
+type azureBearerTransport struct {
+	credential azcore.TokenCredential
+	base       http.RoundTripper
+}
+
+func (t *azureBearerTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	token, err := t.credential.GetToken(request.Context(), policy.TokenRequestOptions{Scopes: []string{"https://cognitiveservices.azure.com/.default"}})
+	if err != nil {
+		return nil, err
+	}
+	clone := request.Clone(request.Context())
+	clone.Header = request.Header.Clone()
+	clone.Header.Set("Authorization", "Bearer "+token.Token)
+	return t.base.RoundTrip(clone)
+}
+func azureWorkloadCredential() (azcore.TokenCredential, error) {
+	if credential, err := azidentity.NewWorkloadIdentityCredential(nil); err == nil {
+		return credential, nil
+	}
+	return azidentity.NewManagedIdentityCredential(nil)
+}
+
+func bindAdaptiveMetadata(metadata *session.Metadata, blueprint *environment.Blueprint, requested string) error {
+	if requested == "" {
+		requested = "black-box"
+	}
+	supported := false
+	for _, profile := range blueprint.Adaptive.FeedbackProfiles {
+		if profile == requested {
+			supported = true
+			break
+		}
+	}
+	if !supported {
+		return fmt.Errorf("feedback profile %q is not supported by the sealed environment", requested)
+	}
+	manifest, err := adaptive.BuildCapabilityManifest(blueprint, metadata.EnvironmentDigest, metadata.AppDigest)
+	if err != nil {
+		return err
+	}
+	metadata.CapabilityManifestDigest = manifest.Digest
+	metadata.FeedbackProfile = requested
+	metadata.Revision = 1
+	return nil
 }
 
 func CallSession(ctx context.Context, sessionID, method, path string, body []byte) ([]byte, error) {
@@ -466,9 +589,9 @@ func CallSession(ctx context.Context, sessionID, method, path string, body []byt
 
 func callControl(ctx context.Context, metadata session.Metadata, paths session.Paths, method, path string, body []byte) ([]byte, error) {
 	if metadata.BridgeTransport == "unix" {
-		return callUnix(ctx, filepath.Join(paths.Sockets, "control.sock"), method, path, body)
+		return callUnix(ctx, filepath.Join(paths.Sockets, "control.sock"), method, path, body, adaptive.ArtifactEnvelopeLimit(metadata.Limits.MaxBlobBytes))
 	}
-	client, err := bridge.NewHTTPSpoolClient(filepath.Join(paths.Sockets, "http-spool"), metadata.Limits.MaxBlobBytes, defaultControlTimeout(metadata))
+	client, err := bridge.NewHTTPSpoolClient(filepath.Join(paths.Sockets, "http-spool"), adaptive.ArtifactEnvelopeLimit(metadata.Limits.MaxBlobBytes), defaultControlTimeout(metadata))
 	if err != nil {
 		return nil, err
 	}
@@ -497,14 +620,14 @@ func listenLoopback(port int) (net.Listener, error) {
 	return net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 }
 
-func spoolProxyServer(listener net.Listener, client *bridge.HTTPSpoolClient, channel string, allowed func(*http.Request) bool) *http.Server {
+func spoolProxyServer(listener net.Listener, client *bridge.HTTPSpoolClient, channel string, maxBodyBytes int64, allowed func(*http.Request) bool) *http.Server {
 	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if allowed != nil && !allowed(request) {
 			http.NotFound(writer, request)
 			return
 		}
-		body, err := io.ReadAll(io.LimitReader(request.Body, (32<<20)+1))
-		if err != nil || len(body) > 32<<20 {
+		body, err := io.ReadAll(io.LimitReader(request.Body, maxBodyBytes+1))
+		if err != nil || int64(len(body)) > maxBodyBytes {
 			http.Error(writer, "request body exceeds bridge limit", http.StatusRequestEntityTooLarge)
 			return
 		}
@@ -545,7 +668,10 @@ func unixProxyServer(listener net.Listener, socket string, allowed func(*http.Re
 	return &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 }
 
-func callUnix(ctx context.Context, socket, method, path string, body []byte) ([]byte, error) {
+func callUnix(ctx context.Context, socket, method, path string, body []byte, maxResponseBytes int64) ([]byte, error) {
+	if maxResponseBytes <= 0 {
+		return nil, errors.New("Unix control response limit must be positive")
+	}
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
 	}}
@@ -560,9 +686,12 @@ func callUnix(ctx context.Context, socket, method, path string, body []byte) ([]
 		return nil, err
 	}
 	defer response.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(response.Body, 32<<20))
+	data, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, err
+	}
+	if int64(len(data)) > maxResponseBytes {
+		return nil, errors.New("control API response exceeds configured limit")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, fmt.Errorf("control API returned %d: %s", response.StatusCode, strings.TrimSpace(string(data)))
@@ -586,10 +715,10 @@ func normalizeBridgeTransport(value string) (string, error) {
 
 func cooperativeRoute(request *http.Request) bool {
 	path := request.URL.Path
-	if request.Method == http.MethodGet && (path == "/v1/status" || path == "/v1/injections" || path == "/v1/snapshots" || path == "/v1/events" || strings.HasPrefix(path, "/v1/turns/") || strings.HasPrefix(path, "/v1/snapshots/") || strings.HasPrefix(path, "/v1/attacker/")) {
+	if request.Method == http.MethodGet && (path == "/v1/status" || path == "/v1/capabilities" || path == "/v1/artifacts" || path == "/v1/attempts" || path == "/v1/injections" || path == "/v1/snapshots" || path == "/v1/events" || strings.HasPrefix(path, "/v1/artifacts/") || strings.HasPrefix(path, "/v1/observations/") || strings.HasPrefix(path, "/v1/turns/") || strings.HasPrefix(path, "/v1/snapshots/") || strings.HasPrefix(path, "/v1/attacker/")) {
 		return true
 	}
-	if request.Method == http.MethodPost && (path == "/v1/turns" || path == "/v1/injections" || path == "/v1/snapshots" || path == "/v1/identity/caller-tokens") {
+	if request.Method == http.MethodPost && (path == "/v1/artifacts" || path == "/v1/attempts" || path == "/v1/turns" || path == "/v1/injections" || path == "/v1/snapshots" || path == "/v1/identity/caller-tokens") {
 		return true
 	}
 	return request.Method == http.MethodDelete && strings.HasPrefix(path, "/v1/injections/")

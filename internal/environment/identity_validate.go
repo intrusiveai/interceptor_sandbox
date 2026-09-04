@@ -49,7 +49,7 @@ func validateIdentity(blueprint *Blueprint, serviceIDs map[string]struct{}, host
 		}
 		add(validateListen(prefix+".listen", issuer.Listen, listens, issuer.ID))
 		add(validateHostnames(prefix, issuer.Hostnames, hostnames, issuer.ID))
-		add(validateIssuerURL(prefix+".issuer_url", issuer))
+		add(validateIssuerURL(prefix+".issuer_url", blueprint, issuer))
 		if issuer.AccessTokenTTLSeconds < 0 || issuer.AccessTokenTTLSeconds > 86400 {
 			add(fmt.Errorf("%s.access_token_ttl_seconds must be between 1 and 86400 when set", prefix))
 		}
@@ -234,10 +234,13 @@ func validateIdentity(blueprint *Blueprint, serviceIDs map[string]struct{}, host
 	return result, failures
 }
 
-func validateIssuerURL(name string, issuer IdentityIssuer) error {
+func validateIssuerURL(name string, blueprint *Blueprint, issuer IdentityIssuer) error {
 	parsed, err := url.Parse(issuer.IssuerURL)
-	if err != nil || parsed.Scheme != "http" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path != "" {
-		return fmt.Errorf("%s must be an absolute HTTP origin without a path, query, user info, or fragment", name)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path != "" {
+		return fmt.Errorf("%s must be an absolute HTTP or HTTPS origin without a path, query, user info, or fragment", name)
+	}
+	if parsed.Scheme == "https" && !blueprint.Network.TLS.Enabled {
+		return fmt.Errorf("%s uses HTTPS but network.tls is not enabled", name)
 	}
 	host := strings.ToLower(parsed.Hostname())
 	declaredHost := false
@@ -250,12 +253,25 @@ func validateIssuerURL(name string, issuer IdentityIssuer) error {
 	if !isLoopbackHost(host) && !declaredHost {
 		return fmt.Errorf("%s host must be loopback or one of the issuer hostnames", name)
 	}
+	if parsed.Scheme == "https" && !declaredHost {
+		return fmt.Errorf("%s HTTPS host must be one of the issuer hostnames", name)
+	}
 	_, listenPort, listenErr := net.SplitHostPort(issuer.Listen)
 	urlPort := parsed.Port()
 	if urlPort == "" {
-		urlPort = "80"
+		if parsed.Scheme == "https" {
+			urlPort = "443"
+		} else {
+			urlPort = "80"
+		}
 	}
-	if listenErr == nil && urlPort != listenPort {
+	frontDoorPort := ""
+	if parsed.Scheme == "https" && blueprint.Network.TLS.Enabled {
+		_, frontDoorPort, _ = net.SplitHostPort(blueprint.Network.TLS.Listen)
+	} else if parsed.Scheme == "http" && blueprint.Network.HTTP.Enabled {
+		_, frontDoorPort, _ = net.SplitHostPort(blueprint.Network.HTTP.Listen)
+	}
+	if listenErr == nil && urlPort != listenPort && urlPort != frontDoorPort {
 		return fmt.Errorf("%s port must match issuer listen port %s", name, listenPort)
 	}
 	return nil

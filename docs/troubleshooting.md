@@ -105,15 +105,18 @@ Verify:
 
 - `turn_timeout_ms` is positive;
 - the application calls `MODEL_BASE_URL`, not the provider directly;
-- it uses a supported Chat Completions, Responses, or Converse path;
-- the request's body `model` (OpenAI) or path `modelId` (Converse) exactly
-  matches one repeated `--allow-model` value;
+- it uses a supported OpenAI, Anthropic Messages, Gemini/Vertex, or Converse
+  path;
+- the request's model or deployment identifier exactly matches one repeated
+  `--allow-model` value;
 - the selected `--model-provider` is correct;
-- for OpenAI or LiteLLM, `--provider-base-url` includes the intended base path
-  but no credentials, query, or fragment;
-- for OpenAI, `OPENAI_API_KEY` or the selected `--model-api-key-env` is
-  non-empty; for an authenticated LiteLLM gateway, its selected key is
-  non-empty;
+- for an HTTP adapter, `--provider-base-url` includes the intended base path but
+  no credentials, query, or fragment;
+- in local development, the selected `--model-api-key-env` is non-empty when
+  authentication is required;
+- in production, `--model-credential-id` resolves through
+  `--credential-config`, or the selected adapter supports and uses workload
+  identity;
 - for Bedrock, an AWS region is available, the host credential chain is valid,
   and the identity has `bedrock:InvokeModel` permission; and
 - the provider is reachable from the host. HTTP providers must not redirect to
@@ -121,7 +124,9 @@ Verify:
 
 Check that the application's API matches the selected adapter. A Responses call
 cannot use `openai-chat`, and a Converse call cannot use `openai-responses`.
-All current routes reject streaming. For Bedrock, also verify that the
+All current routes reject streaming. Azure deployment, Vertex
+project/location, and pinned Anthropic API-version settings must also match the
+host configuration. For Bedrock, verify that the
 application SDK points to the loopback endpoint and uses declared synthetic
 credentials rather than trying to reach AWS directly. See [Model
 providers](model-providers.md) for each adapter's supported subset.
@@ -201,6 +206,33 @@ Add the missing deterministic fixture, route, or MCP tool behavior; review it;
 then reseal, rebuild, and start a new session. Do not add general network as a
 fallback.
 
+## Simulated hostname does not resolve
+
+If `network.dns.enabled` is true, inspect evaluation events for `dns_query`.
+Declared `A` queries should return `127.0.0.1`; undeclared names follow
+`unknown_policy` and produce a coverage gap. `REFUSED` with
+`query-limit-exceeded` means `max_queries` was exhausted. Interceptor does not
+forward to an upstream resolver and cannot make a client that hard-codes an
+external DNS server reachable under `--network none`.
+
+Some runtimes treat names below `.local` as multicast DNS. Prefer reserved test
+names below `.test` for new Blueprints. Existing application-specific names are
+safe only when the image's resolver actually sends them to ordinary DNS.
+
+## Simulated HTTPS certificate is rejected
+
+Reseal and rebuild after changing any declared hostname or TLS trust setting.
+Then run `interceptor app verify`; it checks the host-side keypair and its
+application-lock digests. HTTPS URLs must use a declared hostname and the
+`network.tls.listen` port rather than `127.0.0.1` or an internal plaintext
+service port.
+
+For `auto`, confirm the runtime honors its system PEM store or one of the
+injected trust variables. For `bundle`, configure the client to consume
+`INTERCEPTOR_CA_BUNDLE`. JVM, pinned, and other custom trust implementations
+should use `application-managed`; its probe runs as the application user and
+fails session startup when trust cannot be established.
+
 ## Snapshot returns `409 snapshot_failed`
 
 Likely causes are:
@@ -244,3 +276,20 @@ interceptor logs export <session-id> --output ./evidence.tar
 
 If verification fails, preserve the data root for investigation. Do not edit the
 line-oriented JSON history files or checkpoint JSON to force an export.
+
+## Cross-VM gateway returns `401 invalid_token`
+
+Confirm which endpoint is being called. Lease issuance, introspection, and
+revocation require the shared integration token. `POST /v1/cross-vm` requires
+the distinct opaque token returned when that lease was issued. A revoked or
+expired lease token is deliberately indistinguishable from an unknown token.
+
+In production, verify that `--auth-token-credential-id` exists in the selected
+`--credential-config`, that the instance workload identity can read it, and
+that the corresponding secret-free credential-resolution audit event was
+written. Environment tokens are rejected with `--production`. Do not put the
+integration token into the Operator guest or use it for typed run operations.
+
+Also confirm that the gateway's HTTP listener remains a private backend behind
+the expected TLS load balancer. A successful bearer check does not make direct
+public HTTP exposure safe.

@@ -345,7 +345,5 @@ previously exposed bearer token.
 - Service authorization uses one scope policy for the entire service.
 - Fixed cloud metadata IPs, Google STS, Azure token endpoints, AWS STS and
   AgentCore-specific APIs are not emulated.
-- SPIFFE Workload API, X.509 SVIDs, mTLS, DPoP, SAML, conditional access, MFA,
-  and interactive consent are not implemented.
 - There is no live identity or general service proxy. Real service credentials
   never enter the sandbox.

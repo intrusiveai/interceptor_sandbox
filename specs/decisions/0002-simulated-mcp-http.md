@@ -34,15 +34,18 @@ Stateful MCP tools implement the same managed-service interface and journal
 operations as `stateful_http`. Therefore:
 
 - mutations are durable before acknowledgement;
-- `environment_state` can target existing MCP-owned records;
+- `environment_state` can target existing MCP-owned records and may create a
+  missing record only for a Blueprint-opted collection backed by a sealed MCP
+  create tool;
 - `service_state_match` can evaluate those records;
 - MCP activity and gaps enter the protected evaluation event history; and
 - restore rebuilds MCP state from the sealed seed plus the journal.
 
 The existing `model_tool_result` surface remains responsible for transit
 simulation after an agent framework represents the MCP result as a model tool
-message. Direct interception between the MCP client and synthetic server is not
-added in this decision.
+message. The later adaptive extension adds the distinct `mcp_tool_result`
+surface between successful synthetic tool execution and MCP client
+consumption; this decision does not turn the service into a generic MCP proxy.
 
 ## Consequences
 
@@ -52,8 +55,12 @@ synthetic HTTP hostname. Hard-coded remote endpoints are unsupported.
 The service gives common tool workflows deterministic, snapshot-aware behavior
 without adding another process, database, or credential path. Protocol
 features such as SSE, sessions, server-initiated requests, resources, prompts,
-OAuth, TLS, and non-text content remain explicit future work rather than
+OAuth, and non-text content remain explicit future work rather than
 partially implemented behavior.
+
+The later closed-network decision permits this same handler to be reached
+through Interceptor's shared HTTPS front door. TLS termination does not expand
+the MCP protocol subset or turn the handler into a remote proxy.
 
 A project that requires capabilities outside this subset may bundle a reviewed
 local MCP server in its application image. Interceptor cannot claim managed

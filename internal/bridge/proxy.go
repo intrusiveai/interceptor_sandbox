@@ -40,9 +40,13 @@ func NewModelProxy(sessionID string, connector Connector, injections *injection.
 }
 
 func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	if request.URL.RawQuery != "" {
+		writeBridgeError(writer, http.StatusBadRequest, "unsupported_model_route", "model routes may not contain caller-selected query parameters")
+		return
+	}
 	codec, ok := modelCodec(request.Method, request.URL.Path)
 	if !ok {
-		writeBridgeError(writer, http.StatusNotImplemented, "unsupported_model_route", "supported model routes are Chat Completions, OpenAI Responses, and Bedrock Converse")
+		writeBridgeError(writer, http.StatusNotImplemented, "unsupported_model_route", "unsupported model route")
 		return
 	}
 	body, err := readLimit(request.Body, p.maxBytes)
@@ -57,6 +61,10 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 		writeBridgeError(writer, http.StatusBadRequest, "unsupported_streaming", err.Error())
 		return
 	}
+	if err := validateNativeShape(codec, body, request.Header); err != nil {
+		writeBridgeError(writer, http.StatusBadRequest, "unsupported_model_feature", err.Error())
+		return
+	}
 	if p.injections != nil {
 		switch codec {
 		case CodecOpenAIChat:
@@ -65,6 +73,10 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 			rewritten, results, err = p.injections.RewriteOpenAIResponses(body, turnID)
 		case CodecBedrockConverse:
 			rewritten, results, err = p.injections.RewriteBedrockConverse(body, turnID)
+		case CodecAnthropicMessages:
+			rewritten, results, err = p.injections.RewriteAnthropicMessages(body, turnID)
+		case CodecGoogleGenerateContent:
+			rewritten, results, err = p.injections.RewriteGoogleGenerateContent(body, turnID)
 		}
 		if err != nil {
 			writeBridgeError(writer, http.StatusBadRequest, "injection_failed", err.Error())
@@ -117,6 +129,11 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 	providerRequestRef := p.store(request.Context(), result.ProviderRequest)
 	providerResponseRef := p.store(request.Context(), result.ProviderResponse)
 	model, usage := modelSemantics(codec, request.URL.EscapedPath(), rewritten, result.Body)
+	finish, safety := modelOutcome(codec, result.Body)
+	attemptID, payloadDigest := "", ""
+	if p.injections != nil {
+		attemptID, payloadDigest = p.injections.Attribution(ids)
+	}
 	if p.onTokens != nil {
 		if total := totalTokens(usage); total > 0 {
 			p.onTokens(total)
@@ -128,12 +145,192 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 		"provider_response_ref": providerResponseRef, "final_proxy_request_digest": result.FinalRequestDigest,
 		"provider_request_digest": result.ProviderDigest, "provider_response_digest": result.ProviderResponseDigest,
 		"elapsed_ms": time.Since(started).Milliseconds(), "usage": usage, "injection_ids": ids,
+		"provider_metadata": result.ProviderMetadata, "finish_status": finish, "safety_status": safety,
+		"attempt_id": attemptID, "payload_digest": payloadDigest,
 	})
 	for name, value := range result.Headers {
 		writer.Header().Set(name, value)
 	}
 	writer.WriteHeader(result.Status)
 	_, _ = writer.Write(result.Body)
+}
+
+func validateNativeShape(codec string, body []byte, headers http.Header) error {
+	object, err := decodeJSONObject(body)
+	if err != nil {
+		return err
+	}
+	if value, ok := object["background"].(bool); ok && value {
+		return errors.New("background model operations are not supported")
+	}
+	switch codec {
+	case CodecAnthropicMessages:
+		if err := rejectUnsupportedKeys(object, []string{"model", "max_tokens", "messages", "system", "temperature", "top_p", "top_k", "stop_sequences", "tools", "tool_choice", "metadata", "stream"}, "Anthropic Messages parameter"); err != nil {
+			return err
+		}
+		if headers.Get("Anthropic-Beta") != "" {
+			return errors.New("undeclared Anthropic beta features are not supported")
+		}
+		if tools, ok := object["tools"].([]any); ok {
+			for _, raw := range tools {
+				tool, _ := raw.(map[string]any)
+				if tool["type"] != nil {
+					return errors.New("Anthropic server tools are not supported")
+				}
+			}
+		}
+		if err := validateContentBlocks(object["messages"], "content", map[string]bool{"text": true, "tool_use": true, "tool_result": true}); err != nil {
+			return err
+		}
+	case CodecGoogleGenerateContent:
+		if err := rejectUnsupportedKeys(object, []string{"contents", "systemInstruction", "generationConfig", "safetySettings", "tools", "toolConfig", "labels"}, "Gemini generateContent parameter"); err != nil {
+			return err
+		}
+		if raw, exists := object["generationConfig"]; exists {
+			config, ok := raw.(map[string]any)
+			if !ok {
+				return errors.New("Gemini generationConfig must be an object")
+			}
+			if err := rejectUnsupportedKeys(config, []string{"stopSequences", "responseMimeType", "responseSchema", "responseJsonSchema", "candidateCount", "maxOutputTokens", "temperature", "topP", "topK", "seed", "presencePenalty", "frequencyPenalty", "responseLogprobs", "logprobs", "thinkingConfig"}, "Gemini generationConfig parameter"); err != nil {
+				return err
+			}
+		}
+		if tools, ok := object["tools"].([]any); ok {
+			for _, raw := range tools {
+				tool, _ := raw.(map[string]any)
+				for key := range tool {
+					if key != "functionDeclarations" {
+						return errors.New("Gemini provider-hosted tools are not supported")
+					}
+				}
+			}
+		}
+		if err := validateGoogleParts(object["contents"]); err != nil {
+			return err
+		}
+		if instruction := object["systemInstruction"]; instruction != nil {
+			if err := validateGoogleParts([]any{instruction}); err != nil {
+				return err
+			}
+		}
+	case CodecOpenAIChat:
+		if err := rejectUnsupportedKeys(object, []string{"model", "messages", "tools", "tool_choice", "max_tokens", "max_completion_tokens", "temperature", "top_p", "stop", "response_format", "seed", "frequency_penalty", "presence_penalty", "n", "logprobs", "top_logprobs", "user", "stream", "stream_options", "parallel_tool_calls", "reasoning_effort", "service_tier"}, "Chat Completions parameter"); err != nil {
+			return err
+		}
+		if tools, ok := object["tools"].([]any); ok {
+			for _, raw := range tools {
+				tool, _ := raw.(map[string]any)
+				if tool["type"] != "function" {
+					return errors.New("provider-hosted tools are not supported")
+				}
+			}
+		}
+		if err := validateOpenAIContent(object["messages"]); err != nil {
+			return err
+		}
+	case CodecOpenAIResponses:
+		if err := rejectUnsupportedKeys(object, []string{"model", "input", "instructions", "tools", "tool_choice", "max_output_tokens", "temperature", "top_p", "text", "reasoning", "parallel_tool_calls", "store", "metadata", "include", "stream", "background", "service_tier"}, "Responses parameter"); err != nil {
+			return err
+		}
+		if stored, ok := object["store"].(bool); ok && stored {
+			return errors.New("provider-stored conversation state is not supported")
+		}
+		if tools, ok := object["tools"].([]any); ok {
+			for _, raw := range tools {
+				tool, _ := raw.(map[string]any)
+				if tool["type"] != "function" {
+					return errors.New("provider-hosted tools are not supported")
+				}
+			}
+		}
+		if input, ok := object["input"].([]any); ok {
+			if err := validateResponsesInput(input); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateResponsesInput(items []any) error {
+	for _, raw := range items {
+		item, _ := raw.(map[string]any)
+		kind, _ := item["type"].(string)
+		if strings.Contains(kind, "image") || strings.Contains(kind, "file") || strings.Contains(kind, "computer") {
+			return errors.New("multimodal, file, and computer-use inputs are not supported")
+		}
+		blocks, ok := item["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, rawBlock := range blocks {
+			block, _ := rawBlock.(map[string]any)
+			blockKind, _ := block["type"].(string)
+			if blockKind != "input_text" && blockKind != "output_text" && blockKind != "refusal" {
+				return errors.New("Responses multimodal and file content is not supported")
+			}
+		}
+	}
+	return nil
+}
+func validateContentBlocks(messages any, field string, allowed map[string]bool) error {
+	items, ok := messages.([]any)
+	if !ok {
+		return nil
+	}
+	for _, raw := range items {
+		message, _ := raw.(map[string]any)
+		blocks, ok := message[field].([]any)
+		if !ok {
+			continue
+		}
+		for _, rawBlock := range blocks {
+			block, _ := rawBlock.(map[string]any)
+			kind, _ := block["type"].(string)
+			if kind != "" && !allowed[kind] {
+				return errors.New("multimodal or provider-hosted content blocks are not supported")
+			}
+		}
+	}
+	return nil
+}
+func validateGoogleParts(contents any) error {
+	items, ok := contents.([]any)
+	if !ok {
+		return nil
+	}
+	for _, raw := range items {
+		content, _ := raw.(map[string]any)
+		parts, _ := content["parts"].([]any)
+		for _, rawPart := range parts {
+			part, _ := rawPart.(map[string]any)
+			for key := range part {
+				if key != "text" && key != "functionCall" && key != "functionResponse" {
+					return errors.New("multimodal, file, and executable Gemini parts are not supported")
+				}
+			}
+		}
+	}
+	return nil
+}
+func validateOpenAIContent(messages any) error {
+	items, ok := messages.([]any)
+	if !ok {
+		return nil
+	}
+	for _, raw := range items {
+		message, _ := raw.(map[string]any)
+		if blocks, ok := message["content"].([]any); ok {
+			for _, rawBlock := range blocks {
+				block, _ := rawBlock.(map[string]any)
+				kind, _ := block["type"].(string)
+				if kind != "text" && kind != "input_text" {
+					return errors.New("multimodal and file content is not supported")
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func containsString(values []string, target string) bool {
@@ -180,16 +377,73 @@ func (p *ModelProxy) record(kind, turnID, rawRef string, semantic any) {
 	if p.recorder == nil {
 		return
 	}
-	_, _ = p.recorder.Append(recording.Draft{Channel: recording.Evaluation, Layer: "inference_proxy", Kind: kind, Provenance: recording.Application, TurnID: turnID, RawRef: rawRef, Semantic: semantic})
+	draft := recording.Draft{Channel: recording.Evaluation, Layer: "inference_proxy", Kind: kind, Provenance: recording.Application, TurnID: turnID, RawRef: rawRef, Semantic: semantic}
+	if value, ok := semantic.(map[string]any); ok {
+		draft.AttemptID, _ = value["attempt_id"].(string)
+		draft.PayloadDigest, _ = value["payload_digest"].(string)
+	}
+	_, _ = p.recorder.Append(draft)
 }
 
 func modelSemantics(codec, path string, request, response []byte) (string, any) {
 	model, _ := modelIdentifier(codec, path, request)
-	var responseValue struct {
-		Usage any `json:"usage"`
+	var value map[string]any
+	_ = json.Unmarshal(response, &value)
+	usage := value["usage"]
+	if codec == CodecGoogleGenerateContent {
+		if raw, ok := value["usageMetadata"].(map[string]any); ok {
+			usage = map[string]any{"input_tokens": raw["promptTokenCount"], "output_tokens": raw["candidatesTokenCount"], "total_tokens": raw["totalTokenCount"]}
+		}
 	}
-	_ = json.Unmarshal(response, &responseValue)
-	return model, responseValue.Usage
+	if codec == CodecAnthropicMessages {
+		if raw, ok := usage.(map[string]any); ok {
+			raw["total_tokens"] = numberInt64(raw["input_tokens"]) + numberInt64(raw["output_tokens"])
+			usage = raw
+		}
+	}
+	return model, usage
+}
+
+func numberInt64(value any) int64 {
+	switch value := value.(type) {
+	case float64:
+		return int64(value)
+	case json.Number:
+		number, _ := value.Int64()
+		return number
+	default:
+		return 0
+	}
+}
+func modelOutcome(codec string, response []byte) (any, any) {
+	var value map[string]any
+	if json.Unmarshal(response, &value) != nil {
+		return nil, nil
+	}
+	switch codec {
+	case CodecAnthropicMessages:
+		return value["stop_reason"], nil
+	case CodecGoogleGenerateContent:
+		var finish, safety any
+		if candidates, ok := value["candidates"].([]any); ok && len(candidates) > 0 {
+			if candidate, ok := candidates[0].(map[string]any); ok {
+				finish = candidate["finishReason"]
+				safety = candidate["safetyRatings"]
+			}
+		}
+		return finish, safety
+	case CodecOpenAIChat:
+		if choices, ok := value["choices"].([]any); ok && len(choices) > 0 {
+			if choice, ok := choices[0].(map[string]any); ok {
+				return choice["finish_reason"], nil
+			}
+		}
+	case CodecOpenAIResponses:
+		return value["status"], value["incomplete_details"]
+	case CodecBedrockConverse:
+		return value["stopReason"], nil
+	}
+	return nil, nil
 }
 
 func modelCodec(method, requestPath string) (string, bool) {
@@ -203,13 +457,17 @@ func modelCodec(method, requestPath string) (string, bool) {
 		return CodecOpenAIResponses, true
 	case strings.Contains(requestPath, "/model/") && strings.HasSuffix(requestPath, "/converse"):
 		return CodecBedrockConverse, true
+	case strings.HasSuffix(requestPath, "/v1/messages") || requestPath == "/v1/messages":
+		return CodecAnthropicMessages, true
+	case strings.Contains(requestPath, "/models/") && strings.HasSuffix(requestPath, ":generateContent"):
+		return CodecGoogleGenerateContent, true
 	default:
 		return "", false
 	}
 }
 
 func validateNonStreaming(codec string, body []byte) error {
-	if codec == CodecBedrockConverse {
+	if codec == CodecBedrockConverse || codec == CodecGoogleGenerateContent {
 		return nil
 	}
 	var request struct {

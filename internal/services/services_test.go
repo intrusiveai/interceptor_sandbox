@@ -136,3 +136,28 @@ func TestStatefulHandlerJournalsMutations(t *testing.T) {
 		t.Fatalf("unexpected state: %#v (%v)", created, err)
 	}
 }
+
+func TestStatefulHandlerValidatesInjectedCreationAgainstSealedRoute(t *testing.T) {
+	directory := t.TempDir()
+	seed := filepath.Join(directory, "seed.json")
+	routes := filepath.Join(directory, "routes.yaml")
+	if err := os.WriteFile(seed, []byte(`{"tickets":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(routes, []byte("routes:\n  - id: create\n    method: POST\n    path: /tickets\n    action: create\n    collection: tickets\n    key_field: id\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := LoadStateful(seed, routes, "tickets", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := statejournal.Operation{Kind: "service_put", Service: "tickets", Collection: "tickets", Key: "t-2", Value: json.RawMessage(`{"id":"t-2","body":"injected"}`)}
+	if !handler.SupportsCreate("tickets") || handler.ValidateCreate(valid) != nil {
+		t.Fatal("sealed create contract rejected a valid injected resource")
+	}
+	invalid := valid
+	invalid.Key = "different"
+	if err := handler.ValidateCreate(invalid); err == nil {
+		t.Fatal("injected resource with mismatched key was accepted")
+	}
+}

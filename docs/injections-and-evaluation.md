@@ -16,6 +16,8 @@ success condition.
 | Surface | Required mode | Effect |
 | --- | --- | --- |
 | `model_tool_result` | `simulation` | Temporarily changes a matching tool result immediately before it is sent to the model. Stored environment data is unchanged. |
+| `service_response` | `simulation` | Rewrites a successful managed HTTP or Blueprint-enabled dynamic attacker response after real handling and before application consumption. |
+| `mcp_tool_result` | `simulation` | Rewrites a successful native MCP tool result after execution and before application consumption. |
 | `environment_state` | `fidelity` | Changes a real record or saved file in the synthetic environment. The application later reads that change through its normal code path. |
 
 Simulation is useful when a tester wants to place content precisely without
@@ -40,7 +42,9 @@ result.
 ```
 
 `id` is required and may not contain path separators. `payload` can be any valid
-JSON value. `enabled: false` stores a definition without arming it.
+JSON value. `enabled: false` stores a definition without arming it. Adaptive
+callers also set `attempt_id` and `payload_digest`; both must match a registered
+immutable AttemptContext before the injection can be armed.
 
 ### Model tool-result selector
 
@@ -72,12 +76,37 @@ Matching follows the application's native model protocol:
 - Chat Completions links an assistant `tool_call` to a `tool` message;
 - Responses links `function_call` and `function_call_output` Items by
   `call_id`; and
-- Converse links `toolUse` and `toolResult` blocks by `toolUseId`.
+- Converse links `toolUse` and `toolResult` blocks by `toolUseId`;
+- Anthropic Messages links `tool_use` and `tool_result` blocks by
+  `tool_use_id`; and
+- Gemini links `functionCall` and `functionResponse` parts by name and ordinal.
 
 The call and result must both be present in the submitted request so Interceptor
-can evaluate the tool name, arguments, and ordinal. A Responses request that
-provides only `previous_response_id` leaves that earlier call inside the
-provider, so a tool-name selector cannot match it locally.
+can evaluate the tool name, arguments, and ordinal. Provider-stored predecessor
+state is rejected because it cannot be snapshotted or matched locally.
+
+### Managed response and native MCP selectors
+
+`service_response` requires `service` and `call_ordinal`. It can also select an
+exact `method` and `path`, exact single-valued query/header fields through
+`query_equal` and `headers_equal`, and bounded request content through
+`request_body_pointer`, `request_body_equal`, and `request_body_contain`.
+Authorization, cookie, and proxy-authorization headers cannot be selectors.
+Response ordinals are counted per armed definition after its service and
+request predicates match, and that progress is journaled across snapshots.
+`mcp_tool_result` requires the stable MCP server ID in
+`service`, `tool_name`, and `call_ordinal`. Scalar argument predicates use the
+same pointer, equality, and containment fields as model tool-result matching.
+
+Interceptor first authorizes and executes the real fixture, stateful, or MCP
+handler. A dynamic `http_sink` first captures the real request and then exposes
+its sealed default response as a candidate; a static sink rejects injection at
+arm time. Only a successful result is a candidate. Mutation cannot change the
+authorization result, destination, status, identity, or security-sensitive
+headers. Evidence records original and rewritten digests plus service/tool,
+request method/path/digest, injection, attempt, and payload identity.
+`mcp_tool_result` and
+`model_tool_result` remain distinct evidence surfaces.
 
 ### Environment-state selector
 
@@ -95,10 +124,25 @@ Existing regular file:
 {"path":"/state/app/context.json"}
 ```
 
+Named file namespace, without disclosing an absolute path to an external
+planner:
+
+```json
+{"file_namespace":"inbox","relative_path":"new-message.txt"}
+```
+
 The service must expose managed state through `stateful_http`, a stateful
-`mcp_http` tool, or a synthetic identity issuer; the collection/key must already
-exist. A file must already exist and fall under a declared mutable root. The
-MVP does not use fidelity injection to create a new resource or file.
+`mcp_http` tool, or a synthetic identity issuer. Existing resources can be
+changed. A missing resource can be created only when its Blueprint service
+explicitly lists the collection under `injections.create_collections`, the
+collection has a sealed create route/tool, the payload satisfies that create
+contract, and the collection remains below `max_resources`.
+
+An absolute file path must already exist under a mutable root. A named file
+namespace can address existing files and can create a missing file only when
+`allow_create` is true and its `max_files` and `max_file_bytes` ceilings permit
+it. New resources and files require root `replace`; Interceptor never creates a
+resource by applying a partial patch to nonexistent state.
 
 For MCP, fidelity injection changes the record before the application reads it
 through `tools/call`. Transit `model_tool_result` injection remains available
@@ -137,6 +181,11 @@ operations are:
 
 Type mismatches or missing pointers fail the injection rather than coercing
 content silently.
+Response-side `service_response` and `mcp_tool_result` surfaces intentionally
+exclude `insert_array`; they support only replace, text prepend/append, and
+allowlisted object merge. They also exclude `next_turn` and turn selectors:
+managed service requests do not carry a trusted turn binding, so accepting a
+caller-supplied one would create false causality. Use `once` or `standing`.
 
 ## Scope
 
@@ -153,6 +202,22 @@ Interceptor includes injection creation, one-time use, deletion, and persistent
 environment changes in its saved state history. A restored snapshot therefore
 contains exactly the injections that were active or already consumed at that
 moment.
+
+## Local commands and indirect prompt injection
+
+Interceptor does not interpose on arbitrary descendant processes, `execve`, or
+private stdout pipes. It covers local command output at two honest boundaries:
+
+- a command such as `curl` receives the actual injected bytes when it calls a
+  declared managed HTTP service or dynamic attacker service; and
+- when an agent runtime represents shell output as a client tool result, the
+  existing `model_tool_result` surface can select the shell tool name and
+  command arguments and rewrite the result before it reaches the model.
+
+The no-egress container cannot use `curl` to reach the public Internet.
+Undeclared localhost processes and Unix sockets are not generic injection
+points. Interceptor therefore does not advertise a misleading
+`local_command_result` surface.
 
 ## Examples
 
@@ -215,6 +280,28 @@ outcome. Oracles are declared in the Sealed Environment, not supplied by the
 application. They can check recorded requests and responses, simulated service
 records, or saved files. Once an oracle succeeds during a session, later
 evaluation remembers that result, including across a snapshot restore.
+
+The `event_match` oracle matches facts already present in normalized events.
+Its `match` object supports exact `channel`, `layer`, `kind`, `provenance`,
+`attempt_id`, and `injection_id`, plus at most 16 top-level scalar predicates:
+
+```yaml
+- id: attempted-sensitive-read
+  kind: event_match
+  match:
+    channel: evaluation
+    kind: service_request
+    predicates:
+      - field: operation
+        operator: one_of
+        value: [get, list]
+```
+
+Operators are `equals`, `contains`, `exists`, and `one_of`. Scripts, regular
+expressions, JSONPath, callbacks, nested traversal, and custom code are not
+supported. Results include count, first event sequence/digest, protected
+visibility, and causality only when explicit attempt/injection provenance is
+present.
 
 `interceptor evaluate <session-id>` returns:
 

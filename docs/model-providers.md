@@ -19,6 +19,10 @@ The MVP uses like-for-like routing. It does not translate between model APIs.
 | --- | --- | --- | --- |
 | OpenAI Chat Completions | `POST /v1/chat/completions` | `openai-chat` | fixed `/v1/chat/completions` endpoint |
 | OpenAI Responses | `POST /v1/responses` | `openai-responses` | fixed `/v1/responses` endpoint |
+| Anthropic Messages | `POST /v1/messages` | `anthropic-messages` | fixed `/v1/messages` endpoint with pinned `anthropic-version` |
+| Gemini generateContent | `POST /v1beta/models/{model}:generateContent` | `gemini-api` | constructed fixed-origin Developer API route |
+| Gemini generateContent | `POST .../models/{model}:generateContent` | `vertex-gemini` | fixed project/location/publisher route with ADC |
+| OpenAI Chat or Responses | matching OpenAI route | `azure-openai` | fixed Azure resource `/openai/v1` route |
 | Amazon Bedrock Converse | `POST /model/{modelId}/converse` | `bedrock-converse` | AWS SDK for Go v2 `Converse` call |
 | OpenAI Chat Completions | `POST /v1/chat/completions` | `litellm` | LiteLLM `/v1/chat/completions` endpoint |
 | OpenAI Responses | `POST /v1/responses` | `litellm` | LiteLLM `/v1/responses` endpoint |
@@ -35,6 +39,12 @@ are rejected.
 Streaming is not supported because the private host bridge exchanges complete,
 size-bounded request and response frames. Omit `stream` or set it to `false`.
 `ConverseStream` is not accepted.
+
+The initial native subset supports text, system instructions, bounded
+generation parameters, structured text/JSON output, and client-side function
+declarations, calls, and results. Unknown top-level native parameters and
+streaming, multimodal/file input, background work, provider-stored conversation
+state, and provider-hosted tools fail before provider contact.
 
 ## OpenAI Chat Completions
 
@@ -83,13 +93,12 @@ interceptor run \
   --allow-model gpt-5.6
 ```
 
-Interceptor passes the Responses JSON through unchanged. Native Items,
-Responses-only fields, hosted-tool definitions, and response objects therefore
-do not need to fit into a Chat Completions representation. Tool-result
+Interceptor passes the supported Responses JSON through unchanged. Native
+Items and response objects do not need to fit into a Chat Completions
+representation. Provider-hosted tools, background work, and stored
+conversation dependencies are rejected. Tool-result
 injections understand `function_call` and `function_call_output` Items linked
-by `call_id`. The matching `function_call` must be present in the request input;
-when only `previous_response_id` is supplied, Interceptor cannot recover the
-tool name and arguments from provider-held state for selector matching.
+by `call_id`. The matching `function_call` must be present in the request input.
 
 The current bridge supports only `POST /responses`. Follow-up resource methods
 such as retrieve, delete, cancel, WebSocket mode, background polling, and
@@ -193,18 +202,79 @@ interceptor run \
 Use Chat Completions or Responses in the application and point its OpenAI base
 URL to `http://127.0.0.1:18080/v1`. Interceptor passes the selected OpenAI API
 shape to the matching LiteLLM route. LiteLLM owns downstream translation,
-routing, fallbacks, and provider credentials. For a trusted local LiteLLM
-instance with authentication disabled, omit `--model-api-key-env`.
+routing, fallbacks, and provider credentials. For a trusted LiteLLM instance
+with authentication disabled, use `--provider-auth none` and omit credential
+options. This explicit no-auth mode is also available under `--production`.
 
 Interceptor does not expose a native LiteLLM-specific application protocol or
 Bedrock endpoint through this adapter. Use the OpenAI-compatible API that the
 gateway publishes.
 
+## Anthropic Messages
+
+Point the Anthropic client at the local model proxy and use its normal
+`POST /v1/messages` method. On the host:
+
+```sh
+interceptor run --environment ./environment \
+  --model-provider anthropic-messages \
+  --provider-base-url https://api.anthropic.com \
+  --provider-api-version 2023-06-01 \
+  --model-credential-id target-anthropic-key \
+  --credential-config /etc/interceptor/credentials.yaml \
+  --allow-model claude-approved
+```
+
+API-key mode uses host `x-api-key`; `--provider-auth workload-token` uses a
+host bearer token. Application-supplied authorization and beta headers are not
+forwarded. Tool-result injection links native `tool_use` and `tool_result`
+blocks.
+
+## Gemini Developer API and Vertex Gemini
+
+Gemini Developer API uses a host `x-goog-api-key` and constructs
+`models/{model}:generateContent` from the exact allowlist:
+
+```sh
+interceptor run --environment ./environment \
+  --model-provider gemini-api \
+  --provider-base-url https://generativelanguage.googleapis.com/v1beta \
+  --model-credential-id target-gemini-key \
+  --credential-config /etc/interceptor/credentials.yaml \
+  --allow-model gemini-approved
+```
+
+Vertex uses `--provider-auth workload-identity` by default. Configure the
+fixed base URL through project, location, and API version, ending before
+`publishers/google/models`; Interceptor adds the publisher/model method and
+uses Google application-default workload credentials on the host.
+
+Native function injection links `functionCall` and `functionResponse` parts by
+function name and ordinal. Grounding, code execution, cached content, files,
+and multimodal parts are rejected.
+
+## Azure OpenAI
+
+Configure the fixed Azure resource base ending in `/openai/v1` and allow exact
+deployment names through `--allow-model`. Stored API-key mode uses the host
+`api-key` header. `--provider-auth workload-identity` instead uses Azure
+workload identity or managed identity and acquires a bearer token on the host.
+The application continues using native Chat Completions or Responses shapes;
+no Azure/OpenAI-to-other-provider translation occurs.
+
+## Credential source
+
+For production, combine `--production`, `--model-credential-id`, and
+`--credential-config`, or select a supported workload-identity mode. Named
+environment variables remain a development-only compatibility source. See
+[Host credential stores](credential-stores.md).
+
 ## Evidence, injections, and snapshots
 
 Each exchange records the application codec, selected host adapter, model ID,
 final injected request, provider request, native provider response, status,
-usage, and cryptographic fingerprints. With like-for-like routing, provider and
+normalized usage, finish/safety status, pinned non-secret API metadata, and
+cryptographic fingerprints. With like-for-like routing, provider and
 application bodies normally match. Bedrock evidence is a canonical JSON view
 of SDK input/output rather than the signed AWS wire request.
 

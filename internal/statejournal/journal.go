@@ -221,6 +221,11 @@ func ValidateOperation(operation Operation) error {
 			return errors.New("injection_put requires id and JSON value")
 		}
 		return rejectFields(operation, "kind", "id", "value")
+	case "artifact_put", "attempt_put":
+		if operation.ID == "" || len(operation.Value) == 0 || !json.Valid(operation.Value) {
+			return fmt.Errorf("%s requires id and JSON value", operation.Kind)
+		}
+		return rejectFields(operation, "kind", "id", "value")
 	case "clock_set", "oracle_state_set", "budget_set", "idempotency_commit", "restored_from", "environment_materialized":
 		if len(operation.Value) == 0 || !json.Valid(operation.Value) {
 			return fmt.Errorf("%s requires a JSON value", operation.Kind)

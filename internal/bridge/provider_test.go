@@ -153,3 +153,47 @@ func TestProvidersAdvertiseOnlyNativeApplicationCodecs(t *testing.T) {
 		t.Fatal("LiteLLM should accept both OpenAI-compatible routes")
 	}
 }
+
+func TestExtendedHTTPProvidersUseNativeRoutesAndHostCredentials(t *testing.T) {
+	tests := []struct {
+		name, wantPath, wantHeader, wantValue, codec, model string
+		newProvider                                         func(HTTPProviderConfig) (ModelProvider, error)
+	}{
+		{"anthropic", "/v1/messages", "X-Api-Key", "secret", CodecAnthropicMessages, "claude-test", NewAnthropicMessagesProvider},
+		{"gemini", "/v1beta/models/gemini-test:generateContent", "X-Goog-Api-Key", "secret", CodecGoogleGenerateContent, "gemini-test", NewGeminiAPIProvider},
+		{"vertex", "/v1/projects/p/locations/us-central1/publishers/google/models/gemini-test:generateContent", "Authorization", "Bearer secret", CodecGoogleGenerateContent, "gemini-test", NewVertexGeminiProvider},
+		{"azure", "/openai/v1/chat/completions", "Api-Key", "secret", CodecOpenAIChat, "deployment-test", NewAzureOpenAIProvider},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var path, header string
+			client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				path, header = request.URL.Path, request.Header.Get(test.wantHeader)
+				if test.name == "anthropic" && request.Header.Get("Anthropic-Version") != "2023-06-01" {
+					t.Fatalf("Anthropic version was not pinned: %q", request.Header.Get("Anthropic-Version"))
+				}
+				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"ok":true}`)), Request: request}, nil
+			})}
+			base := map[string]string{
+				"anthropic": "https://api.anthropic.example", "gemini": "https://generativelanguage.example/v1beta",
+				"vertex": "https://us-central1-aiplatform.example/v1/projects/p/locations/us-central1",
+				"azure":  "https://resource.openai.azure.example/openai/v1",
+			}[test.name]
+			provider, err := test.newProvider(HTTPProviderConfig{BaseURL: base, APIKey: "secret", Client: client})
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := []byte(`{"model":"` + test.model + `"}`)
+			if test.codec == CodecGoogleGenerateContent {
+				body = []byte(`{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`)
+			}
+			_, err = provider.Complete(context.Background(), ProviderRequest{Codec: test.codec, Model: test.model, Body: body, MaxBodyBytes: 4096})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if path != test.wantPath || header != test.wantValue {
+				t.Fatalf("unexpected request path=%q header=%q", path, header)
+			}
+		})
+	}
+}

@@ -13,22 +13,30 @@ The implementation currently includes:
 - immutable wrapper-image construction from a digest-pinned application image;
 - Docker containment with no network, a read-only root, dropped capabilities,
   bounded resources, and Docker Desktop-safe host relays;
-- fixture, stateful JSON, simulated MCP, and attacker-sink HTTP services that
-  fail closed;
+- optional authoritative loopback DNS plus exact-host HTTP and TLS 1.2+
+  front doors, with generated sandbox CA trust and no upstream forwarding;
+- fixture, stateful JSON, simulated MCP, static exfiltration sinks, and bounded
+  dynamic attacker/C2 HTTP services that fail closed;
 - synthetic agent identities, delegated-user token exchange, protected local
   services, and injectable/restorable authorization state;
 - adaptable HTTP, CLI command, stdin/stdout, REPL, Python, Node, and custom
   application invocation surfaces;
-- a protocol-aware inference seam for native Chat Completions, OpenAI
-  Responses, Amazon Bedrock Converse, and LiteLLM routes, with provider
-  credentials kept outside the container;
-- transit tool-result and persistent Environment Instance injections;
+- a protocol-aware inference seam for native OpenAI, Azure OpenAI, Anthropic
+  Messages, Gemini/Vertex, Amazon Bedrock Converse, and LiteLLM routes, with
+  provider credentials kept outside the container;
+- transit model tool-result, managed HTTP response, native MCP result, and
+  persistent Environment Instance injections;
 - hash-chained attack, control, and evaluation events plus a write-ahead state
   journal;
 - logical snapshots made of filesystem deltas and blobs, and restore into a
-  fresh session rather than a cloned filesystem; and
-- deterministic oracle results, coverage reporting, integrity verification,
-  and portable evidence exports.
+  fresh session rather than a cloned filesystem;
+- deterministic and typed event oracle results, coverage reporting, integrity
+  verification, and portable attempt-indexed evidence exports;
+- producer-neutral payload artifacts, adaptive attempt lineage, bounded
+  feedback views, and deterministic capability discovery;
+- an optional per-session Cross-VM gateway with secret-store-backed integration
+  authentication and short-lived opaque execution leases, plus host credential
+  resolution from AWS, Azure, Google Cloud, or HashiCorp Vault.
 
 ## Build and verify
 
@@ -67,8 +75,10 @@ interceptor run \
 the loopback bridges. Its printed application and cooperative-control URLs bind
 only to `127.0.0.1`. These local endpoints intentionally have no authentication;
 other processes running as the same OS user are inside the MVP trust boundary.
-Provider credentials are read from the host environment and are never passed as
-container arguments, environment variables, metadata, or recordings.
+Environment-based provider credentials are a local-development compatibility
+source. Production mode resolves stable credential IDs from a configured host
+secret store or uses provider workload identity; credentials are never passed
+to the container, metadata, or recordings.
 
 Administrative commands use the session's protected bridge transport:
 
@@ -114,8 +124,10 @@ The user documentation starts at [`docs/`](docs/README.md), including the
 [getting-started guide](docs/getting-started.md), [Environment Blueprint
 reference](docs/environment-blueprint.md), [local API](docs/api-reference.md),
 [CLI reference](docs/cli-reference.md), [model providers](docs/model-providers.md),
-the guide to [synthetic identity and delegated access](docs/identity.md), and a detailed guide to [logical
-snapshots and restore](docs/snapshots-and-restore.md).
+the [adaptive simulation interface](docs/adaptive-simulation.md), the guide to
+[Cross-VM gateway authentication](docs/cross-vm-gateway.md), the guide to
+[synthetic identity and delegated access](docs/identity.md), and a detailed
+guide to [logical snapshots and restore](docs/snapshots-and-restore.md).
 
 ## Storage
 
@@ -126,5 +138,8 @@ kept below that root. Deleting a stopped session retains shared blobs.
 ## Specifications
 
 - [`specs/mvp.md`](specs/mvp.md) is the authoritative MVP specification.
+- [`specs/external-adaptive-simulation.md`](specs/external-adaptive-simulation.md)
+  defines the implemented producer-neutral adaptive-harness, credential, model
+  adapter, and Cross-VM extensions to the MVP.
 - [`specs/decisions/0001-local-runtime-redesign.md`](specs/decisions/0001-local-runtime-redesign.md)
   records the move from the earlier distributed design.

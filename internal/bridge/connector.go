@@ -44,6 +44,7 @@ type ModelResult struct {
 	ProviderDigest         string            `json:"provider_request_digest,omitempty"`
 	ProviderResponse       []byte            `json:"provider_response,omitempty"`
 	ProviderResponseDigest string            `json:"provider_response_digest,omitempty"`
+	ProviderMetadata       map[string]string `json:"provider_metadata,omitempty"`
 }
 
 type Connector interface {
@@ -164,12 +165,13 @@ func (c *HostConnector) Forward(ctx context.Context, frame ModelFrame) (ModelRes
 		ProviderDigest:         digest.Bytes(providerRequest),
 		ProviderResponse:       append([]byte(nil), providerResponse...),
 		ProviderResponseDigest: digest.Bytes(providerResponse),
+		ProviderMetadata:       response.Metadata,
 	}, nil
 }
 
 func modelIdentifier(codec, requestPath string, body []byte) (string, error) {
 	switch codec {
-	case CodecOpenAIChat, CodecOpenAIResponses:
+	case CodecOpenAIChat, CodecOpenAIResponses, CodecAnthropicMessages:
 		var envelope struct {
 			Model string `json:"model"`
 		}
@@ -177,6 +179,18 @@ func modelIdentifier(codec, requestPath string, body []byte) (string, error) {
 			return "", errors.New("model request must contain a model identifier")
 		}
 		return envelope.Model, nil
+	case CodecGoogleGenerateContent:
+		const marker, suffix = "/models/", ":generateContent"
+		start := strings.LastIndex(requestPath, marker)
+		if start < 0 || !strings.HasSuffix(requestPath, suffix) {
+			return "", errors.New("Google generateContent path must contain /models/{model}:generateContent")
+		}
+		encoded := requestPath[start+len(marker) : len(requestPath)-len(suffix)]
+		model, err := url.PathUnescape(encoded)
+		if err != nil || model == "" || strings.Contains(model, "/") {
+			return "", errors.New("Google generateContent path contains an invalid model identifier")
+		}
+		return model, nil
 	case CodecBedrockConverse:
 		const prefix, suffix = "/model/", "/converse"
 		start := strings.Index(requestPath, prefix)

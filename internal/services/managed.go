@@ -22,3 +22,11 @@ type ManagedHandler interface {
 type ValidatingManagedHandler interface {
 	ValidateApply(statejournal.Operation) error
 }
+
+// CreatingManagedHandler validates a new resource against the same sealed
+// create contract exposed by the simulated service. Interceptor never invents
+// a looser injection-only resource schema.
+type CreatingManagedHandler interface {
+	SupportsCreate(collection string) bool
+	ValidateCreate(statejournal.Operation) error
+}

@@ -30,10 +30,15 @@ environment at that moment:
 - records created, changed, or deleted in simulated stateful HTTP or MCP services;
 - active synthetic identity grants, delegated-user permissions, and issuer
   failure settings;
-- active injections and whether a one-time injection was already used;
+- active injections, whether a one-time injection was already used, and
+  response-selector ordinal progress;
+- bounded resources and files created through fidelity injection;
+- verified payload descriptors and immutable attempts registered before the
+  checkpoint;
 - files created, changed, linked, or deleted in folders declared as saved
   application state (`mutable_roots`);
 - consumed usage limits, such as turns and model tokens;
+- attempted snapshot count and cumulative canonical snapshot bytes;
 - oracle results that had already fired;
 - the configured virtual time; and
 - fingerprints and version information needed to prove which application,
@@ -85,6 +90,7 @@ A checkpoint is a small JSON receipt containing:
   "journal_seq": 12,
   "journal_hash": "sha256:...",
   "file_manifest_digest": "sha256:...",
+  "canonical_size_bytes": 4096,
   "event_seq": 35,
   "created_at": "2026-08-25T12:00:00Z",
   "interceptor_version": "...",
@@ -131,6 +137,8 @@ Under the hood, the coordinator:
 7. briefly pauses the application for one final check;
 8. determines which files changed since the last snapshot and saves their
    contents;
+   when a Cross-VM grant supplies a remaining byte allowance, Interceptor
+   rejects an oversized candidate before committing it;
 9. records the file changes and other restorable state in the state journal;
 10. saves the complete list and fingerprints of current files;
 11. records current usage limits, oracle results, and virtual time;
@@ -161,8 +169,8 @@ interceptor restore <source-session-id> \
 The host provider options are required again because credentials and provider
 configuration are deliberately absent from snapshots.
 
-A restore may select `openai-chat`, `openai-responses`, `bedrock-converse`, or
-`litellm`, but changing provider or model can change agent behavior even when
+A restore may select any supported model adapter, but changing provider or
+model can change agent behavior even when
 the restored sandbox state is identical. Keep provider type, model ID,
 generation options, and gateway routing fixed when comparing branches. See
 [Model providers](model-providers.md).
@@ -177,13 +185,15 @@ Before starting anything, restore verifies:
 - every saved file body is present and unchanged.
 
 It then creates a new session, copies the original starting files, and reapplies
-saved changes in order. More precisely, it:
+saved changes in order. The new metadata records both `parent_session_id` and
+`parent_checkpoint`, so post-run evidence can reconstruct the restore lineage.
+More precisely, it:
 
 1. creates a new session ID and private writable folder;
 2. copies fresh starting files from the Sealed Environment;
 3. creates a new event log and state journal;
-4. reapplies successfully recorded service, identity, injection, budget, oracle,
-   and clock changes through the checkpoint;
+4. reapplies successfully recorded service, identity, artifact, attempt,
+   injection, budget, oracle, and clock changes through the checkpoint;
 5. applies file operations to the new mutable roots;
 6. checks that the rebuilt files have the fingerprint recorded by the snapshot;
 7. records `restored_from` ancestry; and

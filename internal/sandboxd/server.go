@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +14,9 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	pathpkg "path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +24,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/intrusive-ai/interceptor-sandbox/internal/adaptive"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/appimage"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/blobstore"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/bridge"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/buildinfo"
@@ -32,6 +37,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/recording"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/services"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/session"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/simnet"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/snapshot"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/statejournal"
 )
@@ -49,6 +55,8 @@ type Server struct {
 	recorder        *recording.Writer
 	journal         *statejournal.Writer
 	blobs           *blobstore.Store
+	artifacts       *adaptive.ArtifactRegistry
+	attempts        *adaptive.AttemptRegistry
 	injections      *injection.Manager
 	identities      map[string]*identity.Authority
 	identityEnv     map[string]string
@@ -56,6 +64,8 @@ type Server struct {
 	identityStop    chan struct{}
 	services        map[string]services.ManagedHandler
 	sinks           map[string]*services.SinkHandler
+	hostRoutes      map[string]http.Handler
+	dnsServer       *simnet.DNSServer
 	servers         []*http.Server
 	listeners       []net.Listener
 	adapter         applicationAdapter
@@ -97,20 +107,26 @@ type TurnRequest struct {
 	Headers         map[string]string `json:"headers,omitempty"`
 	Body            []byte            `json:"body,omitempty"`
 	CallerPrincipal string            `json:"caller_principal,omitempty"`
+	AttemptID       string            `json:"attempt_id,omitempty"`
+	PayloadDigest   string            `json:"payload_digest,omitempty"`
+	ArtifactDigest  string            `json:"artifact_digest,omitempty"`
 }
 
 type Turn struct {
-	ID        string            `json:"id"`
-	Operation string            `json:"operation,omitempty"`
-	Status    string            `json:"status"`
-	Code      int               `json:"code,omitempty"`
-	Headers   map[string]string `json:"headers,omitempty"`
-	Body      []byte            `json:"body,omitempty"`
-	MediaType string            `json:"media_type,omitempty"`
-	ExitCode  *int              `json:"exit_code,omitempty"`
-	Error     string            `json:"error,omitempty"`
-	Started   time.Time         `json:"started_at"`
-	Finished  time.Time         `json:"finished_at,omitempty"`
+	ID            string            `json:"id"`
+	Operation     string            `json:"operation,omitempty"`
+	Status        string            `json:"status"`
+	Code          int               `json:"code,omitempty"`
+	Headers       map[string]string `json:"headers,omitempty"`
+	Body          []byte            `json:"body,omitempty"`
+	MediaType     string            `json:"media_type,omitempty"`
+	ExitCode      *int              `json:"exit_code,omitempty"`
+	Error         string            `json:"error,omitempty"`
+	AttemptID     string            `json:"attempt_id,omitempty"`
+	PayloadDigest string            `json:"payload_digest,omitempty"`
+	OutputDigest  string            `json:"output_digest,omitempty"`
+	Started       time.Time         `json:"started_at"`
+	Finished      time.Time         `json:"finished_at,omitempty"`
 }
 
 func Run(ctx context.Context) error {
@@ -171,6 +187,7 @@ func New() (*Server, error) {
 	paths := session.Paths{
 		Root: containerSession, Metadata: filepath.Join(containerSession, "session.json"),
 		Events: filepath.Join(containerSession, "events.jsonl"), Journal: filepath.Join(containerSession, "state.jsonl"),
+		Evaluation:   filepath.Join(containerSession, "final-evaluation.json"),
 		FileManifest: filepath.Join(containerSession, "file-manifest.json"), Checkpoints: filepath.Join(containerSession, "checkpoints"),
 		Generations: filepath.Join(containerSession, "generations"), Logs: filepath.Join(containerSession, "logs"), Sockets: filepath.Join(containerSession, "sockets"),
 	}
@@ -189,13 +206,45 @@ func New() (*Server, error) {
 		recorder.Close()
 		return nil, err
 	}
+	transactions, err := statejournal.VerifyFile(paths.Journal)
+	if err != nil {
+		journal.Close()
+		recorder.Close()
+		return nil, err
+	}
+	if err := adaptive.RestoreRegistries(paths.Root, transactions); err != nil {
+		journal.Close()
+		recorder.Close()
+		return nil, err
+	}
+	artifacts, err := adaptive.OpenArtifactRegistry(filepath.Join(paths.Root, "artifacts.json"), blobs, report.Blueprint.Limits.MaxBlobBytes)
+	if err != nil {
+		journal.Close()
+		recorder.Close()
+		return nil, err
+	}
+	if err := artifacts.SetMaximumItems(report.Blueprint.Adaptive.MaxArtifacts); err != nil {
+		journal.Close()
+		recorder.Close()
+		return nil, err
+	}
+	feedback := metadata.FeedbackProfile
+	if feedback == "" {
+		feedback = "black-box"
+	}
+	attempts, err := adaptive.OpenAttemptRegistry(filepath.Join(paths.Root, "attempts.json"), feedback, report.Blueprint.Adaptive.MaxAttempts, artifacts)
+	if err != nil {
+		journal.Close()
+		recorder.Close()
+		return nil, err
+	}
 	appUID := uint32(envInt("INTERCEPTOR_APP_UID", 20000))
 	appGID := uint32(envInt("INTERCEPTOR_APP_GID", 20000))
 	return &Server{
-		blueprint: report.Blueprint, metadata: metadata, paths: paths, recorder: recorder, journal: journal, blobs: blobs,
+		blueprint: report.Blueprint, metadata: metadata, paths: paths, recorder: recorder, journal: journal, blobs: blobs, artifacts: artifacts, attempts: attempts,
 		injections: injection.NewManager(journal, recorder), identities: map[string]*identity.Authority{}, identityEnv: map[string]string{},
 		identityStop: make(chan struct{}),
-		services:     map[string]services.ManagedHandler{}, sinks: map[string]*services.SinkHandler{},
+		services:     map[string]services.ManagedHandler{}, sinks: map[string]*services.SinkHandler{}, hostRoutes: map[string]http.Handler{},
 		appUID: appUID, appGID: appGID, hostUID: envInt("INTERCEPTOR_HOST_UID", 0), hostGID: envInt("INTERCEPTOR_HOST_GID", 0),
 		turns: map[string]Turn{}, oracleState: map[string]evaluation.OracleResult{}, virtualTime: report.Blueprint.Time.Base.UTC(), done: make(chan error, 1),
 	}, nil
@@ -209,6 +258,12 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	if err := s.startSyntheticServices(); err != nil {
+		return err
+	}
+	if err := s.startNetworkSimulation(); err != nil {
+		return err
+	}
+	if err := s.verifyApplicationManagedTLS(ctx); err != nil {
 		return err
 	}
 	if err := s.prepareIdentityDeliveries(ctx); err != nil {
@@ -287,6 +342,7 @@ func (s *Server) startSyntheticServices() error {
 			}
 			s.services[definition.ID], handler = mcp, mcp
 		}
+		handler = services.WithResponseInjection(definition.ID, definition.Kind, handler, s.injections, s.recorder)
 		if definition.Authorization != nil {
 			authority := s.identities[definition.Authorization.Issuer]
 			if authority == nil {
@@ -294,7 +350,9 @@ func (s *Server) startSyntheticServices() error {
 			}
 			handler = authority.Authorize(definition.ID, *definition.Authorization, handler)
 		}
-		if err := s.serveTCP(definition.Listen, s.trackActivity(handler)); err != nil {
+		handler = s.trackActivity(handler)
+		s.registerHostRoutes(definition.Hostnames, handler)
+		if err := s.serveTCP(definition.Listen, handler); err != nil {
 			return fmt.Errorf("start service %s: %w", definition.ID, err)
 		}
 	}
@@ -312,7 +370,13 @@ func (s *Server) startSyntheticServices() error {
 			return err
 		}
 		s.sinks[definition.ID] = sink
-		if err := s.serveTCP(definition.Listen, s.trackActivity(sink)); err != nil {
+		var handler http.Handler = sink
+		if definition.Response.Mode == "dynamic" {
+			handler = services.WithResponseInjection(definition.ID, definition.Kind, handler, s.injections, s.recorder)
+		}
+		handler = s.trackActivity(handler)
+		s.registerHostRoutes(definition.Hostnames, handler)
+		if err := s.serveTCP(definition.Listen, handler); err != nil {
 			return fmt.Errorf("start attacker service %s: %w", definition.ID, err)
 		}
 	}
@@ -331,9 +395,70 @@ func (s *Server) startIdentityAuthorities() error {
 		}
 		s.identities[definition.ID] = authority
 		s.services[definition.ID] = authority
-		if err := s.serveTCP(definition.Listen, s.trackActivity(authority)); err != nil {
+		handler := s.trackActivity(authority)
+		s.registerHostRoutes(definition.Hostnames, handler)
+		if err := s.serveTCP(definition.Listen, handler); err != nil {
 			return fmt.Errorf("start identity issuer %s: %w", definition.ID, err)
 		}
+	}
+	return nil
+}
+
+func (s *Server) registerHostRoutes(hostnames []string, handler http.Handler) {
+	for _, hostname := range hostnames {
+		s.hostRoutes[strings.ToLower(strings.TrimSuffix(hostname, "."))] = handler
+	}
+}
+
+func (s *Server) simulatedHostnames() []string {
+	hostnames := make([]string, 0, len(s.hostRoutes))
+	for hostname := range s.hostRoutes {
+		hostnames = append(hostnames, hostname)
+	}
+	sort.Strings(hostnames)
+	return hostnames
+}
+
+func (s *Server) startNetworkSimulation() error {
+	if s.blueprint.Network.DNS.Enabled {
+		server, err := simnet.StartDNS(s.blueprint.Network.DNS.Listen, s.simulatedHostnames(), s.blueprint.Network.DNS.UnknownPolicy, s.blueprint.Network.DNS.MaxQueries, s.recorder)
+		if err != nil {
+			return fmt.Errorf("start DNS simulation: %w", err)
+		}
+		s.dnsServer = server
+	}
+	if s.blueprint.Network.HTTP.Enabled {
+		if err := s.serveTCP(s.blueprint.Network.HTTP.Listen, simnet.NewHostRouter(s.hostRoutes, s.recorder)); err != nil {
+			return fmt.Errorf("start HTTP simulation front door: %w", err)
+		}
+	}
+	if s.blueprint.Network.TLS.Enabled {
+		if err := s.serveTLS(s.blueprint.Network.TLS.Listen, simnet.NewHostRouter(s.hostRoutes, s.recorder)); err != nil {
+			return fmt.Errorf("start HTTPS simulation front door: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Server) verifyApplicationManagedTLS(ctx context.Context) error {
+	configuration := s.blueprint.Network.TLS
+	if !configuration.Enabled || configuration.TrustMode != "application-managed" {
+		return nil
+	}
+	probeContext, cancel := context.WithTimeout(ctx, s.startupTimeout())
+	defer cancel()
+	command := exec.CommandContext(probeContext, configuration.ApplicationManagedProbe[0], configuration.ApplicationManagedProbe[1:]...)
+	_, port, _ := net.SplitHostPort(configuration.Listen)
+	probeURL := "https://" + s.simulatedHostnames()[0]
+	if port != "443" {
+		probeURL += ":" + port
+	}
+	probeURL += simnet.TLSProbePath
+	s.configureApplicationCommand(command, []string{"INTERCEPTOR_TLS_PROBE_URL=" + probeURL})
+	stdout, stderr := &boundedBuffer{limit: 64 << 10}, &boundedBuffer{limit: 64 << 10}
+	command.Stdout, command.Stderr = stdout, stderr
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("application-managed TLS trust probe failed: %w: %s", err, strings.TrimSpace(string(stderr.bytes())))
 	}
 	return nil
 }
@@ -431,7 +556,7 @@ func (s *Server) startHostBridge(ctx context.Context) error {
 	}
 	spoolConfig := bridge.HTTPSpoolServerConfig{
 		Root: filepath.Join(s.paths.Sockets, "http-spool"), Application: appHandler, Control: controlHandler,
-		MaxBytes: s.blueprint.Limits.MaxBlobBytes, MaxConcurrentApplication: 8,
+		MaxBytes: adaptive.ArtifactEnvelopeLimit(s.blueprint.Limits.MaxBlobBytes), MaxConcurrentApplication: 8,
 	}
 	if err := os.MkdirAll(spoolConfig.Root, 0o700); err != nil {
 		return err
@@ -450,6 +575,13 @@ func (s *Server) startHostBridge(ctx context.Context) error {
 func (s *Server) controlHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/status", s.statusHandler)
+	mux.HandleFunc("GET /v1/capabilities", s.capabilitiesHandler)
+	mux.HandleFunc("POST /v1/artifacts", s.registerArtifactHandler)
+	mux.HandleFunc("GET /v1/artifacts", s.listArtifactsHandler)
+	mux.HandleFunc("GET /v1/artifacts/{digest}", s.readArtifactHandler)
+	mux.HandleFunc("POST /v1/attempts", s.registerAttemptHandler)
+	mux.HandleFunc("GET /v1/attempts", s.listAttemptsHandler)
+	mux.HandleFunc("GET /v1/observations/{attempt}", s.observationViewHandler)
 	mux.HandleFunc("POST /v1/turns", s.turnHandler)
 	mux.HandleFunc("GET /v1/turns/{id}", s.turnStatusHandler)
 	mux.HandleFunc("POST /v1/injections", s.armInjectionHandler)
@@ -479,6 +611,170 @@ func (s *Server) statusHandler(writer http.ResponseWriter, _ *http.Request) {
 	writeJSON(writer, http.StatusOK, metadata)
 }
 
+func (s *Server) capabilitiesHandler(writer http.ResponseWriter, _ *http.Request) {
+	manifest, err := adaptive.BuildCapabilityManifest(s.blueprint, s.metadata.EnvironmentDigest, s.metadata.AppDigest)
+	if err != nil || s.metadata.CapabilityManifestDigest != "" && manifest.Digest != s.metadata.CapabilityManifestDigest {
+		writeError(writer, 500, "capability_manifest_failed", "sealed capability binding is inconsistent")
+		return
+	}
+	writeJSON(writer, 200, manifest)
+}
+func (s *Server) registerArtifactHandler(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		Descriptor adaptive.ArtifactDescriptor `json:"descriptor"`
+		Content    []byte                      `json:"content"`
+	}
+	if err := decodeStrict(request, &input, adaptive.ArtifactEnvelopeLimit(s.blueprint.Limits.MaxBlobBytes)); err != nil {
+		writeError(writer, 400, "invalid_artifact", err.Error())
+		return
+	}
+	_, alreadyRegistered := s.artifacts.Get(input.Descriptor.Digest)
+	item, err := s.artifacts.Register(request.Context(), input.Descriptor, bytes.NewReader(input.Content))
+	if err != nil {
+		writeError(writer, 400, "invalid_artifact", err.Error())
+		return
+	}
+	if alreadyRegistered {
+		writeJSON(writer, 200, item)
+		return
+	}
+	encoded, _ := json.Marshal(item)
+	if _, err := s.journal.Append("artifact_register", []statejournal.Operation{{Kind: "artifact_put", ID: item.Digest, Value: encoded}}); err != nil {
+		if !alreadyRegistered {
+			_ = s.artifacts.Rollback(item)
+		}
+		writeError(writer, 500, "artifact_failed", "artifact registration could not be journaled")
+		return
+	}
+	s.bumpRevision()
+	_, _ = s.recorder.Append(recording.Draft{Channel: recording.Control, Layer: "artifact", Kind: "artifact_registered", Provenance: recording.HarnessInjected, PayloadDigest: item.Digest, Semantic: map[string]any{"digest": item.Digest, "size_bytes": item.SizeBytes, "media_type": item.MediaType, "canonicalization": item.Canonicalization}})
+	writeJSON(writer, 201, item)
+}
+func (s *Server) readArtifactHandler(writer http.ResponseWriter, request *http.Request) {
+	digestValue := request.PathValue("digest")
+	item, ok := s.artifacts.Get(digestValue)
+	if !ok {
+		s.turnMu.RLock()
+		for _, turn := range s.turns {
+			if turn.OutputDigest == digestValue {
+				item = adaptive.ArtifactDescriptor{Digest: digestValue, SizeBytes: int64(len(turn.Body)), MediaType: turn.MediaType, Canonicalization: "raw"}
+				if item.MediaType == "" {
+					item.MediaType = "application/octet-stream"
+				}
+				ok = true
+				break
+			}
+		}
+		s.turnMu.RUnlock()
+	}
+	if !ok {
+		writeError(writer, 404, "not_found", "artifact is not registered or a current target output")
+		return
+	}
+	reader, _, err := s.blobs.Open(item.Digest)
+	if err != nil {
+		writeError(writer, 500, "artifact_failed", "artifact verification failed")
+		return
+	}
+	defer reader.Close()
+	writer.Header().Set("Content-Type", item.MediaType)
+	writer.Header().Set("X-Content-Digest", item.Digest)
+	writer.WriteHeader(200)
+	_, _ = io.Copy(writer, reader)
+}
+func (s *Server) listArtifactsHandler(writer http.ResponseWriter, _ *http.Request) {
+	writeJSON(writer, 200, map[string]any{"artifacts": s.artifacts.List()})
+}
+func (s *Server) registerAttemptHandler(writer http.ResponseWriter, request *http.Request) {
+	var input adaptive.AttemptContext
+	if err := decodeStrict(request, &input, 1<<20); err != nil {
+		writeError(writer, 400, "invalid_attempt", err.Error())
+		return
+	}
+	item, err := s.attempts.Register(input)
+	if err != nil {
+		writeError(writer, 400, "invalid_attempt", err.Error())
+		return
+	}
+	encoded, _ := json.Marshal(item)
+	if _, err := s.journal.Append("attempt_register", []statejournal.Operation{{Kind: "attempt_put", ID: item.AttemptID, Value: encoded}}); err != nil {
+		_ = s.attempts.Rollback(item)
+		writeError(writer, 500, "attempt_failed", "attempt registration could not be journaled")
+		return
+	}
+	s.bumpRevision()
+	_, _ = s.recorder.Append(recording.Draft{Channel: recording.Control, Layer: "attempt", Kind: "attempt_registered", Provenance: recording.HarnessInjected, AttemptID: item.AttemptID, PayloadDigest: item.Payload.Digest, Semantic: map[string]any{"campaign_id": item.CampaignID, "thread_id": item.ThreadID, "parent_attempt_id": item.ParentAttemptID, "generation": item.Generation, "attempt_index": item.AttemptIndex, "context_digest": item.Digest}})
+	writeJSON(writer, 201, item)
+}
+func (s *Server) listAttemptsHandler(writer http.ResponseWriter, _ *http.Request) {
+	writeJSON(writer, 200, map[string]any{"attempts": s.attempts.List()})
+}
+func (s *Server) observationViewHandler(writer http.ResponseWriter, request *http.Request) {
+	attempt, ok := s.attempts.Get(request.PathValue("attempt"))
+	if !ok {
+		writeError(writer, 404, "not_found", "attempt not found")
+		return
+	}
+	var turn Turn
+	s.turnMu.RLock()
+	for _, candidate := range s.turns {
+		if candidate.AttemptID == attempt.AttemptID && candidate.Started.After(turn.Started) {
+			turn = candidate
+		}
+	}
+	s.turnMu.RUnlock()
+	state := "PENDING"
+	errorCode := ""
+	if turn.Status == "complete" {
+		state = "SUCCEEDED"
+	} else if turn.Status == "error" {
+		state = "FAILED"
+		errorCode = "APPLICATION_OPERATION_FAILED"
+	}
+	view := adaptive.ObservationView{APIVersion: adaptive.ObservationViewVersion, SessionID: s.metadata.ID, AttemptID: attempt.AttemptID, FeedbackProfile: s.metadata.FeedbackProfile, Operation: adaptive.OperationView{State: state, ReceiptID: turn.ID, ErrorCode: errorCode}, TargetOutput: adaptive.TargetOutput{ArtifactDigest: turn.OutputDigest, MediaType: turn.MediaType}, Observations: []adaptive.Observation{}, SessionRevision: s.metadata.Revision}
+	if s.metadata.FeedbackProfile == "diagnostic" && turn.Error != "" {
+		view.Observations = append(view.Observations, adaptive.Observation{Kind: "operation_error", Visibility: adaptive.HarnessVisible, Value: map[string]any{"failed": true}})
+	}
+	if s.metadata.FeedbackProfile == "oracle-assisted" {
+		events, err := recording.VerifyFile(s.paths.Events)
+		if err != nil {
+			writeError(writer, 500, "observation_failed", "recorded evidence could not be verified")
+			return
+		}
+		attributed := map[uint64]bool{}
+		for _, event := range events {
+			if event.AttemptID == attempt.AttemptID {
+				attributed[event.Seq] = true
+			}
+		}
+		report, err := s.evaluate()
+		if err != nil {
+			writeError(writer, 500, "observation_failed", "oracle outcomes could not be evaluated")
+			return
+		}
+		for _, result := range report.Oracles {
+			matchesAttempt := false
+			for _, reference := range result.Evidence {
+				sequence, parseErr := strconv.ParseUint(strings.TrimPrefix(reference, "event:"), 10, 64)
+				if parseErr == nil && attributed[sequence] {
+					matchesAttempt = true
+					break
+				}
+			}
+			if result.Fired && matchesAttempt {
+				view.Observations = append(view.Observations, adaptive.Observation{Kind: "oracle_outcome", Visibility: adaptive.HarnessVisible, Value: map[string]any{"oracle_id": result.ID, "oracle_kind": result.Kind, "fired": true}})
+			}
+		}
+	}
+	writeJSON(writer, 200, view)
+}
+func (s *Server) bumpRevision() {
+	s.metadataMu.Lock()
+	s.metadata.Revision++
+	_ = session.Save(s.paths.Metadata, s.metadata)
+	s.metadataMu.Unlock()
+}
+
 func (s *Server) turnHandler(writer http.ResponseWriter, request *http.Request) {
 	s.activityMu.RLock()
 	defer s.activityMu.RUnlock()
@@ -501,6 +797,35 @@ func (s *Server) turnHandler(writer http.ResponseWriter, request *http.Request) 
 	if len(input.Input) > 2<<20 || len(input.Body) > 2<<20 {
 		writeError(writer, http.StatusRequestEntityTooLarge, "invalid_turn", "decoded turn input exceeds 2 MiB")
 		return
+	}
+	if input.AttemptID != "" {
+		attempt, ok := s.attempts.Get(input.AttemptID)
+		if !ok || attempt.Payload.Digest != input.PayloadDigest {
+			writeError(writer, 400, "invalid_attempt", "turn attempt and payload are not registered")
+			return
+		}
+		if input.ArtifactDigest != "" && input.ArtifactDigest != input.PayloadDigest {
+			writeError(writer, 400, "invalid_artifact", "turn artifact does not match attempt payload")
+			return
+		}
+	}
+	if input.ArtifactDigest != "" {
+		if input.Input != nil || input.Body != nil {
+			writeError(writer, 400, "invalid_artifact", "artifact_digest may not be combined with inline input")
+			return
+		}
+		reader, _, err := s.blobs.Open(input.ArtifactDigest)
+		if err != nil {
+			writeError(writer, 400, "invalid_artifact", "registered artifact is unavailable")
+			return
+		}
+		content, err := io.ReadAll(io.LimitReader(reader, 2<<20+1))
+		reader.Close()
+		if err != nil || len(content) > 2<<20 {
+			writeError(writer, 400, "invalid_artifact", "artifact cannot be used as turn input")
+			return
+		}
+		input.Input = content
 	}
 	if input.Operation != "" && (input.Method != "" || input.Path != "" || input.Body != nil) {
 		writeError(writer, http.StatusBadRequest, "invalid_turn", "operation may not be combined with method, path, or body")
@@ -534,7 +859,7 @@ func (s *Server) turnHandler(writer http.ResponseWriter, request *http.Request) 
 		writeError(writer, http.StatusTooManyRequests, "turn_limit", "turn limit is exhausted")
 		return
 	}
-	turn := Turn{ID: id, Operation: input.Operation, Status: "running", Started: time.Now().UTC()}
+	turn := Turn{ID: id, Operation: input.Operation, Status: "running", Started: time.Now().UTC(), AttemptID: input.AttemptID, PayloadDigest: input.PayloadDigest}
 	s.turnMu.Lock()
 	s.turns[id] = turn
 	s.turnMu.Unlock()
@@ -554,10 +879,20 @@ func (s *Server) turnHandler(writer http.ResponseWriter, request *http.Request) 
 	} else {
 		turn.Status = "complete"
 	}
+	if len(turn.Body) > 0 {
+		if object, storeErr := s.blobs.Put(request.Context(), bytes.NewReader(turn.Body)); storeErr == nil {
+			turn.OutputDigest = object.Digest
+		}
+	}
 	s.turnMu.Lock()
 	s.turns[id] = turn
 	s.turnMu.Unlock()
-	_, _ = s.recorder.Append(recording.Draft{Channel: recording.Attack, Layer: "application_bridge", Kind: "turn_completed", Provenance: recording.Application, TurnID: id, Semantic: map[string]any{"status": turn.Status, "code": turn.Code, "body": string(turn.Body), "error": turn.Error}})
+	s.bumpRevision()
+	inlineBody := ""
+	if len(turn.Body) <= 64<<10 {
+		inlineBody = string(turn.Body)
+	}
+	_, _ = s.recorder.Append(recording.Draft{Channel: recording.Attack, Layer: "application_bridge", Kind: "turn_completed", Provenance: recording.Application, TurnID: id, AttemptID: turn.AttemptID, PayloadDigest: turn.PayloadDigest, RawRef: turn.OutputDigest, Semantic: map[string]any{"status": turn.Status, "code": turn.Code, "body": inlineBody, "output_ref": turn.OutputDigest, "error": turn.Error}})
 	_ = s.recorder.Flush()
 	writeJSON(writer, http.StatusOK, turn)
 }
@@ -638,6 +973,17 @@ func (s *Server) armInjectionHandler(writer http.ResponseWriter, request *http.R
 		writeError(writer, http.StatusBadRequest, "invalid_injection", err.Error())
 		return
 	}
+	if input.Definition.AttemptID != "" {
+		attempt, ok := s.attempts.Get(input.Definition.AttemptID)
+		if !ok || attempt.Payload.Digest != input.Definition.PayloadDigest {
+			writeError(writer, 400, "invalid_injection", "injection attempt and payload are not registered")
+			return
+		}
+	}
+	if err := s.validateInjectionTarget(input.Definition); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_injection", err.Error())
+		return
+	}
 	s.controlMu.Lock()
 	defer s.controlMu.Unlock()
 	s.activityMu.Lock()
@@ -651,6 +997,7 @@ func (s *Server) armInjectionHandler(writer http.ResponseWriter, request *http.R
 		writeError(writer, http.StatusBadRequest, "invalid_injection", err.Error())
 		return
 	}
+	s.bumpRevision()
 	writeJSON(writer, http.StatusCreated, injection.PublicState{Definition: input.Definition})
 }
 
@@ -658,7 +1005,7 @@ func (s *Server) fidelityMutation(ctx context.Context, definition injection.Defi
 	if err := injection.Validate(definition); err != nil {
 		return nil, nil, err
 	}
-	if definition.Surface != "environment_state" {
+	if definition.Surface != "environment_state" || !definition.Enabled {
 		return nil, nil, nil
 	}
 	selector := definition.Selector
@@ -667,9 +1014,41 @@ func (s *Server) fidelityMutation(ctx context.Context, definition injection.Defi
 		if handler == nil {
 			return nil, nil, fmt.Errorf("fidelity target service %q does not expose managed state", selector.Service)
 		}
-		current := handler.Snapshot()[selector.Collection][selector.Key]
+		state := handler.Snapshot()
+		current := state[selector.Collection][selector.Key]
 		if len(current) == 0 {
-			return nil, nil, errors.New("fidelity target resource does not exist")
+			policy, ok := s.resourceCreationPolicy(selector.Service, selector.Collection)
+			if !ok {
+				return nil, nil, errors.New("fidelity target resource does not exist and its collection is not creation-enabled")
+			}
+			if definition.Placement.Operation != "replace" || definition.Placement.Pointer != "" {
+				return nil, nil, errors.New("new resources require root replace placement")
+			}
+			if len(state[selector.Collection]) >= policy.MaxResources {
+				return nil, nil, errors.New("fidelity target collection has reached its resource limit")
+			}
+			var value any
+			decoder := json.NewDecoder(bytes.NewReader(definition.Payload))
+			decoder.UseNumber()
+			if err := decoder.Decode(&value); err != nil {
+				return nil, nil, err
+			}
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				return nil, nil, err
+			}
+			if len(encoded) > 1<<20 {
+				return nil, nil, errors.New("created service resource exceeds 1 MiB")
+			}
+			operation := statejournal.Operation{Kind: "service_put", Service: selector.Service, Collection: selector.Collection, Key: selector.Key, Value: encoded}
+			creating, ok := handler.(services.CreatingManagedHandler)
+			if !ok || !creating.SupportsCreate(selector.Collection) {
+				return nil, nil, errors.New("fidelity target service does not expose a sealed create contract")
+			}
+			if err := creating.ValidateCreate(operation); err != nil {
+				return nil, nil, err
+			}
+			return []statejournal.Operation{operation}, func() error { return handler.Apply(operation) }, nil
 		}
 		var value any
 		decoder := json.NewDecoder(bytes.NewReader(current))
@@ -693,11 +1072,42 @@ func (s *Server) fidelityMutation(ctx context.Context, definition injection.Defi
 		}
 		return []statejournal.Operation{operation}, func() error { return handler.Apply(operation) }, nil
 	}
-	hostPath, ok := resolveMutablePath(s.containerRoots(), selector.Path)
+	containerPath, hostPath, namespace, ok := s.resolveInjectionFile(selector)
 	if !ok {
-		return nil, nil, fmt.Errorf("fidelity path %q is outside declared mutable roots", selector.Path)
+		return nil, nil, errors.New("fidelity file target is outside its declared mutable namespace")
 	}
 	info, err := os.Lstat(hostPath)
+	if os.IsNotExist(err) {
+		if namespace == nil || !namespace.AllowCreate {
+			return nil, nil, errors.New("fidelity file target does not exist and its namespace is not creation-enabled")
+		}
+		if definition.Placement.Operation != "replace" || definition.Placement.Pointer != "" {
+			return nil, nil, errors.New("new files require root replace placement")
+		}
+		encoded, err := encodeInjectedFile(definition.Payload)
+		if err != nil {
+			return nil, nil, err
+		}
+		if int64(len(encoded)) > namespace.MaxFileBytes {
+			return nil, nil, fmt.Errorf("created file exceeds namespace limit of %d bytes", namespace.MaxFileBytes)
+		}
+		if err := secureCreationParent(hostPath, namespace.Root); err != nil {
+			return nil, nil, err
+		}
+		count, err := regularFileCount(namespace.Root)
+		if err != nil {
+			return nil, nil, err
+		}
+		if count >= namespace.MaxFiles {
+			return nil, nil, errors.New("file injection namespace has reached its file limit")
+		}
+		object, err := s.blobs.Put(ctx, bytes.NewReader(encoded))
+		if err != nil {
+			return nil, nil, err
+		}
+		operation := statejournal.Operation{Kind: "file_upsert", Path: containerPath, Mode: 0o640, Blob: object.Digest, Size: object.Size}
+		return []statejournal.Operation{operation}, func() error { return fsutil.WriteFile(hostPath, encoded, 0o640) }, nil
+	}
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, nil, errors.New("fidelity file target must be an existing regular file")
 	}
@@ -729,13 +1139,144 @@ func (s *Server) fidelityMutation(ctx context.Context, definition injection.Defi
 	if err != nil {
 		return nil, nil, err
 	}
-	operation := statejournal.Operation{Kind: "file_upsert", Path: selector.Path, Mode: uint32(info.Mode().Perm()), Blob: object.Digest, Size: object.Size}
+	operation := statejournal.Operation{Kind: "file_upsert", Path: containerPath, Mode: uint32(info.Mode().Perm()), Blob: object.Digest, Size: object.Size}
 	return []statejournal.Operation{operation}, func() error {
 		if err := fsutil.WriteFile(hostPath, encoded, info.Mode().Perm()); err != nil {
 			return err
 		}
 		return nil
 	}, nil
+}
+
+func (s *Server) validateInjectionTarget(definition injection.Definition) error {
+	if err := injection.Validate(definition); err != nil {
+		return err
+	}
+	switch definition.Surface {
+	case "model_tool_result":
+		return nil
+	case "service_response":
+		for _, service := range s.blueprint.Services {
+			if service.ID == definition.Selector.Service {
+				return nil
+			}
+		}
+		for _, service := range s.blueprint.AttackerServices {
+			if service.ID == definition.Selector.Service {
+				if service.Response.Mode != "dynamic" {
+					return errors.New("attacker service response is static")
+				}
+				return nil
+			}
+		}
+		return errors.New("service response target is not declared")
+	case "mcp_tool_result":
+		for _, service := range s.blueprint.Services {
+			if service.ID == definition.Selector.Service && service.Kind == "mcp_http" {
+				return nil
+			}
+		}
+		return errors.New("MCP result target is not a declared MCP service")
+	case "environment_state":
+		if definition.Selector.Service != "" && s.services[definition.Selector.Service] == nil {
+			return errors.New("environment state target is not a managed service")
+		}
+		if definition.Selector.FileNamespace != "" {
+			if _, ok := s.fileInjectionNamespace(definition.Selector.FileNamespace); !ok {
+				return errors.New("file injection namespace is not declared")
+			}
+		}
+		return nil
+	default:
+		return errors.New("unsupported injection surface")
+	}
+}
+
+func (s *Server) resourceCreationPolicy(serviceID, collection string) (environment.ResourceCreationPolicy, bool) {
+	for _, service := range s.blueprint.Services {
+		if service.ID != serviceID {
+			continue
+		}
+		for _, policy := range service.Injections.CreateCollections {
+			if policy.Collection == collection {
+				return policy, true
+			}
+		}
+	}
+	return environment.ResourceCreationPolicy{}, false
+}
+
+func (s *Server) fileInjectionNamespace(id string) (*environment.FileInjectionNamespace, bool) {
+	for index := range s.blueprint.Filesystem.InjectionNamespaces {
+		if s.blueprint.Filesystem.InjectionNamespaces[index].ID == id {
+			return &s.blueprint.Filesystem.InjectionNamespaces[index], true
+		}
+	}
+	return nil, false
+}
+
+func (s *Server) resolveInjectionFile(selector injection.Selector) (string, string, *environment.FileInjectionNamespace, bool) {
+	containerPath := selector.Path
+	var namespace *environment.FileInjectionNamespace
+	if selector.FileNamespace != "" {
+		var exists bool
+		namespace, exists = s.fileInjectionNamespace(selector.FileNamespace)
+		if !exists {
+			return "", "", nil, false
+		}
+		containerPath = pathpkg.Join(namespace.Root, selector.RelativePath)
+	}
+	hostPath, ok := resolveMutablePath(s.containerRoots(), containerPath)
+	return containerPath, hostPath, namespace, ok
+}
+
+func encodeInjectedFile(payload json.RawMessage) ([]byte, error) {
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	if text, ok := value.(string); ok {
+		return []byte(text), nil
+	}
+	return json.Marshal(value)
+}
+
+func secureCreationParent(target, namespaceRoot string) error {
+	root, err := filepath.EvalSymlinks(namespaceRoot)
+	if err != nil {
+		return fmt.Errorf("resolve file injection namespace: %w", err)
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(target))
+	if err != nil {
+		return errors.New("new file parent must be an existing real directory")
+	}
+	relative, err := filepath.Rel(root, parent)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return errors.New("new file parent escapes its injection namespace")
+	}
+	return nil
+}
+
+func regularFileCount(root string) (int, error) {
+	count := 0
+	err := filepath.WalkDir(root, func(_ string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.Type().IsRegular() {
+			count++
+		}
+		return nil
+	})
+	return count, err
 }
 
 func (s *Server) listInjectionsHandler(writer http.ResponseWriter, _ *http.Request) {
@@ -751,18 +1292,20 @@ func (s *Server) deleteInjectionHandler(writer http.ResponseWriter, request *htt
 		writeError(writer, http.StatusNotFound, "not_found", err.Error())
 		return
 	}
+	s.bumpRevision()
 	writer.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) createSnapshotHandler(writer http.ResponseWriter, request *http.Request) {
 	var input struct {
-		Label string `json:"label,omitempty"`
+		Label                 string `json:"label,omitempty"`
+		MaximumCommittedBytes int64  `json:"maximum_committed_bytes,omitempty"`
 	}
 	if err := decodeStrict(request, &input, 64<<10); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_snapshot", err.Error())
 		return
 	}
-	checkpoint, err := s.createSnapshot(request.Context(), input.Label)
+	checkpoint, err := s.createSnapshot(request.Context(), input.Label, input.MaximumCommittedBytes)
 	if err != nil {
 		writeError(writer, http.StatusConflict, "snapshot_failed", err.Error())
 		return
@@ -770,7 +1313,7 @@ func (s *Server) createSnapshotHandler(writer http.ResponseWriter, request *http
 	writeJSON(writer, http.StatusCreated, checkpoint)
 }
 
-func (s *Server) createSnapshot(ctx context.Context, label string) (snapshot.Checkpoint, error) {
+func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommittedBytes int64) (snapshot.Checkpoint, error) {
 	s.controlMu.Lock()
 	defer s.controlMu.Unlock()
 	s.activityMu.Lock()
@@ -820,6 +1363,15 @@ func (s *Server) createSnapshot(ctx context.Context, label string) (snapshot.Che
 	if err != nil {
 		return snapshot.Checkpoint{}, err
 	}
+	canonicalSize := int64(0)
+	for _, entry := range current.Entries {
+		if entry.Type == "file" {
+			canonicalSize += entry.Size
+		}
+	}
+	if maximumCommittedBytes > 0 && canonicalSize > maximumCommittedBytes {
+		return snapshot.Checkpoint{}, errors.New("snapshot exceeds caller cumulative-byte allowance")
+	}
 	previous, err := snapshot.LoadManifest(s.paths.FileManifest)
 	if err != nil {
 		return snapshot.Checkpoint{}, err
@@ -838,6 +1390,7 @@ func (s *Server) createSnapshot(ctx context.Context, label string) (snapshot.Che
 	}
 	s.metadataMu.Lock()
 	s.metadata.Consumed.SnapshotAttempts++
+	s.metadata.Consumed.SnapshotBytes += canonicalSize
 	budget, _ := json.Marshal(s.metadata.Consumed)
 	s.metadataMu.Unlock()
 	report, err := s.evaluate()
@@ -856,7 +1409,7 @@ func (s *Server) createSnapshot(ctx context.Context, label string) (snapshot.Che
 	s.metadataMu.RLock()
 	metadataForCheckpoint := s.metadata
 	s.metadataMu.RUnlock()
-	checkpoint, err := snapshot.NewCheckpoint(metadataForCheckpoint.ID, metadataForCheckpoint.ParentCheckpoint, metadataForCheckpoint.EnvironmentDigest, metadataForCheckpoint.AppDigest, journalSeq, journalHash, current.Digest, eventSeq, label, buildinfo.Version, time.Now())
+	checkpoint, err := snapshot.NewCheckpoint(metadataForCheckpoint.ID, metadataForCheckpoint.ParentCheckpoint, metadataForCheckpoint.EnvironmentDigest, metadataForCheckpoint.AppDigest, journalSeq, journalHash, current.Digest, canonicalSize, eventSeq, label, buildinfo.Version, time.Now())
 	if err != nil {
 		return snapshot.Checkpoint{}, err
 	}
@@ -873,6 +1426,7 @@ func (s *Server) createSnapshot(ctx context.Context, label string) (snapshot.Che
 	if err := session.Save(s.paths.Metadata, metadata); err != nil {
 		return snapshot.Checkpoint{}, err
 	}
+	s.bumpRevision()
 	return checkpoint, nil
 }
 
@@ -967,6 +1521,7 @@ func (s *Server) quiesceHandler(writer http.ResponseWriter, request *http.Reques
 }
 
 func (s *Server) stopHandler(writer http.ResponseWriter, _ *http.Request) {
+	s.bumpRevision()
 	writeJSON(writer, 202, map[string]any{"stopping": true})
 	go func() { time.Sleep(50 * time.Millisecond); s.done <- nil }()
 }
@@ -1037,6 +1592,9 @@ func (s *Server) Close(ctx context.Context) error {
 	var result error
 	s.closeOnce.Do(func() {
 		close(s.identityStop)
+		if s.dnsServer != nil {
+			result = errors.Join(result, s.dnsServer.Close())
+		}
 		for _, server := range s.servers {
 			result = errors.Join(result, server.Shutdown(ctx))
 		}
@@ -1059,6 +1617,11 @@ func (s *Server) Close(ctx context.Context) error {
 		if len(s.identityFiles) > 0 {
 			_ = os.Remove(filepath.Dir(s.identityFiles[0]))
 		}
+		if report, err := s.evaluate(); err != nil {
+			result = errors.Join(result, fmt.Errorf("persist final evaluation: %w", err))
+		} else if err := fsutil.WriteJSON(s.paths.Evaluation, report, 0o640); err != nil {
+			result = errors.Join(result, fmt.Errorf("persist final evaluation: %w", err))
+		}
 		s.metadataMu.Lock()
 		if s.metadata.Phase != session.Error {
 			s.metadata.Phase = session.Stopped
@@ -1080,6 +1643,22 @@ func (s *Server) serveTCP(address string, handler http.Handler) error {
 	s.listeners = append(s.listeners, listener)
 	s.servers = append(s.servers, server)
 	go server.Serve(listener)
+	return nil
+}
+
+func (s *Server) serveTLS(address string, handler http.Handler) error {
+	certificate, err := tls.LoadX509KeyPair(appimage.ContainerTLSCertificate, appimage.ContainerTLSPrivateKey)
+	if err != nil {
+		return err
+	}
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return err
+	}
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{certificate}}}
+	s.listeners = append(s.listeners, listener)
+	s.servers = append(s.servers, server)
+	go server.ServeTLS(listener, "", "")
 	return nil
 }
 

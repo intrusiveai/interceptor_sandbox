@@ -43,15 +43,17 @@ type Attribution struct {
 }
 
 type Draft struct {
-	Channel     Channel
-	Layer       string
-	Kind        string
-	Provenance  Provenance
-	TurnID      string
-	InjectionID string
-	Attribution Attribution
-	Semantic    any
-	RawRef      string
+	Channel       Channel
+	Layer         string
+	Kind          string
+	Provenance    Provenance
+	TurnID        string
+	InjectionID   string
+	AttemptID     string
+	PayloadDigest string
+	Attribution   Attribution
+	Semantic      any
+	RawRef        string
 }
 
 type Event struct {
@@ -65,6 +67,8 @@ type Event struct {
 	Provenance    Provenance      `json:"provenance"`
 	TurnID        string          `json:"turn_id,omitempty"`
 	InjectionID   string          `json:"injection_id,omitempty"`
+	AttemptID     string          `json:"attempt_id,omitempty"`
+	PayloadDigest string          `json:"payload_digest,omitempty"`
 	Attribution   Attribution     `json:"attribution,omitempty"`
 	Semantic      json.RawMessage `json:"semantic"`
 	RawRef        string          `json:"raw_ref,omitempty"`
@@ -119,7 +123,7 @@ func (w *Writer) Append(draft Draft) (Event, error) {
 	event := Event{
 		SchemaVersion: 1, SessionID: w.sessionID, Seq: w.nextSeq, ObservedAt: w.now().UTC(),
 		Channel: draft.Channel, Layer: draft.Layer, Kind: draft.Kind, Provenance: draft.Provenance,
-		TurnID: draft.TurnID, InjectionID: draft.InjectionID, Attribution: draft.Attribution,
+		TurnID: draft.TurnID, InjectionID: draft.InjectionID, AttemptID: draft.AttemptID, PayloadDigest: draft.PayloadDigest, Attribution: draft.Attribution,
 		Semantic: semantic, RawRef: draft.RawRef, PreviousHash: w.head,
 	}
 	event.Hash, err = eventHash(event)

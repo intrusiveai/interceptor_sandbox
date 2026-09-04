@@ -54,9 +54,7 @@ while remaining inside a no-egress container. A tester can reproducibly model
 consent removal, grant reduction, expiry, and issuer failure, then branch those
 conditions through snapshots.
 
-The implementation is intentionally not a complete identity platform. The MVP
-does not include interactive authorization, PKCE, refresh tokens, device flow,
-MFA, dynamic registration, production federation, cloud STS, SPIFFE/mTLS, or
-route/tool-specific policy. Applications that require those exact protocols
-need a future simulator extension or a small local adapter; they must not be
-given a live identity path as a fallback.
+The MVP identity profile is limited to client-credentials issuance,
+same-issuer user token exchange, and service-wide scope policy. Applications
+outside that profile require a reviewed local adapter and must not be given a
+live identity path as a fallback.

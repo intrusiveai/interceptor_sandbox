@@ -111,7 +111,7 @@ func (c *HTTPSpoolClient) Do(ctx context.Context, channel, method, path string, 
 	ticker := time.NewTicker(c.pollPeriod)
 	defer ticker.Stop()
 	for {
-		data, readErr := readRegularFile(responsePath, c.maxBytes+(1<<20))
+		data, readErr := readRegularFile(responsePath, jsonFrameLimit(c.maxBytes))
 		if readErr == nil {
 			var response HTTPResponseFrame
 			if err := decodeStrictJSON(data, &response); err != nil {
@@ -226,7 +226,7 @@ func serviceHTTPSpoolBatch(ctx context.Context, config HTTPSpoolServerConfig, se
 			}
 			return err
 		}
-		data, err := readRegularFile(processingPath, config.MaxBytes+(1<<20))
+		data, err := readRegularFile(processingPath, jsonFrameLimit(config.MaxBytes))
 		if err != nil {
 			_ = os.Remove(processingPath)
 			continue
@@ -254,6 +254,13 @@ func serviceHTTPSpoolBatch(ctx context.Context, config HTTPSpoolServerConfig, se
 		}(frame, processingPath)
 	}
 	return nil
+}
+
+func jsonFrameLimit(maximumBodyBytes int64) int64 {
+	if maximumBodyBytes <= 0 {
+		return 0
+	}
+	return 4*((maximumBodyBytes+2)/3) + (1 << 20)
 }
 
 func processHTTPSpoolRequest(parent context.Context, config HTTPSpoolServerConfig, frame HTTPRequestFrame, processingPath string) {

@@ -216,3 +216,17 @@ func TestStreamCollectorDelimiterAndIdleCompletion(t *testing.T) {
 		t.Fatalf("unexpected idle output %q", got)
 	}
 }
+
+func TestApplicationEnvironmentAppliesSealedTLSTrustMode(t *testing.T) {
+	server := &Server{blueprint: &environment.Blueprint{Network: environment.NetworkSimulation{TLS: environment.TLSConfig{Enabled: true, TrustMode: "auto"}}, Application: environment.Application{Launch: environment.Launch{Environment: map[string]string{"APP_MODE": "test"}}}}, virtualTime: time.Now().UTC()}
+	values := server.applicationEnvironment(nil)
+	for _, expected := range []string{"INTERCEPTOR_CA_BUNDLE=/opt/interceptor/tls/ca.pem", "SSL_CERT_FILE=/opt/interceptor/tls/ca.pem", "NODE_EXTRA_CA_CERTS=/opt/interceptor/tls/ca.pem", "APP_MODE=test"} {
+		found := false
+		for _, value := range values {
+			found = found || value == expected
+		}
+		if !found {
+			t.Fatalf("application environment omitted %q: %#v", expected, values)
+		}
+	}
+}

@@ -66,6 +66,53 @@ activity/evidence tracking.
 
 ## Cooperative control endpoints
 
+### `GET /v1/capabilities`
+
+Returns the deterministic, secret-free CapabilityManifest bound to the sealed
+Environment and Application. A ScenarioBundle or ExecutionLease must bind its
+exact `digest`. Service entries report role, supported injection surfaces,
+static/dynamic attacker response mode, available HTTP/HTTPS transports, and
+bounded creatable collections.
+`file_namespaces` reports logical IDs and ceilings without revealing container
+paths. `cross_vm_operations` is the exact gateway operation vocabulary and
+`injection_profiles` declares each available surface's scopes, placements,
+selector fields, and response/state carrier classes. `network` reports the
+closed DNS policy and query ceiling plus HTTP/HTTPS front-door and TLS trust
+capabilities without exposing listener addresses or certificate material.
+
+### `POST /v1/artifacts` and `GET /v1/artifacts/{digest}`
+
+Registers and verifies concrete payload bytes:
+
+```json
+{
+  "descriptor": {
+    "digest": "sha256:...",
+    "size_bytes": 97,
+    "media_type": "application/json",
+    "canonicalization": "raw"
+  },
+  "content": "BASE64_BYTES"
+}
+```
+
+`GET /v1/artifacts` lists registered payload descriptors without bodies. Exact
+registered content and target output referenced by an ObservationView can be
+read by digest. Content reads are trusted operations; the Cross-VM gateway
+requires `artifact.read` explicitly.
+
+### `POST /v1/attempts` and `GET /v1/attempts`
+
+Registers and lists immutable producer-neutral AttemptContexts. An artifact
+must be verified first. Parents must already exist in the same campaign/thread,
+and `attempt_index` must increase. See [Adaptive simulation
+interface](adaptive-simulation.md).
+
+### `GET /v1/observations/{attempt-id}`
+
+Returns the immutable session feedback profile's ObservationView. Target output
+uses a content digest; protected evidence is omitted before serialization.
+
 ### `GET /v1/status`
 
 Returns session metadata, including identity, phase, environment/application
@@ -103,6 +150,9 @@ HTTP applications also accept the original route form for compatibility:
 
 Choose one form: `operation`/`input` cannot be combined with `method`/`path` or
 legacy `body`, and `input` and `body` cannot both be present.
+
+Adaptive turns include `attempt_id`, `payload_digest`, and optionally
+`artifact_digest`. The attempt/payload must already be registered.
 
 `caller_principal` is optional. For an HTTP application with
 `identity.inbound`, it places a synthetic user bearer token in the configured
@@ -168,7 +218,9 @@ Arms an injection:
 
 For `scope: next_turn`, the top-level request must also include
 `"eligible_turn":"turn-N"`. Returns `201` with the public definition. See
-[Injections and evaluation](injections-and-evaluation.md).
+[Injections and evaluation](injections-and-evaluation.md). Arming validates the
+target against the sealed per-service or filesystem-namespace capability;
+unknown targets and static attacker responses fail immediately.
 
 ### `GET /v1/injections`
 

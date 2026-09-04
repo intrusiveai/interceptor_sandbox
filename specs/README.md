@@ -37,6 +37,18 @@ Current decisions:
   — simulate workload credentials and delegated users inside each session,
   without proxying a real identity provider or preserving bearer tokens in
   snapshots.
+- [`0006-closed-dns-and-local-tls.md`](decisions/0006-closed-dns-and-local-tls.md)
+  — add authoritative loopback DNS and shared HTTP/TLS hostname routing with a
+  build-generated private sandbox CA.
+
+## Adaptive simulation extension
+
+[`external-adaptive-simulation.md`](external-adaptive-simulation.md) defines the
+implemented producer-neutral interfaces for adaptive harnesses, capability
+discovery, filtered feedback, attempt-indexed evidence, and a secure Cross-VM
+Operator boundary. It is normative for those extension interfaces and augments
+the local MVP contract. `interceptor-improvements.md` records the cross-project
+priorities and AEF consumption rules without redefining these schemas.
 
 ## Change discipline
 

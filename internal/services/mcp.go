@@ -670,6 +670,45 @@ func (h *MCPHandler) Apply(operation statejournal.Operation) error {
 	return nil
 }
 
+func (h *MCPHandler) SupportsCreate(collection string) bool {
+	for _, tool := range h.tools {
+		if tool.Behavior.Kind == "stateful" && tool.Behavior.Action == "create" && tool.Behavior.Collection == collection {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *MCPHandler) ValidateCreate(operation statejournal.Operation) error {
+	if operation.Kind != "service_put" || operation.Service != h.serviceID || operation.Collection == "" || operation.Key == "" || !json.Valid(operation.Value) {
+		return errors.New("MCP resource creation requires a valid service_put operation")
+	}
+	if _, exists := h.get(operation.Collection, operation.Key); exists {
+		return errors.New("MCP resource already exists")
+	}
+	var object map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(operation.Value))
+	decoder.UseNumber()
+	if decoder.Decode(&object) != nil || object == nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return errors.New("MCP resource creation requires exactly one JSON object")
+	}
+	for index := range h.tools {
+		tool := &h.tools[index]
+		behavior := tool.Behavior
+		if behavior.Kind != "stateful" || behavior.Action != "create" || behavior.Collection != operation.Collection {
+			continue
+		}
+		if err := validateMCPArguments(tool.InputSchema, object); err != nil {
+			continue
+		}
+		key, err := mcpKey(object, behavior.KeyField)
+		if err == nil && key == operation.Key {
+			return nil
+		}
+	}
+	return fmt.Errorf("created resource does not satisfy a sealed MCP create tool for collection %q", operation.Collection)
+}
+
 func (h *MCPHandler) Snapshot() map[string]map[string]json.RawMessage {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
