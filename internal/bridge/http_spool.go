@@ -143,6 +143,10 @@ func (c *HTTPSpoolClient) Do(ctx context.Context, channel, method, path string, 
 }
 
 type HTTPSpoolServerConfig struct {
+	// ControlClass opts self-serializing handlers into bounded concurrent dispatch.
+	// Return "operation" for ordinary work, "priority" for closure/status, or ""
+	// for the legacy serial control path. Classification does not grant authority.
+	ControlClass             func(HTTPRequestFrame) string
 	Root                     string
 	Application              http.Handler
 	Control                  http.Handler
@@ -153,8 +157,8 @@ type HTTPSpoolServerConfig struct {
 }
 
 // ServeHTTPSpool dispatches application requests concurrently up to the
-// configured bound. Control requests are executed synchronously in stable
-// claim order so mutations have an unambiguous ordering.
+// configured bound. Legacy control requests retain stable serial ordering;
+// an explicitly configured handler may own its own mutation serialization.
 func ServeHTTPSpool(ctx context.Context, config HTTPSpoolServerConfig) error {
 	if config.Root == "" || config.Application == nil || config.Control == nil {
 		return errors.New("HTTP spool requires a root and both handlers")
@@ -178,6 +182,8 @@ func ServeHTTPSpool(ctx context.Context, config HTTPSpoolServerConfig) error {
 		return err
 	}
 	semaphore := make(chan struct{}, config.MaxConcurrentApplication)
+	controlSlots := make(chan struct{}, 32)
+	prioritySlots := make(chan struct{}, 4)
 	var workers sync.WaitGroup
 	defer workers.Wait()
 	poll := time.NewTicker(config.PollPeriod)
@@ -185,7 +191,7 @@ func ServeHTTPSpool(ctx context.Context, config HTTPSpoolServerConfig) error {
 	defer poll.Stop()
 	defer cleanup.Stop()
 	for {
-		if err := serviceHTTPSpoolBatch(ctx, config, semaphore, &workers); err != nil && !errors.Is(err, context.Canceled) {
+		if err := serviceHTTPSpoolBatch(ctx, config, semaphore, controlSlots, prioritySlots, &workers); err != nil && !errors.Is(err, context.Canceled) {
 			return err
 		}
 		select {
@@ -200,7 +206,7 @@ func ServeHTTPSpool(ctx context.Context, config HTTPSpoolServerConfig) error {
 	}
 }
 
-func serviceHTTPSpoolBatch(ctx context.Context, config HTTPSpoolServerConfig, semaphore chan struct{}, workers *sync.WaitGroup) error {
+func serviceHTTPSpoolBatch(ctx context.Context, config HTTPSpoolServerConfig, semaphore, controlSlots, prioritySlots chan struct{}, workers *sync.WaitGroup) error {
 	entries, err := os.ReadDir(filepath.Join(config.Root, "requests"))
 	if err != nil {
 		return err
@@ -236,22 +242,37 @@ func serviceHTTPSpoolBatch(ctx context.Context, config HTTPSpoolServerConfig, se
 			_ = os.Remove(processingPath)
 			continue
 		}
+		slots := semaphore
 		if frame.Channel == ControlChannel {
-			processHTTPSpoolRequest(ctx, config, frame, processingPath)
-			continue
+			class := ""
+			if config.ControlClass != nil {
+				class = config.ControlClass(frame)
+			}
+			switch class {
+			case "operation":
+				slots = controlSlots
+			case "priority":
+				slots = prioritySlots
+			default:
+				processHTTPSpoolRequest(ctx, config, frame, processingPath)
+				continue
+			}
 		}
 		select {
-		case semaphore <- struct{}{}:
-		case <-ctx.Done():
-			_ = os.Remove(processingPath)
-			return ctx.Err()
+		case slots <- struct{}{}:
+		default:
+			// A saturated lane must not prevent scanning for closure/status requests.
+			if err := os.Rename(processingPath, requestPath); err != nil {
+				return err
+			}
+			continue
 		}
 		workers.Add(1)
-		go func(frame HTTPRequestFrame, path string) {
+		go func(frame HTTPRequestFrame, path string, slots chan struct{}) {
 			defer workers.Done()
-			defer func() { <-semaphore }()
+			defer func() { <-slots }()
 			processHTTPSpoolRequest(ctx, config, frame, path)
-		}(frame, processingPath)
+		}(frame, processingPath, slots)
 	}
 	return nil
 }

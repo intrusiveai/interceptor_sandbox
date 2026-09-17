@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/intrusive-ai/interceptor-sandbox/internal/delivery"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/recording"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/statejournal"
 	"gopkg.in/yaml.v3"
@@ -25,13 +26,14 @@ type StatefulRoutes struct {
 var serviceRequestSequence atomic.Uint64
 
 type StatefulRoute struct {
-	ID          string   `yaml:"id" json:"id"`
-	Method      string   `yaml:"method" json:"method"`
-	Path        string   `yaml:"path" json:"path"`
-	Action      string   `yaml:"action" json:"action"`
-	Collection  string   `yaml:"collection" json:"collection"`
-	KeyField    string   `yaml:"key_field,omitempty" json:"key_field,omitempty"`
-	PatchFields []string `yaml:"patch_fields,omitempty" json:"patch_fields,omitempty"`
+	Delivery    *delivery.Contract `yaml:"delivery,omitempty" json:"delivery,omitempty"`
+	ID          string             `yaml:"id" json:"id"`
+	Method      string             `yaml:"method" json:"method"`
+	Path        string             `yaml:"path" json:"path"`
+	Action      string             `yaml:"action" json:"action"`
+	Collection  string             `yaml:"collection" json:"collection"`
+	KeyField    string             `yaml:"key_field,omitempty" json:"key_field,omitempty"`
+	PatchFields []string           `yaml:"patch_fields,omitempty" json:"patch_fields,omitempty"`
 }
 
 type StatefulHandler struct {
@@ -98,6 +100,9 @@ func ValidateStatefulRoutes(routes *StatefulRoutes) error {
 	ids, signatures := map[string]struct{}{}, map[string]string{}
 	for index := range routes.Routes {
 		route := &routes.Routes[index]
+		if err := delivery.Validate(route.Delivery); err != nil {
+			return fmt.Errorf("route %s delivery: %w", route.ID, err)
+		}
 		route.Method = strings.ToUpper(strings.TrimSpace(route.Method))
 		if route.ID == "" || route.Method == "" || !strings.HasPrefix(route.Path, "/") || route.Collection == "" {
 			return fmt.Errorf("stateful route %d requires id, method, absolute path, and collection", index)

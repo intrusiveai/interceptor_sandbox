@@ -1,19 +1,14 @@
-# Local API reference
+# Native supervisor API reference
 
-While `interceptor run` or `restore` is open, it prints two local-only base URLs:
+The public integration starts with `interceptor run` at `127.0.0.1:8080`.
+See [Local Operator integration](local-api.md) for the supported public routes.
+The endpoints below describe private supervisor operations used by the typed
+v1alpha2 dispatcher and administrator CLI. `run` does not expose separate
+application/control convenience URLs, and these private paths are not public
+aliases. Public binding uses attach; restore and confirmed stop use the lifecycle
+API. Native model-provider credentials remain host-only.
 
-```text
-Session sess-... running
-  application: http://127.0.0.1:<port>
-  control: http://127.0.0.1:<port>
-```
-
-They do not require a password because they accept connections only from the
-same machine (`127.0.0.1`). Do not publish them through a reverse proxy or port
-forward. Any other process running under the same local user account should be
-treated as able to use them.
-
-All control request bodies use strict JSON: misspelled or unknown fields are
+All control request bodiesAll control request bodies use strict JSON: misspelled or unknown fields are
 rejected instead of ignored. Control responses are JSON and tell clients not to
 cache them.
 Errors use:
@@ -98,7 +93,7 @@ Registers and verifies concrete payload bytes:
 
 `GET /v1/artifacts` lists registered payload descriptors without bodies. Exact
 registered content and target output referenced by an ObservationView can be
-read by digest. Content reads are trusted operations; the Cross-VM gateway
+read by digest. Content reads are trusted operations; the operations gateway
 requires `artifact.read` explicitly.
 
 ### `POST /v1/attempts` and `GET /v1/attempts`
@@ -110,8 +105,11 @@ interface](adaptive-simulation.md).
 
 ### `GET /v1/observations/{attempt-id}`
 
-Returns the immutable session feedback profile's ObservationView. Target output
-uses a content digest; protected evidence is omitted before serialization.
+Returns a fixed v1alpha2 ObservationView under the immutable feedback profile.
+Select `?turn_id=<invocation-id>` or `?receipt_id=<fixed-receipt>`; omission is
+allowed only for an unambiguous single invocation. The view includes category
+availability, entry descriptors, recording cutoff and capture limits. Use native
+`observation.content.read` for bounded bytes. See [live feedback](feedback.md).
 
 ### `GET /v1/status`
 
@@ -123,6 +121,12 @@ and local URLs.
 
 Submits one synchronous application turn. The preferred form names a declared
 operation and carries its bytes in `input`:
+
+With a v1alpha2 delivery contract, the decoded bytes, media type and effective
+byte limit must match that operation's reviewed input description. Invalid
+packaging returns `400` / `invalid_delivery_input` before invocation; no JSON
+is extracted from prose or repaired. Examples below illustrate the transport,
+not a universal application-specific field name.
 
 ```json
 {
@@ -188,6 +192,12 @@ bodies are base64. Command results may also include `exit_code`. Only
 
 ### `GET /v1/turns/{turn-id}`
 
+Contract-bearing turns include advisory `output_contract_status`: `matched`,
+`unknown`, or `mismatch`. The attack-channel `turn_completed` event also records it.
+The actual bounded output and application outcome are retained on a schema
+mismatch. Legacy turns omit the field. This does not change feedback/evidence
+visibility or guarantee injection delivery; see [Delivery contracts](delivery-contracts.md).
+
 Returns a previously submitted in-memory turn record. Turn records are not a
 snapshot-restored persistence mechanism; use events for durable evidence.
 
@@ -236,10 +246,18 @@ Injection IDs may not contain `/` or `\`.
 ### `POST /v1/snapshots`
 
 ```json
-{"label":"before-untrusted-input"}
+{"label":"before-untrusted-input","description":"Baseline before testing mutations","campaign_id":"campaign-01"}
 ```
 
-Creates a logical snapshot and waits for it to finish before responding. The
+Creates a logical snapshot and waits for it to finish before responding.
+`label`, `description` and administrative `campaign_id` are optional. Description
+is valid UTF-8 and at most 4,096 bytes; campaign IDs are at most 128 identifier
+characters. Campaign ID and description are included in the returned, hash-covered
+checkpoint and in list/inspect results. This private administrative route remains
+unavailable for mutation after campaign attachment. The native `snapshot.create`
+operation instead takes campaign ID from its v1alpha2 envelope and accepts only
+label/description in its body. Public campaign-wide list/inspect routes are
+defined in [the local API](local-api.md#snapshot-inventory-and-metadata). The
 application must support snapshots. If the application cannot reach a safe save
 point or keeps changing files during the save, the API returns `409` and does
 not create a usable checkpoint.

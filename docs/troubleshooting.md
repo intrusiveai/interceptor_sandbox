@@ -277,19 +277,16 @@ interceptor logs export <session-id> --output ./evidence.tar
 If verification fails, preserve the data root for investigation. Do not edit the
 line-oriented JSON history files or checkpoint JSON to force an export.
 
-## Cross-VM gateway returns `401 invalid_token`
+## Local integration or lifecycle fails
 
-Confirm which endpoint is being called. Lease issuance, introspection, and
-revocation require the shared integration token. `POST /v1/cross-vm` requires
-the distinct opaque token returned when that lease was issued. A revoked or
-expired lease token is deliberately indistinguishable from an unknown token.
+The current API starts with `interceptor run` on `127.0.0.1:8080`, without
+integration authentication. A port conflict or existing live Interceptor target
+prevents a second instance; inspect rather than silently adopting another run.
+Attach the same campaign and stop policy. Use the returned native binding and
+current native session revision. After restore, old-session mutations fail.
 
-In production, verify that `--auth-token-credential-id` exists in the selected
-`--credential-config`, that the instance workload identity can read it, and
-that the corresponding secret-free credential-resolution audit event was
-written. Environment tokens are rejected with `--production`. Do not put the
-integration token into the Operator guest or use it for typed run operations.
-
-Also confirm that the gateway's HTTP listener remains a private backend behind
-the expected TLS load balancer. A successful bearer check does not make direct
-public HTTP exposure safe.
+A lost lifecycle response is reconciled with its original ID via `/v1/status` or
+an exact request retry. Native experiment lookup uses `operation.status`.
+In-progress/unavailable/missing results never authorize a fresh-ID replay.
+`execution_closed` is permanent; host-service loss is terminal to the campaign.
+See [Local integration](local-api.md) for failure and evidence handling.

@@ -22,6 +22,9 @@ type Consumed struct {
 }
 
 type Metadata struct {
+	CampaignID               string    `json:"campaign_id,omitempty"`
+	SpoolMaxBytes            int64     `json:"spool_max_bytes,omitempty"`
+	OperationAPIVersion      string    `json:"operation_api_version,omitempty"`
 	SchemaVersion            int       `json:"schema_version"`
 	ID                       string    `json:"id"`
 	ParentSessionID          string    `json:"parent_session_id,omitempty"`
@@ -59,6 +62,8 @@ type Limits struct {
 }
 
 type Paths struct {
+	Blobs        string
+	Exports      string
 	Root         string
 	Metadata     string
 	Events       string
@@ -74,6 +79,7 @@ type Paths struct {
 func PathsFor(dataRoot, sessionID string) Paths {
 	root := dataRoot + "/sessions/" + sessionID
 	return Paths{
+		Blobs: root + "/blobs", Exports: root + "/exports",
 		Root: root, Metadata: root + "/session.json", Events: root + "/events.jsonl",
 		Journal: root + "/state.jsonl", Evaluation: root + "/final-evaluation.json", FileManifest: root + "/file-manifest.json",
 		Checkpoints: root + "/checkpoints", Generations: root + "/generations",

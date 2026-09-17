@@ -1,12 +1,16 @@
 package environment
 
-import "time"
+import (
+	"github.com/intrusive-ai/interceptor-sandbox/internal/delivery"
+	"time"
+)
 
 const (
-	APIVersion    = "interceptor.dev/v1alpha1"
-	Kind          = "Environment"
-	BlueprintFile = "environment.yaml"
-	LockFile      = "environment.lock.json"
+	APIVersion         = "interceptor.dev/v1alpha1"
+	DeliveryAPIVersion = "interceptor.dev/v1alpha2"
+	Kind               = "Environment"
+	BlueprintFile      = "environment.yaml"
+	LockFile           = "environment.lock.json"
 )
 
 type Blueprint struct {
@@ -62,10 +66,13 @@ type ApplicationInterface struct {
 }
 
 type ApplicationOperation struct {
-	ID        string            `yaml:"id" json:"id"`
-	Method    string            `yaml:"method,omitempty" json:"method,omitempty"`
-	Path      string            `yaml:"path,omitempty" json:"path,omitempty"`
-	Arguments []ArgumentBinding `yaml:"arguments,omitempty" json:"arguments,omitempty"`
+	Delivery         *delivery.Contract `yaml:"delivery,omitempty" json:"delivery,omitempty"`
+	DeliveryAsset    string             `yaml:"delivery_asset,omitempty" json:"delivery_asset,omitempty"`
+	ResolvedDelivery *delivery.Contract `yaml:"-" json:"-"`
+	ID               string             `yaml:"id" json:"id"`
+	Method           string             `yaml:"method,omitempty" json:"method,omitempty"`
+	Path             string             `yaml:"path,omitempty" json:"path,omitempty"`
+	Arguments        []ArgumentBinding  `yaml:"arguments,omitempty" json:"arguments,omitempty"`
 }
 
 type ArgumentBinding struct {
@@ -192,18 +199,21 @@ type SeedEntry struct {
 }
 
 type Service struct {
-	ID            string                 `yaml:"id" json:"id"`
-	Kind          string                 `yaml:"kind" json:"kind"`
-	Listen        string                 `yaml:"listen" json:"listen"`
-	Hostnames     []string               `yaml:"hostnames,omitempty" json:"hostnames,omitempty"`
-	Seed          string                 `yaml:"seed,omitempty" json:"seed,omitempty"`
-	Routes        string                 `yaml:"routes,omitempty" json:"routes,omitempty"`
-	Fixtures      string                 `yaml:"fixtures,omitempty" json:"fixtures,omitempty"`
-	Endpoint      string                 `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
-	Tools         string                 `yaml:"tools,omitempty" json:"tools,omitempty"`
-	Options       map[string]any         `yaml:"options,omitempty" json:"options,omitempty"`
-	Authorization *ServiceAuthorization  `yaml:"authorization,omitempty" json:"authorization,omitempty"`
-	Injections    ServiceInjectionPolicy `yaml:"injections,omitempty" json:"injections,omitempty"`
+	Implementation    string                 `yaml:"implementation,omitempty" json:"implementation,omitempty"`
+	ExportContracts   bool                   `yaml:"export_contracts,omitempty" json:"export_contracts,omitempty"`
+	ResolvedEndpoints []delivery.Endpoint    `yaml:"-" json:"-"`
+	ID                string                 `yaml:"id" json:"id"`
+	Kind              string                 `yaml:"kind" json:"kind"`
+	Listen            string                 `yaml:"listen" json:"listen"`
+	Hostnames         []string               `yaml:"hostnames,omitempty" json:"hostnames,omitempty"`
+	Seed              string                 `yaml:"seed,omitempty" json:"seed,omitempty"`
+	Routes            string                 `yaml:"routes,omitempty" json:"routes,omitempty"`
+	Fixtures          string                 `yaml:"fixtures,omitempty" json:"fixtures,omitempty"`
+	Endpoint          string                 `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
+	Tools             string                 `yaml:"tools,omitempty" json:"tools,omitempty"`
+	Options           map[string]any         `yaml:"options,omitempty" json:"options,omitempty"`
+	Authorization     *ServiceAuthorization  `yaml:"authorization,omitempty" json:"authorization,omitempty"`
+	Injections        ServiceInjectionPolicy `yaml:"injections,omitempty" json:"injections,omitempty"`
 }
 
 type ServiceInjectionPolicy struct {

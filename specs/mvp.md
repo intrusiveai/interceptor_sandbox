@@ -1,5 +1,10 @@
 # Interceptor Sandbox MVP Specification
 
+**Current local MVP deployment:** [Local integration](../docs/local-api.md) is
+normative for host startup, campaign attachment, public routing, restore, stop and
+evidence. Native endpoint descriptions below refer to the private supervisor API,
+not additional public application/control listeners.
+
 **Status:** Draft 0.1  
 **Target:** Local open-source MVP  
 **Normative terms:** MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are used as
@@ -320,7 +325,7 @@ explicitly enabled.
 
 #### 4.3.1 Explicit Unix-socket fast path
 
-`interceptor run` and `interceptor restore` MUST accept
+`interceptor run` MUST accept
 `--bridge-transport spool|unix`; `spool` is the default. `unix` places the
 application, control, and host-model Unix sockets in the bind-mounted session
 directory and connects them directly from the host. The implementation MUST
@@ -333,8 +338,44 @@ daemons, or file-sharing implementations that project socket names without
 their kernel endpoints. Incorrect selection MUST fail closed. It MUST NOT cause
 the runtime to publish container ports, add a network, relax permissions, or
 retry with a different transport. The selected transport is persisted in
-session metadata and restore may explicitly choose either supported transport
-for the new session.
+session metadata; managed restore retains that same transport.
+
+#### 4.3.2 Host spool file management
+
+For spool transport, the host Interceptor process checks the combined logical file
+size of the session's HTTP and model spool directories once per second, starting
+before application admission and continuing while the container can write. Set the
+positive integer byte limit using `interceptor run --spool-max-bytes <bytes>`, then
+`INTERCEPTOR_SPOOL_MAX_BYTES`, then the default 536870912 bytes (512 MiB), in that
+precedence order. Reject invalid explicit values. Persist `spool_max_bytes` in
+session metadata; managed restores retain it. It is host configuration, independent
+of the sealed Blueprint's message limits. Unix transport creates no spool to check.
+
+Count all nested regular-file lengths, including requests, processing, responses,
+cancellations, temporary publications and unexpected files. Do not follow links or
+traverse outside assigned roots. Ignore entries removed concurrently; other scan
+errors and unexpected links/special files fail the transport. Traverse with bounded
+memory and cancellation independently of request dispatch. A scan unable to complete
+within five seconds is a transport failure. Stop scanning once total bytes exceed
+the configured maximum; equality is allowed. Record measured bytes, limit and reason.
+
+Excess makes the session terminal with reason `SPOOL_SIZE_LIMIT`. Close native/API
+admission, retain uncertainty for dispatched operations and initiate Docker termination
+without waiting for a spool response. Persist the integrated API's closed state before
+releasing its mutation gate; failure to persist must leave admission closed in memory
+and must not delay Docker termination. A stalled/unavailable supervisor cannot block
+host termination. Restore cannot reopen the closed instance. The host attempts one
+bounded failure record outside the spool. Other inspection failures follow the same
+terminal path. This periodic process check permits overshoot between inspection and
+confirmed exit; message limits, token budgets and attempt limits remain independent.
+
+After confirmed container exit and stopped host bridge writers, delete the complete
+spool directories on normal stop, quota/fault termination and startup failure. Preserve
+journals and artifacts. Record incomplete cleanup for retry. Startup reclaims abandoned
+spools only after confirming their bound containers and writers are inactive; uncertain
+resources are not deleted or reused. Never follow spool links during removal. Healthy
+target restore cleans up the old session's spool and creates empty directories for
+the replacement; transport files are not snapshot state and are never replayed.
 
 ### 4.4 Host model connector
 
@@ -420,14 +461,14 @@ data/
   apps/
     <name>/<version>/
       app.lock.json
-  blobs/
-    sha256/<first-two-hex>/<remaining-hex>
   sessions/
     <session-id>/
       session.json
       events.jsonl
       state.jsonl
       file-manifest.json
+      blobs/sha256/<first-two-hex>/<remaining-hex>
+      exports/...
       checkpoints/<checkpoint-id>.json
       generations/<generation>/runtime/...
       logs/application.stdout.log
@@ -435,16 +476,22 @@ data/
       sockets/...
 ```
 
-Sealed Environment assets and blobs MAY be shared read-only between sessions.
-Environment Instance metadata, future journal entries, logs, and runtime paths
-MUST NOT be shared.
+Each session directory is an independently purgeable evidence group. All of its
+blob content, journals, checkpoints, receipts, logs and managed exports belong to
+that group. Reuse content by digest only within the session. Copy required content
+when creating another session; it must remain usable after the source is purged.
+Sealed Environment assets and installed application images retain their separate
+installation lifetimes. Container `/run/interceptor-blobs` exposes only the current
+session's `blobs/` directory. Retain session evidence until explicit administrative
+purge; disk pressure must not silently evict retained sessions. A required journal
+write failure closes admission and terminates the target.
 
 ### 5.2 File persistence rules
 
 - Small mutable metadata uses JSON, written to a same-directory temporary file,
   flushed, and atomically renamed.
 - Ordered history uses JSONL and is never edited in place.
-- Content larger than the configured inline threshold uses the global local
+- Content larger than the configured inline threshold uses the session's own
   blob directory and is referenced by SHA-256 digest.
 - Blob creation is write-temp, hash, flush, rename. Existing blobs are verified
   before reuse.
@@ -461,6 +508,8 @@ MUST NOT be shared.
 {
   "schema_version": 1,
   "id": "sess-01J...",
+  "campaign_id": "campaign-01",
+  "spool_max_bytes": 536870912,
   "parent_session_id": null,
   "parent_checkpoint": null,
   "environment_path": "...",
@@ -487,6 +536,11 @@ MUST NOT be shared.
 }
 ```
 
+`campaign_id` is absent before attachment. Persist it when the campaign binding
+is accepted and retain it on restored sessions so administrative purge can select
+the whole campaign. This is association metadata, not worker/revision authorization.
+`spool_max_bytes` records the effective host limit described in Section 4.3.2.
+
 Allowed phases are `creating`, `starting`, `running`, `quiescing`, `stopping`,
 `stopped`, and `error`. Transitions MUST be validated and recorded on the
 control channel.
@@ -500,8 +554,10 @@ its referenced assets. YAML is the authoring format; the seal operation converts
 the Blueprint to a canonical JSON representation for hashing. Unknown fields
 MUST fail validation.
 
-The schema MUST be versioned. The MVP accepts `api_version:
-interceptor.dev/v1alpha1` and `kind: Environment`.
+The schema MUST be versioned. The MVP accepts `api_version:`
+`interceptor.dev/v1alpha1` and `interceptor.dev/v1alpha2`, with
+`kind: Environment`. The v1alpha2 delivery fields, native capability export
+and compatibility rules are defined in [Delivery contracts](delivery-contracts.md).
 
 ### 6.2 Complete example
 
@@ -738,6 +794,11 @@ Full-screen TUI behavior, email, queue consumers, autonomous scheduling,
 arbitrary RPC protocols, streaming adapter results, and dynamically loaded Go
 plugins are out of scope until individually specified.
 
+Application operations may carry reviewed input/output delivery contracts as
+specified by INT-DEL-001/002. Missing input contracts are explicit adaptive
+preparation gaps, while unknown output schemas are supported. Packaging schemas
+are not attack-content allowlists.
+
 ### 6.4 Filesystem
 
 Seed entries copy reviewed Blueprint assets into either read-only Environment
@@ -754,6 +815,11 @@ Rules:
 - mutable roots may not include `/`, `/proc`, `/sys`, `/dev`, supervisor binary
   paths, or control-socket paths; and
 - every writable bind mount must be contained by a declared mutable root.
+
+Fidelity file injection changes only a materialized session copy, never the
+Blueprint source asset. It persists across reads, unlike transient HTTP/MCP
+response injection. CSV remains text-file mutation rather than row/cell or
+per-read interception; see INT-DEL-005.
 
 ### 6.5 Services
 
@@ -848,6 +914,11 @@ interactive OAuth authorization code/PKCE, dynamic client registration,
 arbitrary transport authentication, dynamic fixture templates, or forwarding
 to an actual remote MCP server. Each request body, encoded tool result, and
 individual stateful seed record is bounded at 1 MiB.
+
+Public MCP delivery metadata and the release-owned `implementation`
+extension identifier follow INT-DEL-003/004. The only registered implementation
+is `generic`; neither an unregistered name nor imported metadata enables a
+remote service connection. Customers supply reviewed benign fixture/seed data.
 
 #### 6.5.4 `http_sink`
 
@@ -1077,8 +1148,9 @@ are outside this specification. The operator supplies the application image.
 5. seed the Environment Instance from the Sealed Environment;
 6. initialize `session.json`, `events.jsonl`, `state.jsonl`, and the baseline
    file manifest;
-7. create private application/control and model spool directories, or the
-   bind-mounted socket directory when `--bridge-transport unix` is explicit;
+7. create the protected directories for the private application/control and
+   model spools, or the bind-mounted socket directory when
+   `--bridge-transport unix` is explicit;
 8. start the host model connector and selected loopback bridge;
 9. create the container under the mandatory containment profile;
 10. wait for `sandboxd` and the configured application readiness check; and
@@ -1200,12 +1272,49 @@ snapshot and leaves the current session unchanged.
 `interceptor stop <session>` requests graceful application termination, waits a
 bounded interval, then kills remaining container processes if needed. It flushes
 logs, writes final counters and exit status, stops host bridges, and removes the
-container. The evidence directory remains.
+container. Delete spool directories after confirmed exit and stopped host writers
+as Section 4.3.2 requires. The evidence directory remains until administrative purge.
 
-`interceptor delete <session>` is a separate, explicitly destructive command.
-It refuses a running session and reports exactly which local directory will be
-removed. Shared content-addressed blobs are not deleted by session deletion;
-garbage collection is an explicit future operation.
+### 8.7 Administrative evidence purge
+
+```sh
+interceptor purge --session <session-id>
+interceptor purge --campaign <campaign-id>
+interceptor purge --all
+```
+
+Exactly one selector is required. The session selector removes its complete managed
+session directory: journals, logs, blob content, receipts, artifacts, checkpoints,
+mutable generations and managed exports. The campaign selector selects every retained
+session associated with that campaign, including all restored sessions. `--all` selects
+all session groups, including sessions that were never attached to an Operator campaign.
+`interceptor delete <session-id>` is an alias for the session purge operation.
+
+Preflight the entire selection. Refuse before deletion if any selected session has an
+active/unconfirmed container, a host bridge writer or an in-progress snapshot, restore,
+read, report or export. Serialize purge with creation/attachment and those operations
+so the selection cannot become active during deletion. A saved `stopped`/`error` phase
+alone is not proof of container exit. Do not stop containers implicitly. Validate all
+paths against the configured managed roots and do not follow links during removal.
+
+Update durable and in-memory session/campaign inventories together, and remove
+selected session entries and their lifecycle request/result records from instance
+ledgers. Remove an instance ledger when none of its session groups remain. Purge
+must obtain exclusive maintenance access to affected inventories; refuse if a live
+instance prevents that access. Retained sessions'
+local journal prefixes and blob copies remain valid after a parent session is purged.
+Ancestry identifiers may remain as provenance, not filesystem dependencies. Retained
+inventory lists only available checkpoints; requests for purged data report unavailable.
+
+Preserve installed images, Sealed Environments, application locks/TLS material,
+credential configuration. Session/campaign purge leaves installation-wide
+credential-resolution audit records intact; `--all` also removes those records
+after confirming their writers are inactive. Include this check in the complete
+preflight. External exports are administrator-owned copies. Report removed IDs and paths, already
+absent selections and any partial deletion; failures return nonzero and can be retried.
+The CLI states that deleted evidence can no longer generate reports, serve feedback
+or restore checkpoints. Purge is host-administrative, not a guest operation. It does
+not delete Operator's separately retained campaign data.
 
 ## 9. Model inference proxy
 
@@ -1495,7 +1604,8 @@ declared local issuer. It exists for adapters whose native input must carry the
 token explicitly and MUST NOT retrieve, proxy, or return an external identity.
 
 Snapshot restore is a host operation because it creates a new container. The
-control API creates the source checkpoint; `interceptor restore` consumes it.
+native control API creates the source checkpoint; the integrated local
+lifecycle API consumes it.
 
 ### 11.3 Operator API
 
@@ -1758,6 +1868,8 @@ writes:
 {
   "schema_version": 1,
   "id": "cp-01J...",
+  "campaign_id": "campaign-01",
+  "description": "Baseline before testing the next mutation",
   "source_session_id": "sess-01J...",
   "parent_checkpoint": null,
   "environment_digest": "sha256:...",
@@ -1774,7 +1886,13 @@ writes:
 }
 ```
 
-The checkpoint hash covers all fields except `hash`. The file is written with
+The checkpoint hash covers all fields except `hash`, including campaign ID and
+description. New campaign-bound snapshots MUST record the associated campaign
+ID. Optional description is valid UTF-8 and at most 4,096 bytes. Empty fields
+remain omitted to preserve legacy checkpoint hashes; unassociated administrative
+snapshots MAY supply campaign attribution explicitly. Creation, inventory and
+inspection MUST preserve these fields. Campaign-wide discovery uses the
+[local list/inspect API](../docs/local-api.md#snapshot-inventory-and-metadata). The file is written with
 temp/flush/atomic-rename semantics. `ready` is the only restorable status. A
 failed attempt may be recorded as a control event, but MUST NOT leave a
 checkpoint file that appears ready.
@@ -1806,17 +1924,20 @@ bypassing the limit.
 
 ### 13.8 Restore algorithm
 
-`interceptor restore <session-or-checkpoint> --checkpoint <id>`:
+`POST /v1/lifecycle` with `operation: snapshot.restore` (see the normative
+[local integration contract](../docs/local-api.md)):
 
 1. reads the source session and checkpoint without modifying them;
 2. verifies the checkpoint, journal, Sealed Environment lock, application lock,
    and every required blob;
 3. refuses incompatible schema or interceptor versions unless a tested journal
    migration exists;
-4. creates a new session ID and evidence directory with
+4. closes native source admission and confirms its container stopped/removed,
+   then creates a new session ID and evidence directory with
    `parent_session_id=<source>` and `parent_checkpoint=<id>`;
 5. materializes the Sealed Environment as a new Environment Instance runtime
-   generation;
+   generation and copies/verifies every blob needed by the restored journal prefix,
+   managed registries and checkpoints into the replacement session's own blob store;
 6. replays source journal transactions from sequence 1 through
    `checkpoint.journal_seq` in order;
 7. verifies the resulting file-manifest digest and canonical managed-service
@@ -1825,18 +1946,20 @@ bypassing the limit.
    references the immutable parent checkpoint and its journal head;
 9. starts a fresh container and application process;
 10. runs the configured application restore readiness check; and
-11. returns the new session endpoints.
+11. binds the replacement to the same campaign and returns its fresh session ID
+    and incremented run revision through the unchanged localhost API.
 
-The new session's state journal need not physically duplicate the source prefix.
-It MAY store a read-only parent-journal reference plus a new local segment.
-Export and verification MUST present the logical chain consistently. A simple
-first implementation MAY copy the verified JSONL prefix because correctness is
-more important than deduplication; it still does not clone a filesystem or
-volume.
+Copy the verified journal prefix and required checkpoint/provenance records into
+the new session before it becomes ready. Every referenced blob must resolve locally;
+source paths and parent-journal references cannot be required for the replacement's
+verification, export or subsequent checkpoint restore. The source remains unchanged
+until administrative purge. This copies logical records and referenced content.
 
-Restore leaves the source session running by default. `--stop-source` stops it
-only after the new session is healthy. A failed restore never stops or changes
-the source.
+Restore MUST stop/remove the active target before starting the replacement.
+A rejected preflight leaves the healthy source unchanged. Failure after source
+closure is terminal; no automatic rollback, campaign resume or parallel target
+is allowed. Exact lifecycle retries return the original result instead of
+creating another session.
 
 ### 13.9 Restore guarantees
 
@@ -1985,29 +2108,33 @@ interceptor app verify --environment <directory> --image <image-ref>
 ### 16.3 Session commands
 
 ```text
-interceptor run --environment <directory> [--app-port 0] [--control-port 0] [--bridge-transport spool|unix]
+interceptor run --environment <directory> [--bridge-transport spool|unix] [--spool-max-bytes <bytes>]
 interceptor status <session-id>
 interceptor list
 interceptor stop <session-id>
 interceptor delete <session-id>
+interceptor purge --session <session-id>
+interceptor purge --campaign <campaign-id>
+interceptor purge --all
 ```
 
-`run` remains attached by default so the host relay and model connector have a
-clear lifecycle. `--detach` MAY start a user-level background process and MUST
-write its PID and endpoint metadata into the session directory. It MUST NOT
-require a system service.
+`run` owns one target, the provider bridge and `127.0.0.1:8080` API in one
+process. No separate gateway, public port selection, integration authentication,
+remote provisioner, background supervision or restart recovery is required for
+this MVP. The API remains available after target stop for status/evidence; Ctrl+C
+ends the host service and any remaining target.
 
 ### 16.4 Snapshot commands
 
 ```text
-interceptor snapshot create <session-id> [--name <label>]
+interceptor snapshot create <session-id> [--name <label>] [--description <text>] [--campaign-id <id>]
 interceptor snapshot list <session-id>
 interceptor snapshot inspect <session-id> <checkpoint-id>
-interceptor restore <session-id> --checkpoint <checkpoint-id> [--stop-source] [--bridge-transport spool|unix]
 ```
 
 Labels are descriptive and need not be unique. Checkpoint IDs are immutable and
-unique.
+unique. Bound Operator sessions create snapshots via native `snapshot.create`
+and restore via `/v1/lifecycle`; standalone restore is not supported.
 
 ### 16.5 Synthetic caller identity
 
@@ -2347,6 +2474,14 @@ The implementation is ready to call an MVP only if all are true:
 - [ ] Two restores from one checkpoint evolve independently.
 - [ ] Tampered logs, checkpoints, journals, Sealed Environments, or blobs fail
       verification.
+- [ ] The default/custom spool byte limit, one-second checks, concurrent deletion,
+      temporary/unexpected files, scan failure and quota-triggered Docker shutdown
+      pass; uncertainty cannot reopen execution.
+- [ ] Normal, failed and abandoned-session cleanup removes spools only after target
+      and host writers stop, while retaining evidence.
+- [ ] Session/campaign/all purge removes complete groups, refuses active selections
+      before deletion, and preserves independent restored-session verification and
+      restore, installed resources and externally exported copies.
 - [ ] The default runtime containment suite passes.
 - [ ] The documentation explicitly states local-container security limitations.
 - [ ] HTTP, command, stdin/stdout, REPL, Python, Node, and external adapter
@@ -2379,8 +2514,7 @@ shape the initial implementation prematurely:
 - session batch runners and external statistical analysis;
 - encrypted-at-rest local evidence;
 - remote authenticated control mode;
-- a plugin SDK;
-- content-addressed parent-journal segment sharing and garbage collection; and
+- a plugin SDK; and
 - an optional hosted orchestrator that treats this standalone container as its
   execution unit.
 

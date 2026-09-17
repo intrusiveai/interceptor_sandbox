@@ -37,6 +37,31 @@ Configure the agent's MCP client explicitly with the local URL. Interceptor
 does not redirect a hard-coded remote URL and does not copy real MCP
 credentials into the container.
 
+## Exported contracts and implementation selection
+
+With Blueprint `interceptor.dev/v1alpha2`, a service may explicitly set
+`implementation: generic` (also the default) and `export_contracts: true`.
+The capability export then includes reviewed tool descriptions and schemas, not
+private fixture matches/results or seed records. Optional per-tool
+`contract_basis` is `synthetic` by default; reviewed metadata may instead
+be `provider-declared`, `source-derived` or `observed`.
+Optional `delivery_examples` lists public `id`/`input`/`output`
+pairs. Unknown output omits `output_schema`, independently of input
+provenance. Output schemas describe `structuredContent`, not the outer
+JSON-RPC envelope or arbitrary text content.
+
+Contract export uses a bounded offline JSON Schema subset and validates public
+examples; it does not upgrade the managed MCP handler to full JSON Schema
+execution. See [Delivery contracts](delivery-contracts.md) for exact bounds.
+Import metadata before sealing from reviewed documentation, source or authorized
+sanitized samples. Samples are not exhaustive schemas and the sandbox does not
+contact the original server.
+
+The implementation identifier is a closed extension point for reviewed
+first-class service implementations sharing the existing seed, injection,
+identity, evidence and snapshot behavior. Only `generic` ships; unavailable
+names (including Jira/Zendesk) fail validation. It is not a plugin path or URL.
+
 ## Optional OAuth protection
 
 An MCP service can require a synthetic identity:

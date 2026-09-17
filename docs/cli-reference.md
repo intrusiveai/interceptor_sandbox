@@ -14,8 +14,8 @@ This page is primarily a lookup reference. For a guided first run, use
 [Getting started](getting-started.md).
 
 `INTERCEPTOR_DATA_DIR` overrides the platform user configuration directory used
-for session data, application locks, and blobs. `INTERCEPTOR_PROVIDER_BASE_URL`
-can supply the default provider URL for `run` and `restore`.
+for session groups and application locks. `INTERCEPTOR_PROVIDER_BASE_URL`
+can supply the default provider URL for `run`; managed restore retains the original configuration.
 
 ## Version and help
 
@@ -100,10 +100,14 @@ interceptor run \
   [--production] \
   [--aws-region <region>] \
   [--aws-profile <profile>] \
-  [--app-port 0] \
-  [--control-port 0] \
-  [--bridge-transport spool|unix]
+  [--bridge-transport spool|unix] \
+  [--spool-max-bytes <bytes>]
 ```
+
+`--spool-max-bytes` takes a positive integer, overriding
+`INTERCEPTOR_SPOOL_MAX_BYTES`; default 536870912 bytes (512 MiB). The host checks
+combined HTTP/model spool file lengths every second and terminates through Docker
+on excess. Managed restore retains the effective value. See the [file-management rules](file-management.md).
 
 Required:
 
@@ -137,37 +141,21 @@ and current feature limits.
 `--feedback-profile` chooses one profile declared by the sealed Environment and
 cannot change during the session. The default is `black-box`.
 
-Ports default to `0`, allowing the OS to choose unused loopback ports. The
-bridge defaults to portable `spool`. Select `unix` only on a compatible native
-Linux Docker host; see [Architecture](architecture.md#hostcontainer-transports).
+The public API is fixed at `127.0.0.1:8080`; only one instance is supported.
+The private bridge defaults to `spool`; select `unix` only on a supported native
+Linux host. `run` stays attached after target stop for status/evidence. Ctrl+C
+ends the service and any remaining target.
 
-The process stays open while the session runs because it provides the local URLs
-and the carefully limited connection to the model provider. Closing it requests
-a graceful stop.
-
-## Capabilities and Cross-VM gateway
+## Capabilities and integrated local API
 
 ```sh
 interceptor capabilities --environment <directory>
 ```
 
-Prints the deterministic CapabilityManifest without starting a session.
-
-```sh
-interceptor gateway <session-id> \
-  --listen <host:port> \
-  --auth-principal <id> \
-  [--production --auth-token-credential-id <id> --credential-config <file> | \
-   --auth-token-env <name>]
-```
-
-Serves typed Operator operations for one running session. In production this is
-a private HTTP backend behind an enterprise-managed TLS load balancer. The
-shared integration token comes from a supported host secret store and is used
-only to issue, inspect, and revoke short-lived opaque execution leases. The
-environment-variable source defaults to `INTERCEPTOR_GATEWAY_TOKEN`, is for
-development only, and is rejected by `--production`. See [Cross-VM
-gateway](cross-vm-gateway.md).
+Prints the deterministic manifest without starting a session. `interceptor run`
+automatically serves the [local Operator API](local-api.md), including attach,
+v1alpha2 experiments, snapshot restore, confirmed stop and evidence. There is no
+separate `gateway` command, integration token or authentication configuration.
 
 ## Inspect sessions
 
@@ -183,28 +171,39 @@ to be running.
 Session phases are `creating`, `starting`, `running`, `quiescing`, `stopping`,
 `stopped`, and `error`.
 
-## Stop and delete
+## Stop and purge
 
 ```sh
 interceptor stop <session-id>
 ```
 
-Requests an orderly supervisor stop, stops and removes the container, and marks
-the session stopped. Repeating it for a stopped session is harmless.
+Stop the supervisor/container and host bridge writers, confirm exit and remove
+transient spool directories. Retain journals and artifacts until explicit purge.
+An already stopped session still retries pending spool cleanup.
 
 ```sh
+interceptor purge --session <session-id>
+interceptor purge --campaign <campaign-id>
+interceptor purge --all
 interceptor delete <session-id>
 ```
 
-Deletes the local folder for a stopped or failed session. Running sessions are
-refused. Shared large files are retained because another session may refer to
-them, so this command neither securely erases all content nor reclaims all disk
-space.
+Use exactly one purge selector. `delete` aliases session purge. Campaign purge
+includes every associated restored session; all includes unassociated sessions.
+Remove the selected groups' journals, logs, blobs, receipts, checkpoints, mutable
+generations and managed exports. Preflight all selected groups and refuse active or
+unconfirmed containers, bridge writers or ongoing read/report/export/restore work
+before deleting any group. Preserve configuration, installation assets and explicit
+external exports. `--all` also removes the host credential-resolution audit after
+confirming its writers are inactive during preflight. Report IDs, deletion failures
+and the loss of future reporting,
+feedback and checkpoint restore. See [file management](file-management.md) for
+complete rules.
 
 ## Snapshots and restore
 
 ```sh
-interceptor snapshot create <session-id> [--name <label>] [--json]
+interceptor snapshot create <session-id> [--name <label>] [--description <text>] [--campaign-id <id>] [--json]
 interceptor snapshot list <session-id> [--json]
 interceptor snapshot inspect <session-id> <checkpoint-id>
 ```
@@ -212,34 +211,21 @@ interceptor snapshot inspect <session-id> <checkpoint-id>
 Create asks the application to reach a safe save point and records a logical
 restore point. Inspect always prints the detailed checkpoint JSON.
 
-```sh
-interceptor restore <source-session-id> \
-  --checkpoint <checkpoint-id> \
-  [--model-provider openai-chat|openai-responses|bedrock-converse|litellm|anthropic-messages|gemini-api|vertex-gemini|azure-openai] \
-  --allow-model <model> \
-  [--allow-model <model> ...] \
-  [--provider-base-url <url>] \
-  [--model-api-key-env <variable>] \
-  [--model-credential-id <id> --credential-config <file>] \
-  [--provider-auth none|api-key|workload-token|workload-identity] \
-  [--provider-api-version <version>] \
-  [--feedback-profile <profile>] \
-  [--production] \
-  [--aws-region <region>] \
-  [--aws-profile <profile>] \
-  [--app-port 0] \
-  [--control-port 0] \
-  [--bridge-transport spool|unix] \
-  [--stop-source]
-```
+Restore uses `POST /v1/lifecycle` on the running local service. Supply the bound
+campaign, current session ID, stable operation ID, `operation: snapshot.restore`
+and checkpoint ID. The source stops before the replacement starts. The response
+returns a fresh native session and incremented run revision, with the original
+provider/image/transport configuration. See [request examples](local-api.md).
+The standalone `restore` command and `--stop-source` are no longer supported.
+For a bound session, create snapshots through native `snapshot.create`; the
+administrator inventory/inspection commands above remain available.
+`--description` records the checkpoint purpose (valid UTF-8, at most 4,096 bytes).
+`--campaign-id` optionally attributes an unassociated administrative snapshot;
+it does not bypass campaign attachment. Bound snapshot creation derives campaign
+ID from the native request envelope. `list` displays campaign and description;
+`create --json`, `list --json` and `inspect` preserve both in checkpoint JSON.
+Operator can list/inspect all retained campaign sessions through the local API.
 
-Restore checks the snapshot for missing or changed data, rebuilds its saved state
-in a new session, and remains attached to that new session.
-Provider, allowlist, credential-source, and transport choices are supplied
-again because they are not stored as restorable credentials and a restored
-session may intentionally select a different host provider or either supported
-transport. `--stop-source` stops the source only after the restored session is
-healthy.
 
 ## Synthetic caller identity
 

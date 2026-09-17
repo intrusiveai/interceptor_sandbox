@@ -26,6 +26,29 @@ application's real storage reads, caching, parsing, or multi-step behavior.
 Reports retain the mode so readers can tell which kind of test produced a
 result.
 
+## Benign source records and injection lifetime
+
+Blueprint seeds and fixture assets remain unchanged. MCP/HTTP simulation
+injections alter only the served response, not the stored benign record.
+An ordinary state-changing service call still has its normal effects.
+MCP placement is relative to the successful result object: for example,
+`/structuredContent/description` selects a record field and
+`/content/0/text` selects a text block. Changing one does not mirror the
+payload into the other. A missing pointer or wrong type is a recorded placement
+failure, not permission to invent a field. A `once` injection is consumed on
+its first matching response even if placement fails.
+
+Existing file fidelity injection is deliberately different: writable seed
+files are copied into each session. Injection changes that session's file and
+the change remains for later reads; the Blueprint source file is never the
+write target. A fresh session starts from the original source unless restoring
+an explicit snapshot. Disabling an injection does not undo an existing write.
+
+For CSV seeds this is text-file mutation, not a CSV row/cell API or per-read
+rewrite. To change one CSV record, supply a correctly formatted replacement
+file using the existing root replacement operation. JSON files keep their
+existing JSON-pointer behavior. Read-only source assets remain non-mutable.
+
 ## Definition schema
 
 ```json

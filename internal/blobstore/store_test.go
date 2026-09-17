@@ -3,6 +3,7 @@ package blobstore
 import (
 	"context"
 	"io"
+	"os"
 	"strings"
 	"testing"
 )
@@ -44,5 +45,40 @@ func TestPutEnforcesLimitAndDigestPaths(t *testing.T) {
 	}
 	if _, _, err := store.Open("../../etc/passwd"); err == nil {
 		t.Fatal("expected invalid digest rejection")
+	}
+}
+
+func TestIndependentCopySurvivesSourceRemoval(t *testing.T) {
+	sourceRoot := t.TempDir()
+	destinationRoot := t.TempDir()
+	source, err := Open(sourceRoot, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination, err := Open(destinationRoot, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	object, err := source.Put(context.Background(), strings.NewReader("checkpoint body"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.CopyTo(context.Background(), destination); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(sourceRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := destination.Verify(object.Digest); err != nil {
+		t.Fatal("replacement depends on source", err)
+	}
+	reader, _, err := destination.Open(object.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	if err != nil || string(body) != "checkpoint body" {
+		t.Fatal(string(body), err)
 	}
 }

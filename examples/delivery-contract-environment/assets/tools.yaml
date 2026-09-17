@@ -1,0 +1,45 @@
+tools:
+  - name: get_ticket
+    description: Read a synthetic ticket record
+    contract_basis: synthetic
+    input_schema:
+      type: object
+      properties:
+        id: {type: string, description: Ticket key}
+      required: [id]
+      additionalProperties: false
+    output_schema:
+      type: object
+      properties:
+        id: {type: string}
+        description: {type: string, description: Benign customer-supplied ticket text}
+        status: {type: string}
+      required: [id, description, status]
+      additionalProperties: false
+    delivery_examples:
+      - id: benign
+        input: {id: T-1}
+        output: {id: T-1, description: An illustrative ticket, status: open}
+    behavior:
+      kind: stateful
+      action: get
+      collection: tickets
+      key_argument: id
+  - name: search_notes
+    description: Search synthetic notes; output structure is not guaranteed
+    contract_basis: observed
+    input_schema:
+      type: object
+      properties:
+        query: {type: string}
+      required: [query]
+    behavior:
+      kind: fixture
+      fixtures:
+        - id: onboarding
+          priority: 1
+          match: {query: onboarding}
+          result:
+            content:
+              - type: text
+                text: Benign private fixture note for onboarding.

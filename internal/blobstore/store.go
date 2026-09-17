@@ -175,3 +175,40 @@ func (r contextReader) Read(buffer []byte) (int, error) {
 		return r.reader.Read(buffer)
 	}
 }
+
+// CopyTo creates independently owned, verified copies; no hard links or shared paths.
+func (s *Store) CopyTo(ctx context.Context, destination *Store) error {
+	base := filepath.Join(s.root, "sha256")
+	return filepath.WalkDir(base, func(path string, entry os.DirEntry, err error) error {
+		if os.IsNotExist(err) && path == base {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		relative, err := filepath.Rel(base, path)
+		if err != nil {
+			return err
+		}
+		value := "sha256:" + strings.ReplaceAll(relative, string(filepath.Separator), "")
+		reader, object, err := s.Open(value)
+		if err != nil {
+			return err
+		}
+		copied, err := destination.Put(ctx, reader)
+		reader.Close()
+		if err != nil {
+			return err
+		}
+		if copied != object {
+			return fmt.Errorf("copied blob identity mismatch: %s", value)
+		}
+		return nil
+	})
+}

@@ -29,27 +29,30 @@ operator / harness
   +---------------------------------------------------------------+
 ```
 
-For production Operator integration, the attack engine does not receive the
-local control URL. A trusted Operator Runtime uses the separately authenticated
-Cross-VM gateway, whose typed dispatcher is the only path to the private
-control bridge:
+For Operator integration, the network-disabled attack engine talks only to the
+trusted Operator broker over inherited pipes. Operator calls the integrated
+host service on `127.0.0.1:8080`, without integration authentication:
 
 ```text
-Operator guest -> authenticated Operator broker -> TLS load balancer
-               -> private Cross-VM HTTP gateway
-               -> typed local control operation -> sandboxd
+Operator guest -> typed Operator pipe/broker -> localhost Interceptor API
+               -> private spool/Unix bridge -> sandboxd
 ```
 
-A secret-store-backed integration token lets the trusted broker request a
-short-lived opaque ExecutionLease. Its distinct bearer token binds the path to
-one Operator VM, campaign, session, sealed environment/application, capability
-manifest, feedback profile, operation set, and budget. AEF is a pre/post-run
-consumer, not a live caller. See [Cross-VM gateway](cross-vm-gateway.md).
+`interceptor run` owns both the service and target. The first attach binds a
+campaign; the supervisor retains native v1alpha2 campaign access, closure, operation
+records and budgets. The host service adds sequential restore/confirmed stop and
+protected evidence download. No gateway process, lease or restart protocol is
+needed. See [Local integration](local-api.md).
 
 The same compiled Go program is both the host command-line tool and the
 in-container supervisor. The wrapper image combines that program with the exact
 approved application image. The supervisor starts the application, runs the
 simulated services, records activity, and coordinates safe snapshot points.
+
+Host file management applies a configurable 512 MiB default aggregate spool limit
+with one-second checks and Docker shutdown on excess. Shutdown removes spools;
+retained evidence and blobs belong to independently purgeable session groups. See
+[file management](file-management.md) for configuration and cleanup rules.
 
 ## How the application becomes a sandbox image
 
@@ -116,11 +119,9 @@ The local interface is split across the host and container:
 | --- | --- |
 | Application process | Its native interface: local HTTP, one-shot command, stdin/stdout or REPL stream, Python/Node module, or external adapter protocol. |
 | `sandboxd` inside the container | The selected application-interface adapter, closed DNS resolver, HTTP/HTTPS hostname routers, simulated HTTP and MCP services, synthetic identity issuers, attacker sinks, the model proxy at `MODEL_BASE_URL`, and the private application/control bridge. |
-| `interceptor run` on the host | The printed local application and control URLs, plus the connector that sends approved model requests to the configured provider. |
-| Optional `interceptor gateway` host process | Integration-token-authenticated, lease-limited typed operations for a separate Operator Runtime. |
+| `interceptor run` on the host | Integrated localhost Operator API, target lifecycle, evidence export and fixed-provider model connector. |
 
-Requests sent to the printed application or control URL cross the private
-bridge to `sandboxd`. Model requests travel in the other direction: the
+Typed native operations cross the private bridge to `sandboxd`. Model requests travel in the other direction: the
 application calls the in-container model proxy, which crosses the private bridge
 to the host connector. The provider credential exists only on that host side.
 
@@ -165,7 +166,7 @@ invocation, cancellation behavior, and translating a result. Adding a future
 interface therefore does not require a new host/container transport or control
 API.
 
-The printed host application URL remains HTTP because it is a convenient local
+The integrated host API uses loopback HTTP under the trusted local-host
 harness boundary. HTTP applications retain their native declared paths.
 Non-HTTP applications receive synthesized `POST /operations/<id>` paths; that
 HTTP request does not imply that the application itself contains a web server.

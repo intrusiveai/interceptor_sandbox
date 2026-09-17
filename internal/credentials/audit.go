@@ -3,6 +3,7 @@ package credentials
 import (
 	"encoding/json"
 	"errors"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/filemanagement"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -26,6 +27,11 @@ func AppendAudit(dataRoot string, event AuditEvent) error {
 	if dataRoot == "" || event.CredentialID == "" || event.ResolvedAt.IsZero() || event.Outcome != "resolved" && event.Outcome != "failed" {
 		return errors.New("credential audit event is invalid")
 	}
+	maintenance, err := filemanagement.Lock(dataRoot, "maintenance", false)
+	if err != nil {
+		return err
+	}
+	defer maintenance.Close()
 	event.APIVersion = AuditVersion
 	directory := filepath.Join(dataRoot, "audit")
 	if err := os.MkdirAll(directory, 0o700); err != nil {

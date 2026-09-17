@@ -2,34 +2,46 @@ package adaptive
 
 import (
 	"encoding/json"
+	"errors"
 	"sort"
 
 	"github.com/intrusive-ai/interceptor-sandbox/internal/bridge"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/buildinfo"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/delivery"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/digest"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/environment"
 )
 
+type FeedbackCapability struct {
+	ViewVersion       string   `json:"view_version"`
+	SelectionModes    []string `json:"selection_modes"`
+	Kinds             []string `json:"kinds"`
+	MaximumChunkBytes int      `json:"maximum_chunk_bytes"`
+	MaximumEntries    int      `json:"maximum_entries"`
+}
+
 type CapabilityManifest struct {
-	APIVersion         string                    `json:"api_version"`
-	Kind               string                    `json:"kind"`
-	InterceptorRelease string                    `json:"interceptor_release"`
-	EnvironmentDigest  string                    `json:"environment_digest"`
-	ApplicationDigest  string                    `json:"application_digest"`
-	Target             TargetCapability          `json:"target"`
-	FeedbackProfiles   []string                  `json:"feedback_profiles"`
-	Operations         []OperationCapability     `json:"operations"`
-	CrossVMOperations  []string                  `json:"cross_vm_operations"`
-	InjectionSurfaces  []string                  `json:"injection_surfaces"`
-	InjectionProfiles  []InjectionProfile        `json:"injection_profiles"`
-	Services           []ServiceCapability       `json:"services"`
-	FileNamespaces     []FileNamespaceCapability `json:"file_namespaces,omitempty"`
-	Oracles            []string                  `json:"oracle_types"`
-	ModelProviders     []ModelProviderCapability `json:"model_providers"`
-	Network            NetworkCapability         `json:"network"`
-	SnapshotCapable    bool                      `json:"snapshot_capable"`
-	Limits             CapabilityLimits          `json:"limits"`
-	Digest             string                    `json:"digest"`
+	Feedback              FeedbackCapability        `json:"feedback"`
+	DeliverySchemaProfile string                    `json:"delivery_schema_profile,omitempty"`
+	APIVersion            string                    `json:"api_version"`
+	Kind                  string                    `json:"kind"`
+	InterceptorRelease    string                    `json:"interceptor_release"`
+	EnvironmentDigest     string                    `json:"environment_digest"`
+	ApplicationDigest     string                    `json:"application_digest"`
+	Target                TargetCapability          `json:"target"`
+	FeedbackProfiles      []string                  `json:"feedback_profiles"`
+	Operations            []OperationCapability     `json:"operations"`
+	CrossVMOperations     []string                  `json:"cross_vm_operations"`
+	InjectionSurfaces     []string                  `json:"injection_surfaces"`
+	InjectionProfiles     []InjectionProfile        `json:"injection_profiles"`
+	Services              []ServiceCapability       `json:"services"`
+	FileNamespaces        []FileNamespaceCapability `json:"file_namespaces,omitempty"`
+	Oracles               []string                  `json:"oracle_types"`
+	ModelProviders        []ModelProviderCapability `json:"model_providers"`
+	Network               NetworkCapability         `json:"network"`
+	SnapshotCapable       bool                      `json:"snapshot_capable"`
+	Limits                CapabilityLimits          `json:"limits"`
+	Digest                string                    `json:"digest"`
 }
 type TargetCapability struct {
 	Name      string `json:"name"`
@@ -37,9 +49,12 @@ type TargetCapability struct {
 	Interface string `json:"interface"`
 }
 type OperationCapability struct {
-	ID     string `json:"id"`
-	Method string `json:"method,omitempty"`
-	Path   string `json:"path,omitempty"`
+	Delivery          *delivery.Contract `json:"delivery,omitempty"`
+	DeliveryStatus    string             `json:"delivery_status,omitempty"`
+	MaximumInputBytes int64              `json:"maximum_input_bytes,omitempty"`
+	ID                string             `json:"id"`
+	Method            string             `json:"method,omitempty"`
+	Path              string             `json:"path,omitempty"`
 }
 type InjectionProfile struct {
 	Surface        string   `json:"surface"`
@@ -49,6 +64,8 @@ type InjectionProfile struct {
 	Carriers       []string `json:"carriers"`
 }
 type ServiceCapability struct {
+	Implementation       string                       `json:"implementation,omitempty"`
+	Endpoints            []delivery.Endpoint          `json:"endpoints,omitempty"`
 	ID                   string                       `json:"id"`
 	Kind                 string                       `json:"kind"`
 	Role                 string                       `json:"role"`
@@ -108,7 +125,11 @@ type CapabilityLimits struct {
 }
 
 func BuildCapabilityManifest(blueprint *environment.Blueprint, environmentDigest, applicationDigest string) (CapabilityManifest, error) {
-	m := CapabilityManifest{APIVersion: CapabilityManifestVersion, Kind: "CapabilityManifest", InterceptorRelease: buildinfo.Version, EnvironmentDigest: environmentDigest, ApplicationDigest: applicationDigest, Target: TargetCapability{Name: blueprint.Metadata.Name, Version: blueprint.Metadata.Version, Interface: blueprint.Application.Interface.Adapter}, FeedbackProfiles: append([]string(nil), blueprint.Adaptive.FeedbackProfiles...), InjectionSurfaces: []string{"model_tool_result"}, SnapshotCapable: blueprint.Application.Persistence.SnapshotCapable, Limits: CapabilityLimits{MaximumAttempts: blueprint.Adaptive.MaxAttempts, MaximumArtifacts: blueprint.Adaptive.MaxArtifacts, MaximumArtifactBytes: blueprint.Limits.MaxBlobBytes, MaximumInvocations: blueprint.Limits.MaxTurns, MaximumSnapshots: blueprint.Limits.MaxSnapshots}}
+	m := CapabilityManifest{Feedback: FeedbackCapability{ViewVersion: ObservationViewVersion, SelectionModes: []string{"all-permitted", "selected"}, Kinds: append([]string(nil), FeedbackKinds...), MaximumChunkBytes: MaxFeedbackChunk, MaximumEntries: MaxFeedbackEntries}, APIVersion: CapabilityManifestVersion, Kind: "CapabilityManifest", InterceptorRelease: buildinfo.Version, EnvironmentDigest: environmentDigest, ApplicationDigest: applicationDigest, Target: TargetCapability{Name: blueprint.Metadata.Name, Version: blueprint.Metadata.Version, Interface: blueprint.Application.Interface.Adapter}, FeedbackProfiles: append([]string(nil), blueprint.Adaptive.FeedbackProfiles...), InjectionSurfaces: []string{"model_tool_result"}, SnapshotCapable: blueprint.Application.Persistence.SnapshotCapable, Limits: CapabilityLimits{MaximumAttempts: blueprint.Adaptive.MaxAttempts, MaximumArtifacts: blueprint.Adaptive.MaxArtifacts, MaximumArtifactBytes: blueprint.Limits.MaxBlobBytes, MaximumInvocations: blueprint.Limits.MaxTurns, MaximumSnapshots: blueprint.Limits.MaxSnapshots}}
+	if blueprint.APIVersion == environment.DeliveryAPIVersion {
+		m.APIVersion = DeliveryCapabilityManifestVersion
+		m.DeliverySchemaProfile = delivery.SchemaProfile
+	}
 	m.Network = NetworkCapability{
 		DNS:   DNSCapability{Enabled: blueprint.Network.DNS.Enabled, UnknownPolicy: blueprint.Network.DNS.UnknownPolicy, Upstream: false, MaximumQueries: blueprint.Network.DNS.MaxQueries},
 		HTTP:  blueprint.Network.HTTP.Enabled,
@@ -121,10 +142,56 @@ func BuildCapabilityManifest(blueprint *environment.Blueprint, environmentDigest
 		m.Network.HTTPS.MinimumVersion = "TLS1.2"
 	}
 	for _, op := range blueprint.Application.Interface.Operations {
-		m.Operations = append(m.Operations, OperationCapability{ID: op.ID, Method: op.Method, Path: op.Path})
+		capability := OperationCapability{ID: op.ID, Method: op.Method, Path: op.Path}
+		if blueprint.APIVersion == environment.DeliveryAPIVersion {
+			capability.DeliveryStatus = "missing-input-contract"
+			capability.MaximumInputBytes = delivery.MaxBodyBytes
+			if blueprint.Limits.MaxBlobBytes > 0 && blueprint.Limits.MaxBlobBytes < capability.MaximumInputBytes {
+				capability.MaximumInputBytes = blueprint.Limits.MaxBlobBytes
+			}
+			if op.DeliveryAsset != "" && op.ResolvedDelivery == nil {
+				return CapabilityManifest{}, errors.New("delivery asset must be resolved from a verified environment")
+			}
+			contract := op.ResolvedDelivery
+			if contract == nil {
+				contract = op.Delivery
+			}
+			if err := delivery.Validate(contract); err != nil {
+				return CapabilityManifest{}, err
+			}
+			if contract != nil {
+				var copied delivery.Contract
+				if err := delivery.Clone(contract, &copied); err != nil {
+					return CapabilityManifest{}, err
+				}
+				capability.Delivery = &copied
+				capability.DeliveryStatus = "described"
+				if copied.Input.MaxBytes < capability.MaximumInputBytes {
+					capability.MaximumInputBytes = copied.Input.MaxBytes
+				}
+			}
+		}
+		m.Operations = append(m.Operations, capability)
 	}
 	for _, service := range blueprint.Services {
 		capability := ServiceCapability{ID: service.ID, Kind: service.Kind, Role: "environment", MCP: service.Kind == "mcp_http", Transports: serviceTransports(blueprint), InjectionSurfaces: []string{"service_response"}}
+		if blueprint.APIVersion == environment.DeliveryAPIVersion {
+			if service.Kind == "mcp_http" {
+				capability.Implementation = service.Implementation
+				if capability.Implementation == "" {
+					capability.Implementation = "generic"
+				}
+			}
+			if service.ExportContracts {
+				if service.ResolvedEndpoints == nil {
+					return CapabilityManifest{}, errors.New("service contracts must be resolved from a verified environment")
+				}
+				// The environment validator excludes data/credentials; detach maps.
+				if err := delivery.Clone(service.ResolvedEndpoints, &capability.Endpoints); err != nil {
+					return CapabilityManifest{}, err
+				}
+			}
+		}
 		if service.Kind == "stateful_http" || service.Kind == "mcp_http" && service.Seed != "" {
 			capability.InjectionSurfaces = append(capability.InjectionSurfaces, "environment_state")
 		}

@@ -118,6 +118,10 @@ func (s *Server) adapterHandler(invoke func(context.Context, applicationInvocati
 			writeError(writer, http.StatusBadRequest, "invalid_input", err.Error())
 			return
 		}
+		if err := s.validateDeliveryInput(operationID, request.Header.Get("Content-Type"), body); err != nil {
+			writeError(writer, http.StatusBadRequest, "invalid_delivery_input", err.Error())
+			return
+		}
 		if !s.reserveTurn() {
 			writeError(writer, http.StatusTooManyRequests, "turn_limit", "turn limit is exhausted")
 			return
@@ -359,6 +363,18 @@ func (a *httpApplicationAdapter) Handler() http.Handler {
 		if !ok {
 			writeError(writer, http.StatusNotImplemented, "unsupported_route", "route is not declared by the Sealed Environment")
 			return
+		}
+		if operation.ResolvedDelivery != nil || operation.Delivery != nil {
+			body, err := readBounded(request.Body, 2<<20)
+			if err != nil {
+				writeError(writer, http.StatusBadRequest, "invalid_delivery_input", "input exceeds delivery limit")
+				return
+			}
+			if err = a.server.validateDeliveryInput(operation.ID, request.Header.Get("Content-Type"), body); err != nil {
+				writeError(writer, http.StatusBadRequest, "invalid_delivery_input", err.Error())
+				return
+			}
+			request.Body = io.NopCloser(bytes.NewReader(body))
 		}
 		caller := request.Header.Get("X-Interceptor-Caller")
 		request.Header.Del("X-Interceptor-Caller")

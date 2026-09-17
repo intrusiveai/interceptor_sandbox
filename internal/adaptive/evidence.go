@@ -2,6 +2,7 @@ package adaptive
 
 import (
 	"encoding/json"
+	"errors"
 	"sort"
 	"time"
 
@@ -98,5 +99,37 @@ func BuildEvidenceBundle(metadata session.Metadata, attempts []AttemptContext, a
 		return EvidenceBundle{}, err
 	}
 	bundle.Digest = digest.Bytes(encoded)
+	return bundle, nil
+}
+
+// BindExecutionEvidence adds owner attribution and explicit uncertainty using
+// existing EvidenceBundle fields, preserving readability of historical bundles.
+func BindExecutionEvidence(bundle EvidenceBundle, state ExecutionState) (EvidenceBundle, error) {
+	if bundle.SessionID != state.SessionID {
+		return EvidenceBundle{}, errors.New("execution evidence session mismatch")
+	}
+	if state.Owner != nil {
+		if bundle.CampaignID != "" && bundle.CampaignID != state.Owner.CampaignID {
+			return EvidenceBundle{}, errors.New("execution evidence campaign mismatch")
+		}
+		bundle.CampaignID = state.Owner.CampaignID
+		if state.Owner.ClosedAt == nil {
+			bundle.CoverageGaps = append(bundle.CoverageGaps, "execution_closure_unconfirmed")
+			bundle.Completeness.State = "partial"
+		}
+	}
+	for id, record := range state.Records {
+		if record.State == "running" || record.State == "unknown" {
+			bundle.CoverageGaps = append(bundle.CoverageGaps, "operation_outcome_unknown:"+id)
+			bundle.Completeness.State = "partial"
+		}
+	}
+	sort.Strings(bundle.CoverageGaps)
+	bundle.Digest = ""
+	raw, err := json.Marshal(bundle)
+	if err != nil {
+		return EvidenceBundle{}, err
+	}
+	bundle.Digest = digest.Bytes(raw)
 	return bundle, nil
 }

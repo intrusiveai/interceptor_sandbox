@@ -42,6 +42,29 @@ func Validate(directory string) (*ValidationReport, error) {
 		}
 	}
 	assetSources := []string{}
+	for index, operation := range blueprint.Application.Interface.Operations {
+		if operation.Delivery != nil || operation.DeliveryAsset != "" {
+			if blueprint.APIVersion != DeliveryAPIVersion {
+				add(errors.New("delivery fields require interceptor.dev/v1alpha2"))
+			}
+		}
+		if operation.Delivery != nil && operation.DeliveryAsset != "" {
+			add(fmt.Errorf("operation %d selects both delivery and delivery_asset", index))
+		}
+		if operation.DeliveryAsset != "" {
+			assetSources = append(assetSources, operation.DeliveryAsset)
+		}
+	}
+	for _, service := range blueprint.Services {
+		if service.ExportContracts || service.Implementation != "" {
+			if blueprint.APIVersion != DeliveryAPIVersion {
+				add(errors.New("service contract/implementation fields require interceptor.dev/v1alpha2"))
+			}
+		}
+		if service.Implementation != "" && (service.Kind != "mcp_http" || !services.SupportsMCPImplementation(service.Implementation)) {
+			add(fmt.Errorf("service %q selects an unavailable MCP implementation", service.ID))
+		}
+	}
 	if blueprint.Adaptive.MaxAttempts < 1 || blueprint.Adaptive.MaxAttempts > 100000 || blueprint.Adaptive.MaxArtifacts < 1 || blueprint.Adaptive.MaxArtifacts > 200000 {
 		add(errors.New("adaptive attempt or artifact limit is out of bounds"))
 	}
@@ -56,8 +79,8 @@ func Validate(directory string) (*ValidationReport, error) {
 		seenProfiles[profile] = true
 	}
 
-	if blueprint.APIVersion != APIVersion {
-		add(fmt.Errorf("api_version must be %q", APIVersion))
+	if blueprint.APIVersion != APIVersion && blueprint.APIVersion != DeliveryAPIVersion {
+		add(fmt.Errorf("api_version must be %q or %q", APIVersion, DeliveryAPIVersion))
 	}
 	if blueprint.Kind != Kind {
 		add(fmt.Errorf("kind must be %q", Kind))
@@ -505,6 +528,9 @@ func Validate(directory string) (*ValidationReport, error) {
 				add(validateCanaryFile(root, blueprint.Filesystem.Seed, canary))
 			}
 		}
+	}
+	if len(failures) == 0 {
+		add(resolveDelivery(root, report))
 	}
 	if len(failures) > 0 {
 		return report, errors.Join(failures...)

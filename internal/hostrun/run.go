@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -28,6 +30,8 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/bridge"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/buildinfo"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/environment"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/filemanagement"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/ociruntime"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/session"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/snapshot"
@@ -35,6 +39,9 @@ import (
 )
 
 type Config struct {
+	SpoolMaxBytes        int64
+	OnFault              func(string, error)
+	InternalOnly         bool // Integrated local API owns all public target access.
 	EnvironmentDirectory string
 	ApplicationPort      int
 	ControlPort          int
@@ -90,6 +97,13 @@ func Run(ctx context.Context, config Config) (session.Metadata, error) {
 		return session.Metadata{}, err
 	}
 	metadata.BridgeTransport = transport
+	metadata.SpoolMaxBytes = config.SpoolMaxBytes
+	if metadata.SpoolMaxBytes == 0 {
+		metadata.SpoolMaxBytes = filemanagement.DefaultSpoolMaxBytes
+	}
+	if metadata.SpoolMaxBytes < 0 {
+		return metadata, errors.New("spool byte limit must be positive")
+	}
 	if err := bindAdaptiveMetadata(&metadata, report.Blueprint, config.FeedbackProfile); err != nil {
 		return session.Metadata{}, err
 	}
@@ -103,7 +117,7 @@ func Run(ctx context.Context, config Config) (session.Metadata, error) {
 	if err != nil {
 		return session.Metadata{}, err
 	}
-	blobs, err := blobstore.Open(filepath.Join(dataRoot, "blobs"), report.Blueprint.Limits.MaxBlobBytes)
+	blobs, err := blobstore.Open(paths.Blobs, report.Blueprint.Limits.MaxBlobBytes)
 	if err != nil {
 		return session.Metadata{}, err
 	}
@@ -174,10 +188,10 @@ func Restore(ctx context.Context, config Config, sourceSessionID, checkpointID s
 	if err != nil {
 		return session.Metadata{}, err
 	}
-	if checkpoint.JournalSeq > uint64(len(transactions)) || transactions[checkpoint.JournalSeq-1].Hash != checkpoint.JournalHash {
+	if checkpoint.JournalSeq == 0 || checkpoint.JournalSeq > uint64(len(transactions)) || transactions[checkpoint.JournalSeq-1].Hash != checkpoint.JournalHash {
 		return session.Metadata{}, errors.New("checkpoint journal head is missing or inconsistent")
 	}
-	blobs, err := blobstore.Open(filepath.Join(dataRoot, "blobs"), report.Blueprint.Limits.MaxBlobBytes)
+	blobs, err := blobstore.Open(sourcePaths.Blobs, report.Blueprint.Limits.MaxBlobBytes)
 	if err != nil {
 		return session.Metadata{}, err
 	}
@@ -187,6 +201,11 @@ func Restore(ctx context.Context, config Config, sourceSessionID, checkpointID s
 	metadata, err := session.NewMetadata(source.EnvironmentPath, environmentLock, report.Blueprint, time.Now())
 	if err != nil {
 		return session.Metadata{}, err
+	}
+	metadata.CampaignID = source.CampaignID
+	metadata.SpoolMaxBytes = source.SpoolMaxBytes
+	if metadata.SpoolMaxBytes == 0 {
+		metadata.SpoolMaxBytes = filemanagement.DefaultSpoolMaxBytes
 	}
 	metadata.ParentCheckpoint = checkpoint.ID
 	metadata.ParentSessionID = source.ID
@@ -202,6 +221,17 @@ func Restore(ctx context.Context, config Config, sourceSessionID, checkpointID s
 		if err := os.MkdirAll(directory, 0o750); err != nil {
 			return metadata, err
 		}
+	}
+	destination, err := blobstore.Open(paths.Blobs, report.Blueprint.Limits.MaxBlobBytes)
+	if err != nil {
+		return metadata, err
+	}
+	if err := blobs.CopyTo(ctx, destination); err != nil {
+		return metadata, err
+	}
+	blobs = destination
+	if err := preserveRestoreSource(paths, checkpoint, transactions[:checkpoint.JournalSeq]); err != nil {
+		return metadata, err
 	}
 	roots, err := session.Materialize(source.EnvironmentPath, report.Blueprint, paths, metadata.Generation)
 	if err != nil {
@@ -278,19 +308,111 @@ func Restore(ctx context.Context, config Config, sourceSessionID, checkpointID s
 	return runPrepared(ctx, config, dataRoot, report.Blueprint, applicationLock, metadata, paths, roots)
 }
 
-func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint *environment.Blueprint, applicationLock appimage.Lock, metadata session.Metadata, paths session.Paths, roots []snapshot.Root) (session.Metadata, error) {
-	applicationListener, err := listenLoopback(config.ApplicationPort)
+func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint *environment.Blueprint, applicationLock appimage.Lock, metadata session.Metadata, paths session.Paths, roots []snapshot.Root) (result session.Metadata, runErr error) {
+	writer, err := filemanagement.Lock(dataRoot, "writers-"+metadata.ID, false)
 	if err != nil {
 		return metadata, err
 	}
-	defer applicationListener.Close()
-	controlListener, err := listenLoopback(config.ControlPort)
-	if err != nil {
-		return metadata, err
+	ctx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	var fault atomic.Pointer[filemanagement.SpoolFault]
+	var workers sync.WaitGroup
+	var stopBridge context.CancelFunc = func() {}
+	var closeServers = func() {}
+	var quotaDone chan struct{}
+	defer func() {
+		cancelRun()
+		if quotaDone != nil {
+			<-quotaDone
+		}
+		cleanup, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		name := "interceptor-" + metadata.ID
+		err := config.Docker.EnsureRemoved(cleanup, name, fault.Load() != nil)
+		stopBridge()
+		closeServers()
+		done := make(chan struct{})
+		go func() { workers.Wait(); writer.Close(); close(done) }()
+		select {
+		case <-done:
+			if cleanupErr := filemanagement.CleanupSpools(cleanup, dataRoot, metadata, config.Docker); cleanupErr != nil {
+				err = errors.Join(err, cleanupErr)
+			}
+		case <-cleanup.Done():
+			err = errors.Join(err, errors.New("host spool writers did not stop; cleanup pending"))
+		}
+		if f := fault.Load(); f != nil {
+			if latest, _, e := session.Load(dataRoot, metadata.ID); e == nil {
+				metadata = latest
+			}
+			metadata.Phase = session.Error
+			metadata.TerminationReason = f.Error()
+			_ = session.Save(paths.Metadata, metadata)
+			_ = fsutil.WriteJSON(filepath.Join(paths.Root, "transport-failure.json"), f, 0600)
+			result = metadata
+			runErr = errors.Join(runErr, f)
+		}
+		if err != nil {
+			_ = fsutil.WriteJSON(filepath.Join(paths.Root, "cleanup-pending.json"), map[string]string{"reason": "container or writer cleanup unconfirmed"}, 0600)
+			runErr = errors.Join(runErr, fmt.Errorf("shutdown cleanup pending: %w", err))
+		}
+	}()
+	if config.BridgeTransport == "spool" {
+		for _, root := range filemanagement.SpoolRoots(paths) {
+			if err := os.MkdirAll(root, 0700); err != nil {
+				return metadata, err
+			}
+		}
+		if err := filemanagement.CheckSpools(ctx, filemanagement.SpoolRoots(paths), metadata.SpoolMaxBytes); err != nil {
+			var f *filemanagement.SpoolFault
+			if errors.As(err, &f) {
+				fault.Store(f)
+			}
+			if config.OnFault != nil {
+				config.OnFault(metadata.ID, err)
+			}
+			return metadata, err
+		}
+		sessionID := metadata.ID
+		limit := metadata.SpoolMaxBytes
+		quotaDone = make(chan struct{})
+		go func() {
+			defer close(quotaDone)
+			filemanagement.WatchSpools(ctx, filemanagement.SpoolRoots(paths), limit, func(err error) {
+				var f *filemanagement.SpoolFault
+				if !errors.As(err, &f) {
+					f = &filemanagement.SpoolFault{Reason: filemanagement.SpoolInspectionFailure, Limit: limit}
+				}
+				fault.Store(f)
+				// Docker termination is independent of API ledger persistence and request dispatch.
+				go func() {
+					killCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					_ = config.Docker.Kill(killCtx, "interceptor-"+sessionID)
+				}()
+				cancelRun()
+				if config.OnFault != nil {
+					config.OnFault(sessionID, f)
+				}
+			})
+		}()
 	}
-	defer controlListener.Close()
-	metadata.ApplicationURL = "http://" + applicationListener.Addr().String()
-	metadata.ControlURL = "http://" + controlListener.Addr().String()
+	var applicationListener, controlListener net.Listener
+	if !config.InternalOnly {
+		var err error
+		applicationListener, err = listenLoopback(config.ApplicationPort)
+		if err != nil {
+			return metadata, err
+		}
+		defer applicationListener.Close()
+		controlListener, err = listenLoopback(config.ControlPort)
+		if err != nil {
+			return metadata, err
+		}
+		defer controlListener.Close()
+		metadata.ApplicationURL = "http://" + applicationListener.Addr().String()
+		metadata.ControlURL = "http://" + controlListener.Addr().String()
+	}
 	containerName := "interceptor-" + metadata.ID
 	metadata.ContainerID = containerName
 	if err := session.Transition(&metadata, session.Starting); err != nil {
@@ -310,8 +432,8 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 	if err != nil {
 		return metadata, err
 	}
-	bridgeContext, stopBridge := context.WithCancel(ctx)
-	defer stopBridge()
+	bridgeContext, bridgeCancel := context.WithCancel(ctx)
+	stopBridge = bridgeCancel
 	bridgeErrors := make(chan error, 1)
 	if config.BridgeTransport == "unix" {
 		connectorServer, connectorListener, listenErr := bridge.ListenUnix(filepath.Join(paths.Sockets, "model.sock"), connector)
@@ -320,16 +442,19 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		}
 		defer connectorServer.Close()
 		defer connectorListener.Close()
-		go func() { bridgeErrors <- connectorServer.Serve(connectorListener) }()
+		workers.Add(1)
+		go func() { defer workers.Done(); bridgeErrors <- connectorServer.Serve(connectorListener) }()
 	} else {
+		workers.Add(1)
 		go func() {
+			defer workers.Done()
 			bridgeErrors <- bridge.ServeSpool(bridgeContext, filepath.Join(paths.Sockets, "model-spool"), connector)
 		}()
 	}
 	mounts := []ociruntime.Mount{
 		{Source: absolute(config.EnvironmentDirectory), Target: "/opt/interceptor/environment", ReadOnly: true},
 		{Source: paths.Root, Target: "/run/interceptor-session"},
-		{Source: filepath.Join(dataRoot, "blobs"), Target: "/run/interceptor-blobs"},
+		{Source: paths.Blobs, Target: "/run/interceptor-blobs"},
 	}
 	if blueprint.Network.TLS.Enabled {
 		mounts = append(mounts, ociruntime.Mount{Source: appimage.TLSMaterialDirectory(dataRoot, blueprint), Target: "/run/interceptor-tls", ReadOnly: true})
@@ -378,54 +503,64 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		return metadata, err
 	}
 	if err := waitReady(ctx, paths.Metadata, config.Docker, containerID, time.Duration(blueprint.Application.Interface.StartupTimeoutMS)*time.Millisecond); err != nil {
-		logs, _ := config.Docker.Logs(context.Background(), containerID)
+		logsCtx, logsCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		logs, _ := config.Docker.Logs(logsCtx, containerID)
+		logsCancel()
 		metadata.Phase, metadata.TerminationReason = session.Error, err.Error()
 		_ = session.Save(paths.Metadata, metadata)
-		_ = config.Docker.Stop(context.Background(), containerID, 5*time.Second)
 		return metadata, fmt.Errorf("session startup failed: %w\n%s", err, logs)
 	}
 	metadata, _, _ = session.Load(dataRoot, metadata.ID)
-	var applicationServer, controlServer *http.Server
-	if config.BridgeTransport == "unix" {
-		if _, probeErr := callUnix(ctx, filepath.Join(paths.Sockets, "control.sock"), http.MethodGet, "/v1/status", nil, 1<<20); probeErr != nil {
-			metadata.Phase, metadata.TerminationReason = session.Error, "selected Unix bridge is unavailable: "+probeErr.Error()
+	if config.InternalOnly {
+		probe, cancel := context.WithTimeout(ctx, 10*time.Second)
+		_, probeErr := callControl(probe, metadata, paths, http.MethodGet, "/v1/status", nil)
+		cancel()
+		if probeErr != nil {
+			metadata.Phase = session.Error
+			metadata.TerminationReason = "selected private bridge is unavailable: " + probeErr.Error()
 			_ = session.Save(paths.Metadata, metadata)
-			_ = config.Docker.Stop(context.Background(), containerID, 5*time.Second)
-			_ = config.Docker.Remove(context.Background(), containerID)
 			return metadata, errors.New(metadata.TerminationReason)
 		}
-		applicationServer = unixProxyServer(applicationListener, filepath.Join(paths.Sockets, "application.sock"), nil)
-		controlServer = unixProxyServer(controlListener, filepath.Join(paths.Sockets, "control.sock"), cooperativeRoute)
-	} else {
-		applicationClient, clientErr := bridge.NewHTTPSpoolClient(filepath.Join(paths.Sockets, "http-spool"), blueprint.Limits.MaxBlobBytes, time.Duration(blueprint.Application.Interface.TurnTimeoutMS)*time.Millisecond)
-		if clientErr != nil {
-			return metadata, clientErr
-		}
-		controlClient, clientErr := bridge.NewHTTPSpoolClient(filepath.Join(paths.Sockets, "http-spool"), adaptive.ArtifactEnvelopeLimit(blueprint.Limits.MaxBlobBytes), time.Duration(blueprint.Application.Interface.TurnTimeoutMS)*time.Millisecond)
-		if clientErr != nil {
-			return metadata, clientErr
-		}
-		if _, probeErr := controlClient.Do(ctx, bridge.ControlChannel, http.MethodGet, "/v1/status", nil, nil); probeErr != nil {
-			metadata.Phase, metadata.TerminationReason = session.Error, "default spool bridge is unavailable: "+probeErr.Error()
-			_ = session.Save(paths.Metadata, metadata)
-			_ = config.Docker.Stop(context.Background(), containerID, 5*time.Second)
-			_ = config.Docker.Remove(context.Background(), containerID)
-			return metadata, errors.New(metadata.TerminationReason)
-		}
-		applicationServer = spoolProxyServer(applicationListener, applicationClient, bridge.ApplicationChannel, blueprint.Limits.MaxBlobBytes, nil)
-		controlServer = spoolProxyServer(controlListener, controlClient, bridge.ControlChannel, adaptive.ArtifactEnvelopeLimit(blueprint.Limits.MaxBlobBytes), cooperativeRoute)
 	}
-	defer applicationServer.Close()
-	defer controlServer.Close()
-	go applicationServer.Serve(applicationListener)
-	go controlServer.Serve(controlListener)
-	if config.Output != nil {
-		fmt.Fprintf(config.Output, "Session %s running\n  application: %s\n  control: %s\n", metadata.ID, metadata.ApplicationURL, metadata.ControlURL)
+	if !config.InternalOnly {
+		var applicationServer, controlServer *http.Server
+		if config.BridgeTransport == "unix" {
+			if _, probeErr := callUnix(ctx, filepath.Join(paths.Sockets, "control.sock"), http.MethodGet, "/v1/status", nil, 1<<20); probeErr != nil {
+				metadata.Phase, metadata.TerminationReason = session.Error, "selected Unix bridge is unavailable: "+probeErr.Error()
+				_ = session.Save(paths.Metadata, metadata)
+				return metadata, errors.New(metadata.TerminationReason)
+			}
+			applicationServer = unixProxyServer(applicationListener, filepath.Join(paths.Sockets, "application.sock"), nil)
+			controlServer = unixProxyServer(controlListener, filepath.Join(paths.Sockets, "control.sock"), cooperativeRoute)
+		} else {
+			applicationClient, clientErr := bridge.NewHTTPSpoolClient(filepath.Join(paths.Sockets, "http-spool"), blueprint.Limits.MaxBlobBytes, time.Duration(blueprint.Application.Interface.TurnTimeoutMS)*time.Millisecond)
+			if clientErr != nil {
+				return metadata, clientErr
+			}
+			controlClient, clientErr := bridge.NewHTTPSpoolClient(filepath.Join(paths.Sockets, "http-spool"), adaptive.ArtifactEnvelopeLimit(blueprint.Limits.MaxBlobBytes), time.Duration(blueprint.Application.Interface.TurnTimeoutMS)*time.Millisecond)
+			if clientErr != nil {
+				return metadata, clientErr
+			}
+			if _, probeErr := controlClient.Do(ctx, bridge.ControlChannel, http.MethodGet, "/v1/status", nil, nil); probeErr != nil {
+				metadata.Phase, metadata.TerminationReason = session.Error, "default spool bridge is unavailable: "+probeErr.Error()
+				_ = session.Save(paths.Metadata, metadata)
+				return metadata, errors.New(metadata.TerminationReason)
+			}
+			applicationServer = spoolProxyServer(applicationListener, applicationClient, bridge.ApplicationChannel, blueprint.Limits.MaxBlobBytes, nil)
+			controlServer = spoolProxyServer(controlListener, controlClient, bridge.ControlChannel, adaptive.ArtifactEnvelopeLimit(blueprint.Limits.MaxBlobBytes), cooperativeRoute)
+		}
+		defer applicationServer.Close()
+		defer controlServer.Close()
+		closeServers = func() { _ = applicationServer.Close(); _ = controlServer.Close() }
+		workers.Add(2)
+		go func() { defer workers.Done(); _ = applicationServer.Serve(applicationListener) }()
+		go func() { defer workers.Done(); _ = controlServer.Serve(controlListener) }()
+		if config.Output != nil {
+			fmt.Fprintf(config.Output, "Session %s running\n  application: %s\n  control: %s\n", metadata.ID, metadata.ApplicationURL, metadata.ControlURL)
+		}
 	}
 	if config.OnReady != nil {
 		if err := config.OnReady(metadata); err != nil {
-			_ = config.Docker.Stop(context.Background(), containerID, 5*time.Second)
-			_ = config.Docker.Remove(context.Background(), containerID)
 			return metadata, fmt.Errorf("post-start operation failed: %w", err)
 		}
 	}
@@ -443,7 +578,9 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 			}
 			waiting = false
 		case <-monitor.C:
-			running, inspectErr := config.Docker.Running(context.Background(), containerID)
+			inspectCtx, inspectCancel := context.WithTimeout(ctx, 2*time.Second)
+			running, inspectErr := config.Docker.Running(inspectCtx, containerID)
+			inspectCancel()
 			if inspectErr == nil && !running {
 				waiting = false
 			} else if inspectErr != nil {
@@ -456,7 +593,7 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 	monitor.Stop()
 	stopContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if requestedStop {
+	if requestedStop && fault.Load() == nil {
 		_, _ = callControl(stopContext, metadata, paths, http.MethodPost, "/v1/stop", []byte(`{}`))
 		_ = config.Docker.Stop(stopContext, containerID, 5*time.Second)
 	}
@@ -578,6 +715,11 @@ func CallSession(ctx context.Context, sessionID, method, path string, body []byt
 	if err != nil {
 		return nil, err
 	}
+	writer, err := filemanagement.Lock(dataRoot, "writers-"+sessionID, false)
+	if err != nil {
+		return nil, err
+	}
+	defer writer.Close()
 	if metadata.ContainerID == "" {
 		return nil, errors.New("session has no running container")
 	}
@@ -588,10 +730,14 @@ func CallSession(ctx context.Context, sessionID, method, path string, body []byt
 }
 
 func callControl(ctx context.Context, metadata session.Metadata, paths session.Paths, method, path string, body []byte) ([]byte, error) {
-	if metadata.BridgeTransport == "unix" {
-		return callUnix(ctx, filepath.Join(paths.Sockets, "control.sock"), method, path, body, adaptive.ArtifactEnvelopeLimit(metadata.Limits.MaxBlobBytes))
+	limit := adaptive.ArtifactEnvelopeLimit(metadata.Limits.MaxBlobBytes)
+	if path == "/v1/operations" {
+		limit = adaptive.OperationFrameLimit(metadata.Limits.MaxBlobBytes)
 	}
-	client, err := bridge.NewHTTPSpoolClient(filepath.Join(paths.Sockets, "http-spool"), adaptive.ArtifactEnvelopeLimit(metadata.Limits.MaxBlobBytes), defaultControlTimeout(metadata))
+	if metadata.BridgeTransport == "unix" {
+		return callUnix(ctx, filepath.Join(paths.Sockets, "control.sock"), method, path, body, limit)
+	}
+	client, err := bridge.NewHTTPSpoolClient(filepath.Join(paths.Sockets, "http-spool"), limit, defaultControlTimeout(metadata))
 	if err != nil {
 		return nil, err
 	}
@@ -762,4 +908,20 @@ func absolute(path string) string {
 		return path
 	}
 	return value
+}
+
+// Keep the original hash-verified prefix as provenance alongside the replacement's
+// own replay journal. Its checkpoints never require opening a parent directory.
+func preserveRestoreSource(paths session.Paths, checkpoint snapshot.Checkpoint, tx []statejournal.Transaction) error {
+	directory := filepath.Join(paths.Root, "restore-source")
+	if err := fsutil.WriteJSON(filepath.Join(directory, "checkpoint.json"), checkpoint, 0600); err != nil {
+		return err
+	}
+	var prefix bytes.Buffer
+	for _, transaction := range tx {
+		if err := json.NewEncoder(&prefix).Encode(transaction); err != nil {
+			return err
+		}
+	}
+	return fsutil.WriteFile(filepath.Join(directory, "state.jsonl"), prefix.Bytes(), 0600)
 }

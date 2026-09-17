@@ -86,6 +86,9 @@ func (r *AttemptRegistry) validate(context AttemptContext) (AttemptContext, erro
 	if len(context.StrategyProvenanceRef) > 512 || strings.ContainsAny(context.StrategyProvenanceRef, "\x00\r\n") {
 		return AttemptContext{}, errors.New("attempt strategy provenance reference is not bounded")
 	}
+	if err := ValidateObservationSelection(context.ObservationSelection); err != nil {
+		return AttemptContext{}, err
+	}
 	if context.FeedbackProfile != r.feedback {
 		return AttemptContext{}, errors.New("attempt feedback profile differs from immutable session policy")
 	}

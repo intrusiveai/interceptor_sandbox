@@ -1,0 +1,512 @@
+{
+  "feedback": {
+    "view_version": "interceptor.dev/observation-view/v1alpha2",
+    "selection_modes": [
+      "all-permitted",
+      "selected"
+    ],
+    "kinds": [
+      "target_output",
+      "operation_error",
+      "injection_delivery",
+      "oracle_outcome"
+    ],
+    "maximum_chunk_bytes": 262144,
+    "maximum_entries": 64
+  },
+  "delivery_schema_profile": "interceptor.delivery-schema/v1",
+  "api_version": "interceptor.dev/capability-manifest/v1alpha2",
+  "kind": "CapabilityManifest",
+  "interceptor_release": "0.1.0-dev",
+  "environment_digest": "sha256:f95dbb463a36de57ddf5baf5447634431506ee2ae0e024e0f5f0bb2c528b2ea0",
+  "application_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "target": {
+    "name": "delivery-contract-example",
+    "version": "0.1.0",
+    "interface": "http"
+  },
+  "feedback_profiles": [
+    "black-box"
+  ],
+  "operations": [
+    {
+      "delivery": {
+        "description": "Submit a task to the synthetic agent",
+        "input": {
+          "media_type": "application/json",
+          "encoding": "json",
+          "max_bytes": 65536,
+          "basis": "synthetic",
+          "schema": {
+            "additionalProperties": false,
+            "properties": {
+              "query": {
+                "description": "Task text for the agent",
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "type": "object"
+          }
+        },
+        "output": {
+          "media_type": "application/json",
+          "encoding": "json",
+          "max_bytes": 65536,
+          "basis": "unknown"
+        },
+        "examples": [
+          {
+            "id": "benign",
+            "input": {
+              "query": "Summarize ticket T-1"
+            },
+            "output": {
+              "answer": "Illustrative summary"
+            }
+          }
+        ]
+      },
+      "delivery_status": "described",
+      "maximum_input_bytes": 65536,
+      "id": "invoke",
+      "method": "POST",
+      "path": "/invoke"
+    }
+  ],
+  "cross_vm_operations": [
+    "application.invoke",
+    "artifact.read",
+    "artifact.register",
+    "attempt.register",
+    "capabilities.read",
+    "injection.arm",
+    "injection.delete",
+    "observation.content.read",
+    "observation.read",
+    "operation.status",
+    "session.owner",
+    "session.status",
+    "session.stop",
+    "snapshot.create"
+  ],
+  "injection_surfaces": [
+    "environment_state",
+    "mcp_tool_result",
+    "model_tool_result",
+    "service_response"
+  ],
+  "injection_profiles": [
+    {
+      "surface": "environment_state",
+      "scopes": [
+        "once",
+        "next_turn",
+        "standing"
+      ],
+      "placements": [
+        "replace",
+        "prepend",
+        "append",
+        "insert",
+        "merge"
+      ],
+      "selector_fields": [
+        "service",
+        "collection",
+        "key",
+        "path",
+        "file_namespace",
+        "relative_path",
+        "turn_id"
+      ],
+      "carriers": [
+        "managed_service_state",
+        "mutable_file"
+      ]
+    },
+    {
+      "surface": "mcp_tool_result",
+      "scopes": [
+        "once",
+        "standing"
+      ],
+      "placements": [
+        "replace",
+        "prepend",
+        "append",
+        "insert",
+        "merge"
+      ],
+      "selector_fields": [
+        "service",
+        "tool_name",
+        "call_ordinal",
+        "arguments_json_pointer",
+        "arguments_equal",
+        "arguments_contain",
+        "turn_id"
+      ],
+      "carriers": [
+        "mcp_tools_call_result"
+      ]
+    },
+    {
+      "surface": "model_tool_result",
+      "scopes": [
+        "once",
+        "next_turn",
+        "standing"
+      ],
+      "placements": [
+        "replace",
+        "prepend",
+        "append",
+        "insert",
+        "merge"
+      ],
+      "selector_fields": [
+        "tool_name",
+        "call_ordinal",
+        "arguments_json_pointer",
+        "arguments_equal",
+        "arguments_contain",
+        "turn_id"
+      ],
+      "carriers": [
+        "model_client_tool_result"
+      ]
+    },
+    {
+      "surface": "service_response",
+      "scopes": [
+        "once",
+        "standing"
+      ],
+      "placements": [
+        "replace",
+        "prepend",
+        "append",
+        "insert",
+        "merge"
+      ],
+      "selector_fields": [
+        "service",
+        "method",
+        "path",
+        "call_ordinal",
+        "query_equal",
+        "headers_equal",
+        "request_body_json_pointer",
+        "request_body_equal",
+        "request_body_contain",
+        "turn_id"
+      ],
+      "carriers": [
+        "managed_http_response",
+        "dynamic_attacker_sink_response"
+      ]
+    }
+  ],
+  "services": [
+    {
+      "implementation": "generic",
+      "endpoints": [
+        {
+          "id": "get_ticket",
+          "kind": "mcp-tool",
+          "collection": "tickets",
+          "delivery": {
+            "description": "Read a synthetic ticket record",
+            "input": {
+              "media_type": "application/json",
+              "encoding": "json",
+              "max_bytes": 1048576,
+              "basis": "synthetic",
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "description": "Ticket key",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id"
+                ],
+                "type": "object"
+              }
+            },
+            "output": {
+              "media_type": "application/json",
+              "encoding": "json",
+              "max_bytes": 1048576,
+              "basis": "synthetic",
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "description": {
+                    "description": "Benign customer-supplied ticket text",
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "description",
+                  "status"
+                ],
+                "type": "object"
+              }
+            },
+            "examples": [
+              {
+                "id": "benign",
+                "input": {
+                  "id": "T-1"
+                },
+                "output": {
+                  "description": "An illustrative ticket",
+                  "id": "T-1",
+                  "status": "open"
+                }
+              }
+            ]
+          },
+          "injection_root": "mcp-tool-result",
+          "output_pointer": "/structuredContent",
+          "maximum_request_bytes": 1048576
+        },
+        {
+          "id": "search_notes",
+          "kind": "mcp-tool",
+          "delivery": {
+            "description": "Search synthetic notes; output structure is not guaranteed",
+            "input": {
+              "media_type": "application/json",
+              "encoding": "json",
+              "max_bytes": 1048576,
+              "basis": "observed",
+              "schema": {
+                "properties": {
+                  "query": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "query"
+                ],
+                "type": "object"
+              }
+            },
+            "output": {
+              "media_type": "application/json",
+              "encoding": "json",
+              "max_bytes": 1048576,
+              "basis": "unknown"
+            }
+          },
+          "injection_root": "mcp-tool-result",
+          "output_pointer": "/structuredContent",
+          "maximum_request_bytes": 1048576
+        }
+      ],
+      "id": "tickets",
+      "kind": "mcp_http",
+      "role": "environment",
+      "mcp": true,
+      "transports": [
+        "http"
+      ],
+      "injection_surfaces": [
+        "environment_state",
+        "mcp_tool_result",
+        "service_response"
+      ]
+    }
+  ],
+  "file_namespaces": [
+    {
+      "id": "records",
+      "allow_create": false
+    }
+  ],
+  "oracle_types": null,
+  "model_providers": [
+    {
+      "kind": "anthropic-messages",
+      "codecs": [
+        "anthropic_messages"
+      ],
+      "authentication_modes": [
+        "api-key",
+        "workload-token"
+      ],
+      "model_selection": "exact-host-allowlist",
+      "text": true,
+      "client_functions": true,
+      "structured_output": true,
+      "streaming": false,
+      "embeddings": false,
+      "multimodal": false,
+      "provider_hosted_tools": false,
+      "provider_stored_state": false
+    },
+    {
+      "kind": "azure-openai",
+      "codecs": [
+        "openai_chat_completions",
+        "openai_responses"
+      ],
+      "authentication_modes": [
+        "api-key",
+        "workload-identity"
+      ],
+      "model_selection": "exact-host-allowlist",
+      "text": true,
+      "client_functions": true,
+      "structured_output": true,
+      "streaming": false,
+      "embeddings": false,
+      "multimodal": false,
+      "provider_hosted_tools": false,
+      "provider_stored_state": false
+    },
+    {
+      "kind": "bedrock-converse",
+      "codecs": [
+        "aws_bedrock_converse"
+      ],
+      "authentication_modes": [
+        "workload-identity"
+      ],
+      "model_selection": "exact-host-allowlist",
+      "text": true,
+      "client_functions": true,
+      "structured_output": true,
+      "streaming": false,
+      "embeddings": false,
+      "multimodal": false,
+      "provider_hosted_tools": false,
+      "provider_stored_state": false
+    },
+    {
+      "kind": "gemini-api",
+      "codecs": [
+        "google_generate_content"
+      ],
+      "authentication_modes": [
+        "api-key"
+      ],
+      "model_selection": "exact-host-allowlist",
+      "text": true,
+      "client_functions": true,
+      "structured_output": true,
+      "streaming": false,
+      "embeddings": false,
+      "multimodal": false,
+      "provider_hosted_tools": false,
+      "provider_stored_state": false
+    },
+    {
+      "kind": "litellm",
+      "codecs": [
+        "openai_chat_completions",
+        "openai_responses"
+      ],
+      "authentication_modes": [
+        "none",
+        "api-key"
+      ],
+      "model_selection": "exact-host-allowlist",
+      "text": true,
+      "client_functions": true,
+      "structured_output": true,
+      "streaming": false,
+      "embeddings": false,
+      "multimodal": false,
+      "provider_hosted_tools": false,
+      "provider_stored_state": false
+    },
+    {
+      "kind": "openai-chat",
+      "codecs": [
+        "openai_chat_completions"
+      ],
+      "authentication_modes": [
+        "api-key"
+      ],
+      "model_selection": "exact-host-allowlist",
+      "text": true,
+      "client_functions": true,
+      "structured_output": true,
+      "streaming": false,
+      "embeddings": false,
+      "multimodal": false,
+      "provider_hosted_tools": false,
+      "provider_stored_state": false
+    },
+    {
+      "kind": "openai-responses",
+      "codecs": [
+        "openai_responses"
+      ],
+      "authentication_modes": [
+        "api-key"
+      ],
+      "model_selection": "exact-host-allowlist",
+      "text": true,
+      "client_functions": true,
+      "structured_output": true,
+      "streaming": false,
+      "embeddings": false,
+      "multimodal": false,
+      "provider_hosted_tools": false,
+      "provider_stored_state": false
+    },
+    {
+      "kind": "vertex-gemini",
+      "codecs": [
+        "google_generate_content"
+      ],
+      "authentication_modes": [
+        "workload-identity"
+      ],
+      "model_selection": "exact-host-allowlist",
+      "text": true,
+      "client_functions": true,
+      "structured_output": true,
+      "streaming": false,
+      "embeddings": false,
+      "multimodal": false,
+      "provider_hosted_tools": false,
+      "provider_stored_state": false
+    }
+  ],
+  "network": {
+    "dns": {
+      "enabled": false,
+      "upstream_forwarding": false
+    },
+    "http_frontdoor": false,
+    "https_frontdoor": {
+      "enabled": false
+    }
+  },
+  "snapshot_capable": false,
+  "limits": {
+    "maximum_attempts": 200,
+    "maximum_artifacts": 400,
+    "maximum_artifact_bytes": 104857600,
+    "maximum_invocations": 200,
+    "maximum_snapshots": 20
+  },
+  "digest": "sha256:3d623d0b9e6efeff7ee442f68c4439d5c4ec586f0864ac31c1a7d2bb7cd88511"
+}

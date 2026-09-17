@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,30 +25,13 @@ func TestEnvironmentCommandLifecycle(t *testing.T) {
 	}
 }
 
-func TestGatewayTokenPolicy(t *testing.T) {
-	const variable = "INTERCEPTOR_TEST_GATEWAY_TOKEN"
-	if err := os.Setenv(variable, "a-development-token-that-is-long-enough"); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Unsetenv(variable) })
-	value, source, err := resolveGatewayToken(t.Context(), "", "", variable, false)
-	if err != nil || source != "environment" || value == "" {
-		t.Fatalf("development token resolution failed: source=%q err=%v", source, err)
-	}
-	if _, _, err := resolveGatewayToken(t.Context(), "", "", variable, true); err == nil {
-		t.Fatal("production gateway accepted an environment token")
-	}
-	if _, _, err := resolveGatewayToken(t.Context(), "missing.yaml", "", variable, false); err == nil {
-		t.Fatal("credential configuration without an ID was accepted")
-	}
-}
-
-func TestBoundedProduct(t *testing.T) {
-	if got := boundedProduct(10, 20, 1_000); got != 200 {
-		t.Fatalf("bounded product = %d", got)
-	}
-	if got := boundedProduct(1<<40, 2, 1<<40); got != 1<<40 {
-		t.Fatalf("overflowing product = %d", got)
+func TestRetiredStandaloneEntrypoints(t *testing.T) {
+	for _, command := range []string{"gateway", "restore"} {
+		var output bytes.Buffer
+		err := run([]string{command}, &output, &output)
+		if err == nil {
+			t.Fatalf("%s remained independently launchable", command)
+		}
 	}
 }
 

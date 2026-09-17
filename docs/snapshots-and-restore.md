@@ -44,9 +44,9 @@ environment at that moment:
 - fingerprints and version information needed to prove which application,
   environment, files, and history were used.
 
-Changed file contents are stored once in a shared area, even if more than one
-snapshot uses the same content. The journal records where each file belongs and
-refers to its stored content by digital fingerprint.
+Changed file contents are stored once within the owning session, even if more
+than one snapshot in that session uses the same content. The journal records
+where each file belongs and refers to its content by digital fingerprint.
 
 ## What is not captured
 
@@ -77,6 +77,8 @@ managed service or injection change to this file before changing the live
 environment, reducing the chance that saved history and live state disagree.
 
 A checkpoint is a small JSON receipt containing:
+
+- the associated campaign ID and an optional description of its purpose;
 
 ```json
 {
@@ -137,7 +139,8 @@ Under the hood, the coordinator:
 7. briefly pauses the application for one final check;
 8. determines which files changed since the last snapshot and saves their
    contents;
-   when a Cross-VM grant supplies a remaining byte allowance, Interceptor
+   for typed `snapshot.create`, the supervisor supplies the remaining session
+   byte allowance and Interceptor
    rejects an oversized candidate before committing it;
 9. records the file changes and other restorable state in the state journal;
 10. saves the complete list and fingerprints of current files;
@@ -158,24 +161,20 @@ Interceptor promises it can rebuild.
 
 ## Restore
 
-```sh
-interceptor restore <source-session-id> \
-  --checkpoint <checkpoint-id> \
-  --model-provider openai-chat \
-  --provider-base-url https://provider.example/v1 \
-  --allow-model provider-model-id
-```
+Use `POST /v1/lifecycle` on the integrated service; see the
+[exact request contract](local-api.md#snapshot-and-restore). Restore retains the
+host's original environment/image, provider and transport configuration. Those
+credentials are absent from the checkpoint and remain in the live host process.
+There is no independent `interceptor restore` launcher or concurrent branch
+container in this MVP.
 
-The host provider options are required again because credentials and provider
-configuration are deliberately absent from snapshots.
+Before stopping the source or starting a replacement, restore preflight checks
+checkpoint identity, sealed environment, journal linkage and required blobs.
+The native startup path additionally checks application/image compatibility and
+reconstruction. Failure after source closure is terminal, not a fallback to the
+old target. Operator's cumulative accounting does not roll back with native state.
 
-A restore may select any supported model adapter, but changing provider or
-model can change agent behavior even when
-the restored sandbox state is identical. Keep provider type, model ID,
-generation options, and gateway routing fixed when comparing branches. See
-[Model providers](model-providers.md).
-
-Before starting anything, restore verifies:
+Before starting anything, restore verifies:Before starting anything, restore verifies:
 
 - the checkpoint hash and source-session identity;
 - the saved data format is supported by this Interceptor version;
@@ -199,8 +198,12 @@ More precisely, it:
 7. records `restored_from` ancestry; and
 8. starts a fresh container and application process, then waits for health.
 
-The source is unchanged by default. `--stop-source` stops it only after the new
-session becomes healthy.
+The source is closed, stopped and removed before the new container starts.
+Restored sessions retain checkpoint ancestry and own copies of the verified
+journal prefix, required checkpoint/provenance records and every referenced blob.
+Copies must be complete before readiness, so purging the source session cannot
+break a retained replacement's verification, export or checkpoint restore. See
+[file management](file-management.md) for cleanup and purge details.
 
 A restored identity issuer creates a new signing key. Applications retrieve or
 refresh new short-lived credentials, while the restored grants, delegated
@@ -210,7 +213,8 @@ without carrying an old or expired bearer credential into a new session.
 
 ## Branching and experimental value
 
-Restoring the same checkpoint twice creates two independent sessions. Changes
+Two deliberate restores with distinct operation IDs create sequential sessions
+with the same checkpoint ancestry. An exact retry does not create a session. Changes
 made in one do not affect the other. This enables controlled branches such as:
 
 - restore “before injection,” apply payload A in one branch and B in another;
@@ -243,3 +247,33 @@ Before setting `snapshot_capable: true`, verify all of the following:
 
 If these conditions cannot be met, keep the application runnable with
 `snapshot_capable: false`; that is more accurate than an incomplete snapshot.
+
+## Campaign discovery and harness continuity
+
+A harness can keep its conversation and hypothesis notes while repeatedly
+restoring target checkpoints. Only the Interceptor target is replaced; Operator
+advances the target revision and returns the result to the same live harness.
+Known preflight rejection leaves both usable; post-closure failure/uncertainty
+remains terminal. Restoring target state never resets campaign-wide budgets.
+
+Create an administrative checkpoint with metadata before campaign attachment:
+
+```sh
+interceptor snapshot create <session-id> --name baseline \
+  --campaign-id campaign-01 --description "Before mutation experiments" --json
+interceptor snapshot list <session-id> --json
+interceptor snapshot inspect <session-id> <checkpoint-id>
+```
+
+For an attached campaign, Operator uses native `snapshot.create` with label and
+description; campaign ID comes from its request envelope. Description is optional,
+valid UTF-8 and at most 4,096 bytes. Both fields are stored in the checkpoint,
+covered by its hash and returned by create/list/inspect. Older records may omit
+them and remain readable through verified source-session membership.
+
+The [local list/inspect API](local-api.md#snapshot-inventory-and-metadata) lets
+Operator discover checkpoints from current and earlier retained campaign sessions,
+including after stop. Use both source session and checkpoint ID to inspect or
+restore an earlier baseline. The harness receives a safe metadata projection,
+including campaign ID and description, through Operator tools; it never reads
+raw checkpoint storage. Restoring a checkpoint does not edit its metadata.

@@ -87,10 +87,18 @@ func Build(ctx context.Context, directory, dataRoot, tag, version string, docker
 		if err != nil {
 			return Lock{}, fmt.Errorf("generate sandbox TLS material: %w", err)
 		}
-		if err := os.WriteFile(filepath.Join(temporary, "interceptor-ca.pem"), material.ca, 0o600); err != nil {
+		// COPY --chmod on a file can also apply the file mode to newly created
+		// parent directories. Stage a tree so /opt remains traversable after
+		// the supervisor drops root and DAC capabilities (including on scratch).
+		publicRoot := filepath.Join(temporary, "public-ca")
+		publicCA := filepath.Join(publicRoot, filepath.FromSlash(strings.TrimPrefix(ContainerCABundle, "/")))
+		if err := os.MkdirAll(filepath.Dir(publicCA), 0755); err != nil {
 			return Lock{}, err
 		}
-		dockerfile += "COPY --chmod=0444 interceptor-ca.pem " + ContainerCABundle + "\n"
+		if err := os.WriteFile(publicCA, material.ca, 0444); err != nil {
+			return Lock{}, err
+		}
+		dockerfile += "COPY public-ca/ /\n"
 		if report.Blueprint.Network.TLS.TrustMode == "auto" {
 			dockerfile += "RUN [\"/usr/local/bin/interceptor\",\"image-install-ca\",\"" + ContainerCABundle + "\"]\n"
 		}
@@ -111,7 +119,7 @@ func Build(ctx context.Context, directory, dataRoot, tag, version string, docker
 		SchemaVersion: 1, EnvironmentDigest: environmentLock.EnvironmentDigest,
 		SourceImage: report.Blueprint.Application.Image, SourceDigest: environmentLock.ApplicationDigest,
 		WrapperImage: tag, WrapperDigest: wrapperDigest, InterceptorVersion: version,
-		InterceptorBinary: digest.Bytes(binary), BlueprintSchema: environment.APIVersion,
+		InterceptorBinary: digest.Bytes(binary), BlueprintSchema: report.Blueprint.APIVersion,
 		JournalSchemaVersion: 1, TLS: tlsLock, ConstructedAt: time.Now().UTC(),
 	}
 	if report.Blueprint.Network.TLS.Enabled {
@@ -149,7 +157,8 @@ func Load(path string) (Lock, error) {
 }
 
 func Verify(ctx context.Context, lock Lock, environmentLock *environment.Lock, docker ociruntime.Docker) error {
-	if lock.EnvironmentDigest != environmentLock.EnvironmentDigest || lock.SourceDigest != environmentLock.ApplicationDigest || lock.BlueprintSchema != environment.APIVersion || lock.JournalSchemaVersion != 1 {
+	supportedBlueprint := lock.BlueprintSchema == environment.APIVersion || lock.BlueprintSchema == environment.DeliveryAPIVersion
+	if lock.EnvironmentDigest != environmentLock.EnvironmentDigest || lock.SourceDigest != environmentLock.ApplicationDigest || !supportedBlueprint || lock.JournalSchemaVersion != 1 {
 		return errors.New("application lock is incompatible with Sealed Environment")
 	}
 	if lock.InterceptorVersion != buildinfo.Version {

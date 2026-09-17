@@ -68,18 +68,12 @@ Amazon Bedrock Converse, and LiteLLM remain in their native shapes. Provider
 credentials remain on the host and production secrets can be resolved from a
 supported secret store or provider workload identity.
 
-While `run` or `restore` remains open, the host process exposes two local-only
-URLs that do not require passwords:
-
-- the **application URL** exposes only Blueprint-declared application
-  operations, using native paths for HTTP applications and predictable
-  `/operations/<id>` paths for other interfaces;
-- the **control URL** exposes cooperative turns, injections, snapshots, status,
-  events, and attacker observations.
-
-Operator-only information such as evaluation results and the complete history
-of state changes is not exposed on the local control URL. CLI commands reach
-that information through the session's private communication channel.
+`interceptor run` owns the container and API at `127.0.0.1:8080`. No separate
+gateway or integration credential is needed. The first attach binds one campaign;
+native v1alpha2 requests perform experiments and create snapshots. The same
+service restores into a fresh session, stops the target, and downloads protected
+evidence. It stays available after target stop; Ctrl+C ends the host service.
+One active target is supported. See [Local integration](local-api.md).
 
 ## Design priorities
 

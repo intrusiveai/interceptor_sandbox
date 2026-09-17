@@ -49,6 +49,8 @@ const (
 )
 
 type Server struct {
+	feedbackMu      sync.Mutex
+	execution       *adaptive.ExecutionStore
 	blueprint       *environment.Blueprint
 	metadata        session.Metadata
 	paths           session.Paths
@@ -113,20 +115,21 @@ type TurnRequest struct {
 }
 
 type Turn struct {
-	ID            string            `json:"id"`
-	Operation     string            `json:"operation,omitempty"`
-	Status        string            `json:"status"`
-	Code          int               `json:"code,omitempty"`
-	Headers       map[string]string `json:"headers,omitempty"`
-	Body          []byte            `json:"body,omitempty"`
-	MediaType     string            `json:"media_type,omitempty"`
-	ExitCode      *int              `json:"exit_code,omitempty"`
-	Error         string            `json:"error,omitempty"`
-	AttemptID     string            `json:"attempt_id,omitempty"`
-	PayloadDigest string            `json:"payload_digest,omitempty"`
-	OutputDigest  string            `json:"output_digest,omitempty"`
-	Started       time.Time         `json:"started_at"`
-	Finished      time.Time         `json:"finished_at,omitempty"`
+	OutputContractStatus string            `json:"output_contract_status,omitempty"`
+	ID                   string            `json:"id"`
+	Operation            string            `json:"operation,omitempty"`
+	Status               string            `json:"status"`
+	Code                 int               `json:"code,omitempty"`
+	Headers              map[string]string `json:"headers,omitempty"`
+	Body                 []byte            `json:"body,omitempty"`
+	MediaType            string            `json:"media_type,omitempty"`
+	ExitCode             *int              `json:"exit_code,omitempty"`
+	Error                string            `json:"error,omitempty"`
+	AttemptID            string            `json:"attempt_id,omitempty"`
+	PayloadDigest        string            `json:"payload_digest,omitempty"`
+	OutputDigest         string            `json:"output_digest,omitempty"`
+	Started              time.Time         `json:"started_at"`
+	Finished             time.Time         `json:"finished_at,omitempty"`
 }
 
 func Run(ctx context.Context) error {
@@ -238,10 +241,24 @@ func New() (*Server, error) {
 		recorder.Close()
 		return nil, err
 	}
+	var execution *adaptive.ExecutionStore
+	if metadata.OperationAPIVersion != "" {
+		if metadata.OperationAPIVersion != adaptive.OperationRequestVersion {
+			journal.Close()
+			recorder.Close()
+			return nil, errors.New("unsupported operation contract")
+		}
+		execution, err = adaptive.OpenExecutionStore(paths.Root, metadata.ID, journal)
+		if err != nil {
+			journal.Close()
+			recorder.Close()
+			return nil, err
+		}
+	}
 	appUID := uint32(envInt("INTERCEPTOR_APP_UID", 20000))
 	appGID := uint32(envInt("INTERCEPTOR_APP_GID", 20000))
 	return &Server{
-		blueprint: report.Blueprint, metadata: metadata, paths: paths, recorder: recorder, journal: journal, blobs: blobs, artifacts: artifacts, attempts: attempts,
+		execution: execution, blueprint: report.Blueprint, metadata: metadata, paths: paths, recorder: recorder, journal: journal, blobs: blobs, artifacts: artifacts, attempts: attempts,
 		injections: injection.NewManager(journal, recorder), identities: map[string]*identity.Authority{}, identityEnv: map[string]string{},
 		identityStop: make(chan struct{}),
 		services:     map[string]services.ManagedHandler{}, sinks: map[string]*services.SinkHandler{}, hostRoutes: map[string]http.Handler{},
@@ -556,7 +573,7 @@ func (s *Server) startHostBridge(ctx context.Context) error {
 	}
 	spoolConfig := bridge.HTTPSpoolServerConfig{
 		Root: filepath.Join(s.paths.Sockets, "http-spool"), Application: appHandler, Control: controlHandler,
-		MaxBytes: adaptive.ArtifactEnvelopeLimit(s.blueprint.Limits.MaxBlobBytes), MaxConcurrentApplication: 8,
+		MaxBytes: adaptive.OperationFrameLimit(s.blueprint.Limits.MaxBlobBytes), MaxConcurrentApplication: 8, ControlClass: operationControlClass,
 	}
 	if err := os.MkdirAll(spoolConfig.Root, 0o700); err != nil {
 		return err
@@ -598,8 +615,25 @@ func (s *Server) controlHandler() http.Handler {
 	mux.HandleFunc("POST /v1/logs/verify", s.verifyHandler)
 	mux.HandleFunc("POST /v1/quiesce", s.quiesceHandler)
 	mux.HandleFunc("POST /v1/stop", s.stopHandler)
+	mux.HandleFunc("POST /v1/operations", func(w http.ResponseWriter, r *http.Request) { s.operationsHandler(w, r, mux) })
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Cache-Control", "no-store")
+		if s.execution != nil && request.Method != http.MethodGet && request.URL.Path != "/v1/operations" {
+			// Explicit local administrator stop remains available. Operator uses session.stop.
+			if request.URL.Path == "/v1/stop" {
+				if err := s.execution.Close("administrator_stop"); err != nil {
+					writeError(writer, 503, "closure_failed", err.Error())
+					return
+				}
+			} else {
+				release, err := s.execution.LocalMutation(request.Context())
+				if err != nil {
+					writeError(writer, 409, "owned_session", err.Error())
+					return
+				}
+				defer release()
+			}
+		}
 		mux.ServeHTTP(writer, request)
 	})
 }
@@ -709,65 +743,6 @@ func (s *Server) registerAttemptHandler(writer http.ResponseWriter, request *htt
 func (s *Server) listAttemptsHandler(writer http.ResponseWriter, _ *http.Request) {
 	writeJSON(writer, 200, map[string]any{"attempts": s.attempts.List()})
 }
-func (s *Server) observationViewHandler(writer http.ResponseWriter, request *http.Request) {
-	attempt, ok := s.attempts.Get(request.PathValue("attempt"))
-	if !ok {
-		writeError(writer, 404, "not_found", "attempt not found")
-		return
-	}
-	var turn Turn
-	s.turnMu.RLock()
-	for _, candidate := range s.turns {
-		if candidate.AttemptID == attempt.AttemptID && candidate.Started.After(turn.Started) {
-			turn = candidate
-		}
-	}
-	s.turnMu.RUnlock()
-	state := "PENDING"
-	errorCode := ""
-	if turn.Status == "complete" {
-		state = "SUCCEEDED"
-	} else if turn.Status == "error" {
-		state = "FAILED"
-		errorCode = "APPLICATION_OPERATION_FAILED"
-	}
-	view := adaptive.ObservationView{APIVersion: adaptive.ObservationViewVersion, SessionID: s.metadata.ID, AttemptID: attempt.AttemptID, FeedbackProfile: s.metadata.FeedbackProfile, Operation: adaptive.OperationView{State: state, ReceiptID: turn.ID, ErrorCode: errorCode}, TargetOutput: adaptive.TargetOutput{ArtifactDigest: turn.OutputDigest, MediaType: turn.MediaType}, Observations: []adaptive.Observation{}, SessionRevision: s.metadata.Revision}
-	if s.metadata.FeedbackProfile == "diagnostic" && turn.Error != "" {
-		view.Observations = append(view.Observations, adaptive.Observation{Kind: "operation_error", Visibility: adaptive.HarnessVisible, Value: map[string]any{"failed": true}})
-	}
-	if s.metadata.FeedbackProfile == "oracle-assisted" {
-		events, err := recording.VerifyFile(s.paths.Events)
-		if err != nil {
-			writeError(writer, 500, "observation_failed", "recorded evidence could not be verified")
-			return
-		}
-		attributed := map[uint64]bool{}
-		for _, event := range events {
-			if event.AttemptID == attempt.AttemptID {
-				attributed[event.Seq] = true
-			}
-		}
-		report, err := s.evaluate()
-		if err != nil {
-			writeError(writer, 500, "observation_failed", "oracle outcomes could not be evaluated")
-			return
-		}
-		for _, result := range report.Oracles {
-			matchesAttempt := false
-			for _, reference := range result.Evidence {
-				sequence, parseErr := strconv.ParseUint(strings.TrimPrefix(reference, "event:"), 10, 64)
-				if parseErr == nil && attributed[sequence] {
-					matchesAttempt = true
-					break
-				}
-			}
-			if result.Fired && matchesAttempt {
-				view.Observations = append(view.Observations, adaptive.Observation{Kind: "oracle_outcome", Visibility: adaptive.HarnessVisible, Value: map[string]any{"oracle_id": result.ID, "oracle_kind": result.Kind, "fired": true}})
-			}
-		}
-	}
-	writeJSON(writer, 200, view)
-}
 func (s *Server) bumpRevision() {
 	s.metadataMu.Lock()
 	s.metadata.Revision++
@@ -849,6 +824,34 @@ func (s *Server) turnHandler(writer http.ResponseWriter, request *http.Request) 
 		writeError(writer, http.StatusBadRequest, "unsupported_route", "turn route is not declared")
 		return
 	}
+	deliveryBody := input.Input
+	if deliveryBody == nil {
+		deliveryBody = input.Body
+	}
+	operationID := input.Operation
+	if operationID == "" {
+		if operation, ok := s.routeOperation(input.Method, input.Path); ok {
+			operationID = operation.ID
+		}
+	}
+	deliveryMediaType := input.MediaType
+	if input.Operation == "" {
+		foundMedia := false
+		for name, value := range input.Headers {
+			if strings.EqualFold(name, "Content-Type") {
+				if foundMedia {
+					writeError(writer, http.StatusBadRequest, "invalid_delivery_input", "multiple Content-Type fields")
+					return
+				}
+				foundMedia = true
+				deliveryMediaType = value
+			}
+		}
+	}
+	if err := s.validateDeliveryInput(operationID, deliveryMediaType, deliveryBody); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_delivery_input", err.Error())
+		return
+	}
 	id := fmt.Sprintf("turn-%d", s.nextTurn.Add(1))
 	identityToken, err := s.issueInboundCaller(input.CallerPrincipal, id)
 	if err != nil {
@@ -873,6 +876,7 @@ func (s *Server) turnHandler(writer http.ResponseWriter, request *http.Request) 
 	}
 	result, err := s.adapter.Invoke(turnContext, applicationInvocation{TurnID: id, Operation: input.Operation, Method: input.Method, Path: input.Path, Headers: input.Headers, Body: body, MediaType: input.MediaType, IdentityToken: identityToken})
 	turn.Code, turn.Headers, turn.Body, turn.MediaType, turn.ExitCode = result.Code, result.Headers, result.Body, result.MediaType, result.ExitCode
+	turn.OutputContractStatus = s.outputContractStatus(operationID, result.MediaType, result.Body)
 	turn.Finished = time.Now().UTC()
 	if err != nil {
 		turn.Status, turn.Error = "error", err.Error()
@@ -892,7 +896,11 @@ func (s *Server) turnHandler(writer http.ResponseWriter, request *http.Request) 
 	if len(turn.Body) <= 64<<10 {
 		inlineBody = string(turn.Body)
 	}
-	_, _ = s.recorder.Append(recording.Draft{Channel: recording.Attack, Layer: "application_bridge", Kind: "turn_completed", Provenance: recording.Application, TurnID: id, AttemptID: turn.AttemptID, PayloadDigest: turn.PayloadDigest, RawRef: turn.OutputDigest, Semantic: map[string]any{"status": turn.Status, "code": turn.Code, "body": inlineBody, "output_ref": turn.OutputDigest, "error": turn.Error}})
+	semantic := map[string]any{"status": turn.Status, "code": turn.Code, "body": inlineBody, "output_ref": turn.OutputDigest, "error": turn.Error}
+	if turn.OutputContractStatus != "" {
+		semantic["output_contract_status"] = turn.OutputContractStatus
+	}
+	_, _ = s.recorder.Append(recording.Draft{Channel: recording.Attack, Layer: "application_bridge", Kind: "turn_completed", Provenance: recording.Application, TurnID: id, AttemptID: turn.AttemptID, PayloadDigest: turn.PayloadDigest, RawRef: turn.OutputDigest, Semantic: semantic})
 	_ = s.recorder.Flush()
 	writeJSON(writer, http.StatusOK, turn)
 }
@@ -1299,13 +1307,28 @@ func (s *Server) deleteInjectionHandler(writer http.ResponseWriter, request *htt
 func (s *Server) createSnapshotHandler(writer http.ResponseWriter, request *http.Request) {
 	var input struct {
 		Label                 string `json:"label,omitempty"`
+		CampaignID            string `json:"campaign_id,omitempty"`
+		Description           string `json:"description,omitempty"`
 		MaximumCommittedBytes int64  `json:"maximum_committed_bytes,omitempty"`
 	}
 	if err := decodeStrict(request, &input, 64<<10); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_snapshot", err.Error())
 		return
 	}
-	checkpoint, err := s.createSnapshot(request.Context(), input.Label, input.MaximumCommittedBytes)
+	if s.execution != nil {
+		if association := s.execution.State().Owner; association != nil {
+			if input.CampaignID != "" && input.CampaignID != association.CampaignID {
+				writeError(writer, 403, "campaign_mismatch", "snapshot campaign differs from session")
+				return
+			}
+			input.CampaignID = association.CampaignID
+		}
+	}
+	if err := snapshot.ValidateMetadata(input.CampaignID, input.Description); err != nil {
+		writeError(writer, 400, "invalid_snapshot", err.Error())
+		return
+	}
+	checkpoint, err := s.createSnapshot(request.Context(), input.Label, input.MaximumCommittedBytes, snapshot.Metadata{CampaignID: input.CampaignID, Description: input.Description})
 	if err != nil {
 		writeError(writer, http.StatusConflict, "snapshot_failed", err.Error())
 		return
@@ -1313,7 +1336,7 @@ func (s *Server) createSnapshotHandler(writer http.ResponseWriter, request *http
 	writeJSON(writer, http.StatusCreated, checkpoint)
 }
 
-func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommittedBytes int64) (snapshot.Checkpoint, error) {
+func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommittedBytes int64, checkpointMetadata snapshot.Metadata) (snapshot.Checkpoint, error) {
 	s.controlMu.Lock()
 	defer s.controlMu.Unlock()
 	s.activityMu.Lock()
@@ -1409,7 +1432,7 @@ func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommit
 	s.metadataMu.RLock()
 	metadataForCheckpoint := s.metadata
 	s.metadataMu.RUnlock()
-	checkpoint, err := snapshot.NewCheckpoint(metadataForCheckpoint.ID, metadataForCheckpoint.ParentCheckpoint, metadataForCheckpoint.EnvironmentDigest, metadataForCheckpoint.AppDigest, journalSeq, journalHash, current.Digest, canonicalSize, eventSeq, label, buildinfo.Version, time.Now())
+	checkpoint, err := snapshot.NewCheckpoint(metadataForCheckpoint.ID, metadataForCheckpoint.ParentCheckpoint, metadataForCheckpoint.EnvironmentDigest, metadataForCheckpoint.AppDigest, journalSeq, journalHash, current.Digest, canonicalSize, eventSeq, label, buildinfo.Version, time.Now(), checkpointMetadata)
 	if err != nil {
 		return snapshot.Checkpoint{}, err
 	}
@@ -1591,6 +1614,9 @@ func (s *Server) quiesce(ctx context.Context) error {
 func (s *Server) Close(ctx context.Context) error {
 	var result error
 	s.closeOnce.Do(func() {
+		if s.execution != nil {
+			result = errors.Join(result, s.execution.Close("session_stopped"))
+		}
 		close(s.identityStop)
 		if s.dnsServer != nil {
 			result = errors.Join(result, s.dnsServer.Close())

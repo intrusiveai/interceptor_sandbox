@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/intrusive-ai/interceptor-sandbox/internal/delivery"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/recording"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/statejournal"
 	"gopkg.in/yaml.v3"
@@ -27,12 +28,14 @@ type MCPDefinition struct {
 }
 
 type MCPTool struct {
-	Name         string         `yaml:"name" json:"name"`
-	Title        string         `yaml:"title,omitempty" json:"title,omitempty"`
-	Description  string         `yaml:"description" json:"description"`
-	InputSchema  map[string]any `yaml:"input_schema" json:"input_schema"`
-	OutputSchema map[string]any `yaml:"output_schema,omitempty" json:"output_schema,omitempty"`
-	Behavior     MCPBehavior    `yaml:"behavior" json:"behavior"`
+	Name             string             `yaml:"name" json:"name"`
+	Title            string             `yaml:"title,omitempty" json:"title,omitempty"`
+	Description      string             `yaml:"description" json:"description"`
+	InputSchema      map[string]any     `yaml:"input_schema" json:"input_schema"`
+	OutputSchema     map[string]any     `yaml:"output_schema,omitempty" json:"output_schema,omitempty"`
+	Behavior         MCPBehavior        `yaml:"behavior" json:"behavior"`
+	ContractBasis    string             `yaml:"contract_basis,omitempty" json:"contract_basis,omitempty"`
+	DeliveryExamples []delivery.Example `yaml:"delivery_examples,omitempty" json:"delivery_examples,omitempty"`
 }
 
 type MCPBehavior struct {

@@ -21,7 +21,7 @@ This page is both a guide and an exact field reference. A few recurring terms:
 - **oracle** means a deterministic check that decides whether a specified
   security-relevant event occurred.
 
-The current schema identity is:
+The original schema identity (still supported) is:
 
 ```yaml
 api_version: interceptor.dev/v1alpha1
@@ -30,6 +30,11 @@ kind: Environment
 
 Use the complete reference environment at
 `examples/reference-environment/environment.yaml` as a working example.
+For application `delivery` / `delivery_asset`, service `export_contracts`
+or MCP `implementation`, select `api_version: interceptor.dev/v1alpha2`.
+See [Delivery contracts](delivery-contracts.md) for these exact fields and the
+matching versioned capability export. Source seeds stay immutable; fidelity file
+writes affect only the session copy.
 
 ## Top-level structure
 

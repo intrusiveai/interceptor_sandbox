@@ -21,7 +21,8 @@ Reference and operational guides:
 - [Architecture](architecture.md)
 - [Model providers](model-providers.md)
 - [Adaptive simulation interface](adaptive-simulation.md)
-- [Cross-VM gateway](cross-vm-gateway.md)
+- [Delivery contracts and public capability context](delivery-contracts.md)
+- [Native operation wire contract](cross-vm-gateway.md)
 - [Host credential stores](credential-stores.md)
 - [Synthetic identity and delegated access](identity.md)
 - [CLI reference](cli-reference.md)
@@ -30,6 +31,7 @@ Reference and operational guides:
 - [Simulated MCP services](mcp-services.md)
 - [Snapshots and restore](snapshots-and-restore.md)
 - [Evidence and storage](evidence-and-storage.md)
+- [Spool file management and evidence purge](file-management.md)
 - [Security and trust model](security.md)
 - [Troubleshooting](troubleshooting.md)
 
@@ -49,9 +51,11 @@ Reference and operational guides:
 | CapabilityManifest | Deterministic, secret-free description of an environment's executable surface. |
 | ObservationView | Feedback-filtered live result visible to an attack harness. |
 | EvidenceBundle | Post-run authoritative attempt, event, snapshot, and artifact index. |
-| ExecutionLease | Short-lived, server-side authorization for a bound set of Cross-VM operations and budgets. |
+| Campaign association | Session/campaign access, worker/revision audit attribution, permanent admission closure and a recorded target-stop choice. |
 | Loopback | A network address available only on the local machine or inside the container, rather than on the wider network. |
 
 Reference pages retain exact field names and implementation terms because users
 need them when configuring or diagnosing the sandbox. Each guide introduces
 those terms in plain language before relying on them.
+
+- [Local Operator integration and lifecycle API](local-api.md) — current same-host MVP contract.

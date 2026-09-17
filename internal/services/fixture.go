@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/intrusive-ai/interceptor-sandbox/internal/delivery"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/recording"
 	"gopkg.in/yaml.v3"
 )
@@ -25,10 +26,11 @@ type FixtureSet struct {
 }
 
 type FixtureRule struct {
-	ID       string          `yaml:"id" json:"id"`
-	Priority int             `yaml:"priority" json:"priority"`
-	Match    FixtureMatch    `yaml:"match" json:"match"`
-	Response FixtureResponse `yaml:"response" json:"response"`
+	Delivery *delivery.Contract `yaml:"delivery,omitempty" json:"delivery,omitempty"`
+	ID       string             `yaml:"id" json:"id"`
+	Priority int                `yaml:"priority" json:"priority"`
+	Match    FixtureMatch       `yaml:"match" json:"match"`
+	Response FixtureResponse    `yaml:"response" json:"response"`
 }
 
 type FixtureMatch struct {
@@ -93,6 +95,9 @@ func ValidateFixtureSet(set *FixtureSet) error {
 	ids := map[string]struct{}{}
 	for index := range set.Rules {
 		rule := &set.Rules[index]
+		if err := delivery.Validate(rule.Delivery); err != nil {
+			return fmt.Errorf("fixture %s delivery: %w", rule.ID, err)
+		}
 		if rule.ID == "" {
 			return fmt.Errorf("fixture rule %d requires id", index)
 		}

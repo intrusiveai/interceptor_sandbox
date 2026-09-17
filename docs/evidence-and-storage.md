@@ -28,12 +28,13 @@ The layout is conceptually:
     app.lock.json               wrapper and optional TLS identity binding
     tls/                        private server keypair when local TLS is enabled
   audit/credential-resolutions.jsonl  host-only secret resolution audit
-  blobs/sha256/                 shared content-addressed objects
   sessions/<session-id>/
-    session.json                lifecycle, digests, limits, URLs, ancestry
+    session.json                lifecycle, campaign ID, spool limit, digests, ancestry
     events.jsonl                hash-chained observations
     state.jsonl                 hash-chained logical transactions
     file-manifest.json          latest mutable-root manifest
+    blobs/sha256/               session-owned content-addressed objects
+    exports/                    managed evidence exports
     artifacts.json              verified payload descriptors
     attempts.json               immutable attempt contexts and ancestry
     checkpoints/*.json          logical restore points
@@ -132,10 +133,12 @@ SHA-256 digital fingerprint. Events and state changes refer to that fingerprint
 instead of copying the content into every record. Interceptor checks both the
 fingerprint and size when reading it.
 
-Blobs are shared across sessions and retained by `interceptor delete`. The MVP
-does not provide garbage collection or secure deletion. If retention policy
-requires erasure, stop all sessions, inventory all required evidence, and manage
-the dedicated data root as a whole using approved host procedures.
+Each session owns its blobs. Restores copy all required content and verified journal
+prefixes into the replacement group before readiness. Retain evidence until explicit
+`interceptor purge --session`, `--campaign` or `--all`; `delete` aliases session purge.
+Purge removes complete selected groups after confirming they are inactive, while
+retained sessions remain independent. See [file management](file-management.md) for
+spool shutdown cleanup, retained-data scope and purge rules.
 
 ## View and verify
 
@@ -198,6 +201,8 @@ not make the remaining evidence non-sensitive.
 Host credential-resolution audit records live in the data root's separate
 `audit/` directory. They are deliberately excluded from session evidence
 exports because secret-store deployment metadata is not target evidence.
+Session/campaign purge preserves this audit; `--all` removes it after confirming
+its writers are inactive, while preserving credential configuration.
 
 The default bridge also creates short-lived request and response files. They are
 private to the current user, appear to the receiver only after they are fully

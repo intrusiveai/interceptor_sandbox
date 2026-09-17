@@ -34,7 +34,7 @@ interceptor capabilities --environment ./environment
 During a run it is also available at `GET /v1/capabilities`. Its digest binds
 the sealed Environment and Application, supported operations, per-service
 HTTP/HTTPS transports and injection surfaces, dynamic/static attacker response modes, logical
-file-injection namespaces and creation ceilings, the exact Cross-VM operation
+file-injection namespaces and creation ceilings, the exact operations operation
 set, and per-surface scopes, placements, selector fields, and carriers. It also
 reports model codecs/adapters,
 feedback profiles, snapshot support, DNS policy/query limits, HTTP/HTTPS front
@@ -56,12 +56,13 @@ The concrete flow is:
 4. It invokes `POST /v1/turns` with `attempt_id`, `payload_digest`, and either
    inline input or `artifact_digest`. An armed injection may carry the same
    attempt and payload identity.
-5. It reads `GET /v1/observations/{attempt-id}`. Large target output is returned
-   by digest, not copied into the observation.
+5. It collects native `observation.read` for the exact invocation turn ID, then
+   reads permitted entry bytes with `observation.content.read`. The private GET
+   view is also available for host administration. See [live feedback](feedback.md).
 
 Exact registered content and target output referenced by an ObservationView are
 available from `GET /v1/artifacts/{digest}` on the trusted local control API. A
-Cross-VM caller needs the separate `artifact.read` grant operation.
+operations caller needs the typed `artifact.read` operation.
 
 Artifact and attempt registrations are journaled. A restore reconstructs only
 registrations committed at the selected checkpoint, preserving lineage without
@@ -82,6 +83,6 @@ trusted host operation available only after the session has stopped or failed.
 Interceptor does not call AEF; Operator or another trusted collector verifies
 and relays the bundle.
 
-See [Cross-VM gateway](cross-vm-gateway.md) for the production authorization
+See [Local integration](local-api.md) for the same-host MVP integration
 boundary and [Injections and evaluation](injections-and-evaluation.md) for the
 new response-side surfaces and typed event oracle.

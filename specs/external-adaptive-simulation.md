@@ -1,8 +1,8 @@
 # External Adaptive Simulation Interface
 
-Status: implemented architecture extension  
-Schema family: `interceptor.dev/v1alpha1`  
-Date: 2026-09-02
+Status: normative architecture extension; Section 13 implemented in source 2026-09-15; deployment qualification required
+Schema families: native resources v1alpha1; delivery capabilities and Operations requests v1alpha2
+Date: 2026-09-13
 
 ## 1. Purpose
 
@@ -57,7 +57,7 @@ view with execution truth without giving the engine unfair live knowledge.
 | INT-AEF-AD-007 | Native MCP result injection | ideal | Adds native tool-result compromise distinct from model-boundary rewriting. |
 | INT-AEF-AD-008 | Checkpoint fork convenience | marginal | Improves branching efficiency; existing snapshot/restore primitives can compose it externally. |
 | INT-AEF-AD-009 | Typed event-match oracle | ideal | Makes post-run scoring more expressive without scripts. |
-| INT-AEF-AD-010 | Cross-VM harness interface | required | Provides the secure production boundary between Operator and Interceptor. |
+| INT-AEF-AD-010 | Operations harness interface | required | Provides the secure production boundary between Operator and Interceptor. |
 | INT-AEF-AD-011 | Extended native model-provider adapters | ideal | Gives target applications and Operator's attack engine a consistent provider matrix without protocol translation. |
 | INT-AEF-AD-012 | Host secret-store credential resolution | required | Lets production Interceptor controllers retrieve external-service credentials without plaintext environment variables. |
 | INT-AEF-AD-013 | Closed DNS and locally trusted service TLS | required | Preserves realistic service origins while keeping DNS and HTTP/MCP traffic inside the sealed environment. |
@@ -146,37 +146,28 @@ returned with a label that asks the caller to ignore it.
 Every session selects one immutable profile, initially:
 
 - `black-box` — target-visible output and minimum operation status;
-- `diagnostic` — black-box plus allowlisted coarse normalized observations;
-- `oracle-assisted` — explicit research mode exposing selected oracle outcomes,
+- `diagnostic` — black-box plus normalized operation errors and recorded delivery facts;
+- `oracle-assisted` — diagnostic plus supported, attributed event-backed oracle outcomes,
   never raw secrets or unrestricted events.
 
-The environment declares which profiles it supports. An execution lease may narrow but
-cannot broaden the active profile.
+The environment declares which profiles it supports. Operator may narrow the visible feedback but cannot broaden the active profile.
 
-### 5.3 ObservationView
+### 5.3 ObservationView and content
 
-```json
-{
-  "api_version": "interceptor.dev/observation-view/v1alpha1",
-  "session_id": "session-01",
-  "attempt_id": "attempt-0003",
-  "feedback_profile": "black-box",
-  "operation": {
-    "state": "SUCCEEDED",
-    "receipt_id": "receipt-01"
-  },
-  "target_output": {
-    "artifact_digest": "sha256:...",
-    "media_type": "application/json"
-  },
-  "observations": [],
-  "session_revision": 43
-}
-```
+The normative [live feedback contract](../docs/feedback.md) defines native
+`observation-view/v1alpha2`, optional AttemptContext `observation_selection`,
+fixed per-invocation receipts and bounded `observation.content.read` bytes.
+Omitted selection means all permitted kinds, bounded by the immutable profile;
+selected subsets cannot broaden it. Selection is part of attempt identity.
 
-Outputs are bounded and content bodies use authorized artifact reads when too
-large for the response. Absence of an observation is not evidence that an
-effect did not occur.
+Collect the exact invocation's view before cleanup/transition; do not silently
+select the latest turn or regenerate old observations from current state. The
+manifest accounts for all fixed categories, including withheld, unavailable and
+partial feedback. Retained receipt reads preserve campaign and source-attempt
+binding across target restore/stop without restarting the target. EOF, capture
+truncation and collection completeness are separate. Missing oracle/delivery
+facts are not negative results. Operator implements its own guest receipt mapping
+and model-facing projection under the [shared contract](../../operator_sandbox/schemas/FEEDBACK_CONTRACT.md).
 
 ## 6. INT-AEF-AD-003 — capability manifest
 
@@ -185,7 +176,7 @@ the sealed Environment and Application digests. It includes:
 
 - manifest and Interceptor schema/release versions;
 - target/application identity and supported feedback profiles;
-- typed application and Cross-VM operations;
+- typed application and Operations operations;
 - injection surfaces, placements, modes, selectors, carriers, and limits;
 - per-target injection surfaces, creatable state collections, logical
   file-injection namespaces and their ceilings;
@@ -200,12 +191,19 @@ the sealed Environment and Application digests. It includes:
   capabilities, without private listener or certificate material;
 - attempt, invocation, artifact, concurrency, and size limits.
 
-It excludes credentials, prompt bodies, fixture bodies, hidden canary values,
-raw host/container paths, private network details, evidence, and operator-only
-configuration.
+It excludes credentials, private prompt/fixture bodies, hidden canary values,
+private host/container paths, private network details, evidence, and
+operator-only configuration. Explicitly reviewed public delivery examples are
+allowed. Logical service paths, tool names, JSON Pointers and namespace-relative
+filenames are selectors, never destination or administrative routes.
 
-The same sealed inputs produce the same canonical manifest digest. An execution
-lease and any AEF ScenarioBundle bind that exact digest. A changed manifest
+[INT-DEL-001–005](delivery-contracts.md) define v1alpha2 application delivery
+contracts, opt-in service endpoint exports, uncertain MCP outputs, the named
+implementation extension point and source/served-copy mutation semantics.
+v1alpha1 Blueprints retain their existing manifest representation. A consumer
+must support the advertised version, rather than relabeling an old fixture.
+
+The same sealed inputs produce the same canonical manifest digest. The session binding and any AEF ScenarioBundle bind that exact digest. A changed manifest
 requires revalidation and, for AEF plans, a new ScenarioBundle.
 
 ## 7. INT-AEF-AD-004 — attempt-indexed evidence export
@@ -255,7 +253,7 @@ identify the source and resulting session lineage. Snapshot bodies are not
 included in an ordinary EvidenceBundle unless an export policy explicitly
 lists them as protected artifacts.
 
-Export requires trusted host authority unavailable to the guest execution lease. The
+Export requires trusted host authority unavailable to the guest. The
 current local interface writes a deterministic portable tar stream after
 integrity verification and includes explicit completeness/truncation markers.
 An orderly shutdown persists the final protected evaluation; if abnormal
@@ -371,7 +369,7 @@ arbitrary descendant stdout or undeclared localhost communication.
 Operator-controlled snapshot and trusted host restore operations unless
 measurements demonstrate that an additional atomic primitive is necessary.
 
-The baseline Cross-VM interface exposes narrow Operator-controlled live
+The baseline Operations interface exposes narrow Operator-controlled live
 `snapshot.create`; restore remains an existing host control-plane operation
 because it creates a fresh Interceptor session. Add an optional atomic
 convenience operation that quiesces and checkpoints a
@@ -405,224 +403,231 @@ explicit attempt/injection provenance, never time proximity alone.
 Raw oracle details remain protected unless an immutable oracle-assisted profile
 expressly exposes a normalized result.
 
-## 13. INT-AEF-AD-010 — Cross-VM harness interface
+## 13. INT-AEF-AD-010 — Operations interface
 
 ### 13.1 Boundary
 
-Loopback cooperative-control URLs are local conveniences and not a production
-authorization boundary. Production Operator engines run in a separate microVM
-and receive no Docker socket, Interceptor data root, private Unix socket, host
-path, provider credential, generic network tunnel, arbitrary proxy, shell, raw
-event stream, signing key, canary, or protected evidence.
+Operator and Interceptor run on the same trusted host. `interceptor run` starts
+one target container and the integrated API at `127.0.0.1:8080`. There is no
+separate gateway process, integration token, TLS or remote provisioner in this
+MVP. The network-disabled engine guest talks only to Operator's typed non-network
+broker. It receives no Interceptor private bridge, Docker socket, provider
+credential, host data root or protected evidence. Model-provider credential
+handling remains unchanged.
 
-```text
-operator guest          trusted Operator Runtime       Interceptor gateway
-attack engine   <---->  typed policy broker    <---->  typed execution API
-```
+The normative [local integration contract](../docs/local-api.md) defines startup,
+attachment, routes, restore, stop, evidence, request limits and failure behavior.
+AEF supplies immutable inputs and receives finalized bundles; it is not a live
+caller. All host users who can reach loopback are trusted in this MVP.
 
-AEF is not a live caller. It supplies the ScenarioBundle to the trusted
-Operator Runtime before execution and receives finalized bundles afterward.
+### 13.2 Session identity and campaign access
 
-### 13.2 Integration authentication and ExecutionLease
+The first `/v1/attach` binds the service instance to one campaign and returns the
+current native session ID, capabilities, lifecycle revision and caller attribution.
+Same-campaign attachment with the same stop policy is idempotent; another campaign
+is rejected for the entire instance lifetime. Session IDs and binding fields are
+correlation data, not credentials. The service associates each native session with one campaign using the v1alpha2
+supervisor contract. Principal records internal service identity, not caller authority. `allow_target_stop` is immutable, defaults false, and records Operator's
+explicit final target-shutdown choice.
 
-The gateway runs for one already-running Interceptor session. It does not
-create sessions or select environments. The trusted Runtime first authenticates
-with a shared integration bearer token and requests an immutable, short-lived
-ExecutionLease:
+Operator uses the current session and supplies its own worker/revision attribution
+in native experiment requests. The
+supervisor retains durable request deduplication, expected-revision checks,
+campaign access, native budgets and permanent per-session closure. The
+integrated service additionally rejects stale-session mutations before forwarding.
+Planned restore closes/removes the source, starts a fresh session, binds the same
+campaign and advances the native run revision once on success. No containers
+overlap. Explicit restore authorizes source replacement independently of optional
+final-stop permission.
 
-```json
-{
-  "api_version": "interceptor.dev/execution-lease-request/v1alpha1",
-  "idempotency_key": "issue-campaign-01-revision-01",
-  "operator_vm_instance_id": "opvm-random-per-boot",
-  "campaign_id": "campaign-01",
-  "session_id": "session-approved",
-  "scenario_bundle_digest": "sha256:...",
-  "capability_manifest_digest": "sha256:...",
-  "environment_digest": "sha256:...",
-  "application_digest": "sha256:...",
-  "feedback_profile": "black-box",
-  "allowed_operations": [
-    "session.status",
-    "capabilities.read",
-    "artifact.register",
-    "artifact.read",
-    "attempt.register",
-    "injection.arm",
-    "injection.delete",
-    "application.invoke",
-    "observation.read",
-    "snapshot.create",
-    "session.stop"
-  ],
-  "limits": {
-    "maximum_attempts": 120,
-    "maximum_concurrent_invocations": 1,
-    "maximum_artifact_bytes": 1073741824,
-    "maximum_wall_seconds": 3600,
-    "maximum_snapshot_creations": 8,
-    "maximum_cumulative_snapshot_bytes": 4294967296
-  },
-  "expires_at": "2026-08-31T21:00:00Z"
-}
-```
+Public `session.owner` accepts `close_execution` only; binding uses attachment.
+An explicit close is terminal for this campaign, bypasses pending mutation work,
+and prevents later restore. Already-dispatched effects may finish. Campaign-scoped
+injection cleanup and permitted stop remain available. A planned healthy restore
+uses the lifecycle operation rather than terminal campaign closure. Restored
+attempt registries retain campaign provenance. No process restart or ownership
+transfer resumes a failed campaign.
 
-`POST /v1/execution-leases` requires `Authorization: Bearer
-<integration-token>`. The integration token is mapped by configuration to one
-bounded principal and is used only for lease issuance, introspection, and
-revocation. Production controllers resolve it through HostCredentialRef from
-AWS Secrets Manager, Azure Key Vault, Google Cloud Secret Manager, or
-HashiCorp Vault. Environment token input is a development-only compatibility
-source and production mode rejects it. The token is never accepted as a CLI
-argument, exposed to the sandbox guest, or persisted in evidence.
+Native execution closure is also terminal for the campaign. After each forwarded
+mutation, the integrated API reconciles authoritative native execution state;
+uncertain mutation responses or transport failures close admission conservatively.
+It persists the instance ledger's `closed` flag before releasing the mutation gate
+or returning the result. If that persistence fails, in-memory closure and the
+ledger-failure latch still block mutations and restore. Known rejections do not
+close an otherwise healthy campaign. Status reads, exact owned injection cleanup
+and opted-in final stop remain available subject to existing failure checks.
 
-The gateway returns an `interceptor.dev/execution-lease/v1alpha1` record and a
-random opaque bearer `access_token`. The token is returned only in the
-idempotent issuance response. The gateway stores its digest for ordinary
-lookup and keeps lease state in memory for the lifetime of the per-session
-process. `GET /v1/execution-leases/{lease_id}` returns public lease state and
-usage but never the token. `DELETE` revokes it immediately. Both administrative
-operations require the integration token; `POST /v1/cross-vm` requires the
-distinct lease token.
+Before a restore closes or stops the source, the integrated handler independently
+queries native `session.status` under the mutation gate. It requires the matching
+session/campaign association, open execution and running target; a cached `closed: false`
+or a running container alone is insufficient. Closed, unavailable or malformed
+native state rejects restore and closes campaign admission without replacing the
+target. The subsequent native close acknowledgement must confirm planned
+controller closure, not an earlier fault closure. Rejection never starts a new
+session or advances the run revision. These checks live in the existing Interceptor
+process; they introduce no separate lifecycle service or recovery mechanism.
 
-```json
-{
-  "lease": {
-    "api_version": "interceptor.dev/execution-lease/v1alpha1",
-    "lease_id": "lease-random-opaque-identifier",
-    "principal": "operator-runtime-01",
-    "operator_vm_instance_id": "opvm-random-per-boot",
-    "campaign_id": "campaign-01",
-    "session_id": "session-approved",
-    "scenario_bundle_digest": "sha256:...",
-    "capability_manifest_digest": "sha256:...",
-    "environment_digest": "sha256:...",
-    "application_digest": "sha256:...",
-    "feedback_profile": "black-box",
-    "allowed_operations": ["session.status", "application.invoke"],
-    "limits": {"maximum_concurrent_invocations": 1},
-    "issued_at": "2026-08-31T20:00:00Z",
-    "expires_at": "2026-08-31T21:00:00Z",
-    "status": "active"
-  },
-  "access_token": "opaque-secret-returned-only-at-issuance",
-  "token_type": "Bearer"
-}
-```
+Campaign ID is the access boundary. Worker ID and campaign run revision are
+required attribution on native operation requests, not permission requirements;
+a different worker or revision of the same campaign may interact with the current
+target and read retained campaign sessions. The internal service principal is
+provenance, not an exclusive owner. Historical `session.owner`/`owner` names remain
+wire labels for campaign association, stop policy and terminal closure.
+They do not establish worker ownership or require transfers after restore.
 
-IDs, timestamps, arrays, and limits are bounded. Session, environment,
-application, manifest, VM instance, and feedback profile must match live state.
-Unknown, expired, revoked, stale, or mismatched leases fail closed. An issuance
-idempotency key repeated with the exact body returns the same response; reuse
-with different content fails.
+Injection cleanup accepts any existing injection in the addressed campaign session,
+including checkpoint-restored injections with no arm record in the new execution
+store. Missing injections return not-found. Duplicate injection IDs cannot overwrite
+existing definitions; use a fresh ID or delete before reusing an ID. Mutated payloads
+use new operation IDs. Native expected-session-revision checks, current-target
+addressing, closure, visibility, budgets and stop opt-in remain in force.
 
-Zero or omitted request limit fields inherit the gateway's session-derived
-ceiling. Nonzero values above the ceiling or implementation defensive maximum
-are rejected rather than truncated. Native Interceptor limits still apply.
+Duplicate-effect comparison excludes worker/revision attribution, including the
+legacy worker field in a `session.owner` body. The full original request and its
+fingerprint remain immutable audit data; a retry returns the original result and
+never overwrites the originating caller. Other request fields/command bytes remain
+fixed for an exact retry, including target, operation ID, request ID, deadline and
+expected native revision. A new worker can also query `operation.status` without
+copying the original request. Lifecycle duplicate comparison likewise excludes
+caller attribution while preserving the admitted request in its ledger.
 
-The ScenarioBundle digest is a correlation and narrowing claim; it is optional
-for non-AEF producers. It cannot broaden Interceptor policy.
+Attach requires Operator `worker_instance_id`; lifecycle restore/stop requests
+require `worker_instance_id` and positive `run_revision` as audit metadata. These
+do not control the server-maintained lifecycle sequence.
 
-Snapshot fields are optional ceilings and apply only when `snapshot.create` is
-also present in `allowed_operations`. They never disable Interceptor's
-configured hard capacity limits. An accepted create mutation consumes its
-operation count even if it later fails. Only a successfully committed snapshot
-consumes canonical snapshot bytes; deleting it does not refund cumulative
-bytes. Operator supplies the remaining campaign allowance when requesting each
-fresh lease; Interceptor additionally enforces its native per-session limits.
+### 13.3 Operation records and request handling
 
-### 13.3 Request and idempotency
+The envelope is `interceptor.dev/operation-request/v1alpha2`; the public body
+contains `request` (shown below) and `body` (the closed operation body). Native
+codecs/fixtures and the detailed wire guide define its representation:
 
 ```json
 {
-  "api_version": "interceptor.dev/cross-vm-request/v1alpha1",
-  "request_id": "req-unique",
-  "idempotency_key": "idem-unique",
-  "lease_id": "lease-opaque-identifier",
+  "api_version": "interceptor.dev/operation-request/v1alpha2",
+  "request_id": "request-01",
+  "operation_id": "operation-0003-invoke",
   "operation": "application.invoke",
   "session_id": "session-approved",
-  "operator_vm_instance_id": "opvm-random-per-boot",
+  "campaign_id": "campaign-01",
+  "worker_instance_id": "operator-worker-01",
+  "run_revision": 1,
   "expected_session_revision": 42,
   "attempt_id": "attempt-0003",
   "attempt_context_digest": "sha256:...",
   "body_digest": "sha256:...",
-  "deadline": "2026-08-31T20:02:00Z"
+  "deadline": "2026-09-14T21:00:00Z"
 }
 ```
 
-The gateway resolves the bearer token to its server-side lease, validates the
-body against the operation schema, verifies its digest, and atomically checks
-expected session revision for mutations. The request `lease_id` must match that
-resolved lease.
+Operator records the exact command, correlation IDs, native receipts, result or
+uncertainty and resource charges in its durable campaign journal. Interceptor
+preserves its existing event recording, state journals, attempt/artifact registry,
+evaluation and evidence export. These establish what happened and what remains
+unknown for reporting; they are not instructions to resume a failed campaign.
+Private native/protected records never become live harness context.
 
-Idempotency keys are scoped to lease, session, operation, and body digest. A
-concurrent duplicate receives `operation_in_progress` and never executes the
-mutation twice; reuse with different content fails. Completed/unknown receipts
-and in-flight keys are bounded. An ambiguous mutation timeout is `UNKNOWN`, not
-an automatic retry. The caller reconciles by operation status or stops for
-trusted review.
+Within a live execution, keep bounded duplicate-request suppression and mutation
+serialization. The same request/operation identity with different command bytes
+or target/campaign bindings is a conflict (worker/revision attribution is excluded); concurrent duplicates cannot create a second effect.
+Return an already-known result or in-progress indication when available. Capacity
+exhaustion rejects new work before effects rather than evicting active duplicate
+protection. A lost reply or unavailable lookup is not proof of non-execution.
+Operator reconciles transport loss through read-only operation lookup within
+bounded recovery deadlines. It does not resubmit an uncertain mutation as a new
+operation or continue failed execution.
+
+`operation.status` accepts exactly one of `receipt_id` (the existing native
+application-turn lookup) or `operation_id` (the durable mutation record).
+Historical reporting uses retained native recording and
+evidence export, with explicit partial/missing outcomes when a result is absent.
+Status inspection and export do not start the target or grant execution authority.
+The source includes native request/result codecs and compatibility fixtures.
+See the wire guide for bounded retention and journal-integrity behavior.
 
 ### 13.4 Initial operation surface
 
+The integrated local service provides `POST /v1/operations` without integration
+authentication. Host-owned `session.owner` is never derived from an engine operation.
+
 | Operation | Purpose |
 |---|---|
-| `session.status` | Bounded lifecycle, revision, and remaining limits. |
-| `operation.status` | Mutation receipt lookup by bound idempotency key. |
-| `capabilities.read` | Secret-free manifest for the bound environment. |
-| `artifact.register` | Stream and commit one bounded content-addressed artifact. |
-| `artifact.read` | Read one exact registered artifact when the lease explicitly permits content access. |
+| `session.owner` | Irreversibly close execution; `/v1/attach` performs native binding internally. |
+| `session.status` | Available native lifecycle/revision/limits plus the bound owner and execution-closed state. |
+| `operation.status` | Lookup by `receipt_id` while native turn status is available, or durable mutation lookup by `operation_id`. |
+| `capabilities.read` | Secret-free manifest for the fixed environment. |
+| `artifact.register` | Register a bounded content-addressed artifact. |
+| `artifact.read` | Read one registered or permitted observation-referenced artifact. |
 | `attempt.register` | Register immutable producer-neutral AttemptContext. |
-| `injection.arm` | Arm a declared injection for that attempt and artifact. |
-| `injection.delete` | Remove one exact injection by ID. |
+| `injection.arm` | Arm a declared injection and record originating campaign/revision. |
+| `injection.delete` | Delete one existing campaign injection and record its outcome. |
 | `application.invoke` | Invoke one declared application operation. |
-| `observation.read` | Return the permitted ObservationView. |
-| `snapshot.create` | Operator-controlled quiesce and content-addressed snapshot creation. |
-| `session.stop` | Request orderly stop. |
+| `observation.read` | Collect an exact-invocation fixed permitted view or retrieve its receipt. |
+| `observation.content.read` | Read at most 256 KiB of receipt-scoped permitted bytes with explicit availability and truncation. |
+| `snapshot.create` | Planned target checkpoint within capacity; optional label/description with campaign ID from request/session, never failed-session continuation. |
+| `session.stop` | Use `/v1/lifecycle` for permitted, confirmed target stop. |
 
-Evidence export, raw evaluation, session creation/deletion, environment sealing,
-provider selection, image construction, snapshot deletion/export, and
-unrestricted or cross-campaign restoration are host/control-plane operations
-under separate credentials.
+Execution mutations require the same campaign and expected native session revision.
+Worker ID and campaign revision are attribution only.
+`close_execution` bypasses the revision check and running mutation queue, so
+concurrent completion cannot prevent shutdown. The explicit local administrator
+stop command closes admission; Operator must use typed `session.stop` and must
+not fall back to the administrator command to bypass its recorded stop policy.
+Read-only reporting and bounded finalization use the configured session scope.
+Restore, confirmed stop and protected evidence export are provided by the same
+integrated local service. Initial preparation/sealing/image construction and
+administrator evaluation remain host CLI operations. Campaign checkpoint
+inventory/inspection use the integrated `/v1/snapshots/list` and
+`/v1/snapshots/inspect` routes, including retained earlier sessions.
+Native target snapshots/restore are retained as experiment features: they capture
+target state, not harness context. A planned restore is allowed only from a
+healthy campaign at a quiescent boundary with known operation outcomes. It creates
+a fresh Interceptor target session with existing `restored_from` ancestry while
+the same Operator harness remains alive with its conversation, hypotheses, scratch
+and pipes. Operator durably records the new binding/revision and returns it to
+that live harness before further dispatch. Known preflight rejection leaves the
+old target/harness/revision usable; post-closure failure or uncertainty is terminal.
+It cannot resume a failed campaign or recreate harness context from a checkpoint.
 
-Snapshot mutations require expected session revision, operation idempotency,
-campaign/session and sealed environment/application/capability/release
-bindings, parent lineage where applicable, and a bounded reason. The response
-is a bounded receipt and does not expose snapshot bytes or protected inventory
-to the guest.
-
-Restore is never added to a live ExecutionLease. Operator first revokes the current
-lease and stops its guest, then invokes Interceptor's authenticated host restore
-operation with an exact permitted source session and checkpoint. Interceptor
-verifies the checkpoint and sealed inputs and creates a fresh session with
-`restored_from` ancestry. Operator validates that result and requests a fresh
-ExecutionLease for a fresh MicroVM revision. Failed restore leaves the source session
-and checkpoint unchanged.
-
-The gateway constructs private local requests from typed values. It never
-forwards guest-supplied URLs, paths, headers, CLI arguments, or bridge commands.
+At campaign execution end, Operator closes experiment admission and performs bounded
+residual-injection cleanup under the same campaign, regardless of creator worker/revision. Deletion cannot
+undo fidelity writes or application effects. Already-stopped targets are not
+restarted for cleanup. Failed/unknown cleanup is reported and does not delay
+guest destruction or cause experimental continuation. A user-attached target is
+stopped only when that option was explicitly selected. Later authorized cleanup
+or evidence collection may finish outstanding finalization without reopening
+execution; unknown outcomes never authorize a guessed mutation replay.
 
 ### 13.5 Transport and availability
 
-The implemented network profile is a private HTTP backend behind an
-enterprise-managed TLS load balancer or private reverse proxy. The load
-balancer owns certificates and HTTPS; direct exposure of the HTTP listener to
-an untrusted network is nonconformant. Bearer authentication is independent of
-network topology, so Operator and Interceptor may run on different hosts.
-Integrity in transit is supplied by the front-end TLS path; application-level
-authorization, idempotency, bounded frames, deadlines, and rate limits remain
-enforced by the gateway.
+All public integration routes bind to `127.0.0.1:8080`. The service retains native
+private file-spool or Unix transport to the network-disabled target. No extra
+application/control HTTP listeners are exposed by integrated `run`.
 
-Revocation, expiry, guest termination, or session stop immediately prevents new
-operations. Interceptor outage yields bounded failure; it does not authorize a
-fallback path around the gateway.
+Restore/stop admission and results are fsynced in a bounded host instance ledger;
+exact retries return the original result or in-progress status, including across
+session replacement. Experiments retain their separate native v1alpha2 records.
+A lost response is reconciled under its original ID; never invent a fresh ID to
+repeat an uncertain effect. Restore stops the old target before starting the new
+one. Failure after closure is terminal and cannot authorize another experiment.
+
+The host service itself owns the API, provider bridge and target lifecycle.
+There is no independent gateway or gateway replacement protocol. Host-service,
+controller/worker, guest or target failure ends execution. A restarted native
+supervisor closes an old owner. Operator destroys the harness and reports
+unconfirmed closure/results. Saved running records are audit evidence, not a
+restart plan. Remote transport, authentication and multi-instance deployment are
+deferred beyond this MVP.
 
 ### 13.6 Post-run export boundary
 
-After Operator revokes the live ExecutionLease and stops the guest, the trusted host
-may use separate host export authority to request the EvidenceBundle for that session.
-The live lease can never be upgraded in place. Evidence bytes return only to
-the trusted host, which verifies and binds every campaign session's bundle into
-its AEF FinalSubmission.
+After target stop, the same host API remains alive for `/v1/status` and
+`/v1/evidence`. Both source and restored session exports are accessible only under
+the bound campaign. Export verifies native journals and streams bounded archive
+data without accepting a caller host path. Operator verifies hashes, records
+partial/missing outcomes and binds each native session to its campaign revision;
+the harness never receives protected evidence. Optional final target shutdown
+remains governed by the attach policy. Ctrl+C ends the service and remaining
+target; later administrator CLI export is available from retained records.
 
 ## 14. INT-AEF-AD-011 — extended native model providers
 
@@ -727,8 +732,8 @@ secret value or static cloud access credential.
 ```
 
 `HostCredentialRef` and its `SecretStoreProfile` are permission-restricted host
-controller configuration. Environment Blueprints, Cross-VM requests, execution
-leases, applications, and harnesses refer to neither a store nor a locator. A
+controller configuration. Environment Blueprints, Operations requests, execution
+session bindings, applications, and harnesses refer to neither a store nor a locator. A
 reviewed model-provider profile may refer only to the stable `credential_id`.
 Untrusted input cannot replace the backend, secret name, version, JSON field,
 endpoint, trust root, project, vault, region, namespace, or authentication mode.
@@ -775,7 +780,7 @@ The existing `--model-api-key-env` behavior may remain as an explicit local
 development compatibility source. It is disabled by default in production
 mode, emits a visible warning when enabled, and does not satisfy production
 conformance. Secret values are never accepted through a Blueprint, CLI
-argument, session API, Cross-VM request, or inline controller profile.
+argument, session API, Operations request, or inline controller profile.
 
 Secret-store configuration and credential bindings are not target capabilities.
 `CapabilityManifest` and `EvidenceBundle` omit configured backend kinds,
@@ -800,7 +805,7 @@ Implementation should prefer small extensions to existing boundaries:
 - host credential-reference schema, backend resolver interface, workload
   identity bootstrap, bounded cache, audit redaction, and fake secret stores;
 - post-run evidence exporter;
-- a narrow authenticated Cross-VM gateway adapter.
+- an integrated loopback-only Operations and lifecycle API.
 
 Do not put AEF client logic or attack-engine behavior in Interceptor.
 
@@ -825,10 +830,10 @@ Do not put AEF client logic or attack-engine behavior in Interceptor.
 
 ### Phase III — secure product boundary
 
-- Cross-VM gateway, secret-store-backed integration authentication, opaque
-  ExecutionLease, typed operations,
-  idempotency, Operator-controlled snapshot/restore with cumulative accounting,
-  revocation, independent feedback enforcement, and host-only evidence export.
+- Integrated localhost service, campaign binding, session-owned
+  campaign association and per-operation worker/revision attribution, closed execution admission and reportable records;
+  Operator-controlled snapshot/restore with cumulative accounting, independent
+  feedback enforcement and host-only evidence export.
 
 ### Phase IV — fidelity enhancements
 
@@ -857,15 +862,24 @@ Do not put AEF client logic or attack-engine behavior in Interceptor.
 - A trusted post-run exporter obtains complete or explicitly partial evidence
   after live authority closes.
 - Capability manifests are deterministic and secret-free.
-- Cross-VM requests cannot acquire Docker, host filesystem, generic proxy,
+- Operations requests cannot acquire Docker, host filesystem, generic proxy,
   shell, arbitrary URL, or private bridge authority.
-- Replay, stale revision, mismatched body, expired or revoked lease, excess budget, and
-  cross-session operations fail closed.
+- Different campaigns, closed execution, stale native state revisions, changed command under an
+  identity, excess native limits and cross-session requests fail closed. Concurrent
+  live duplicates do not create additional effects.
+- Session campaign association is atomic and immutable; closing execution is irreversible
+  across request retries. A failed execution cannot be resumed by restarting a
+  controller/service or replaying recorded operations. Healthy planned restore
+  creates a fresh native session under the same campaign.
+- Event/state journals, attempt/artifact records and evidence export retain
+  attribution and explicit partial/unknown outcomes after failure.
+- Residual cleanup remains bounded and attributable. Failure never delays guest
+  teardown, fabricates a clean result or reopens experimental execution.
 - Snapshot and restore actions require Operator control, preserve
   content-addressed lineage, enforce local and Operator-held cumulative limits
-  across fresh Operator VM revisions, and appear in protected evidence.
+  across planned target-state revisions, and appear in protected evidence.
 - An engine can at most request a permitted snapshot action and cannot obtain
-  snapshot bytes, arbitrary inventory, cross-campaign restore, or an
+  snapshot bytes, unrelated inventory, cross-campaign restore, or an
   administrative credential.
 - AD-006 and AD-007 tests prove the new ingress positions are distinct from
   existing request-side and model-boundary injection.
@@ -886,7 +900,7 @@ Do not put AEF client logic or attack-engine behavior in Interceptor.
   records identify the credential binding and opaque backend version without
   storing a locator, value, or unkeyed digest.
 - Production mode rejects secret values from environment variables, CLI
-  arguments, Blueprints, session APIs, and Cross-VM messages.
+  arguments, Blueprints, session APIs, and Operations messages.
 
 ## 19. Non-goals
 
@@ -897,9 +911,20 @@ Do not put AEF client logic or attack-engine behavior in Interceptor.
 - Providing arbitrary scripts, callbacks, JSONPath, regex, shell, network
   proxy, host file, or Docker APIs.
 - Replacing target-visible behavior with privileged oracle answers.
-- Making Cross-VM deployment necessary for simple local open-source use.
+- Making Operations deployment necessary for simple local open-source use.
 - Adding streaming, embeddings, multimodal model content, or provider-hosted
   execution to the first AD-011 slice.
 - Creating, updating, rotating, listing, replicating, or administrating secrets
   or secret-store access policy from Interceptor.
 - Reimplementing every Vault authentication method inside Interceptor.
+
+### Campaign checkpoint metadata acceptance (2026-09-16)
+
+Creation, CLI JSON output and local list/inspect preserve hash-covered campaign
+ID and optional description. Description is bounded to 4,096 UTF-8 bytes. Native
+creation derives campaign ID from the associated request, never a body override.
+Campaign inventory includes earlier retained sessions after repeated restores and
+remains readable after stop without target restart. Wrong-campaign/source reads,
+corrupt metadata and limit overruns fail explicitly. Healthy target restore
+preserves the live harness context; only its active target binding/revision changes.
+See the normative [local API contract](../docs/local-api.md#snapshot-inventory-and-metadata).

@@ -1,6 +1,6 @@
 # Host credential stores
 
-Production model credentials and the Cross-VM gateway integration token can be resolved on the host without putting
+Production model credentials can be resolved on the host without putting
 plaintext secrets in an Environment Blueprint, CLI argument, container, or
 application environment variable.
 
@@ -54,24 +54,10 @@ interceptor run \
   --allow-model approved-model
 ```
 
-The same resolver supplies the gateway's administrative integration token:
+Operator integration uses the same-host unauthenticated localhost API; it has
+no integration token. This credential resolver applies to model providers.
 
-```sh
-interceptor gateway <session-id> \
-  --listen 10.0.4.12:9080 \
-  --auth-principal operator-production \
-  --production \
-  --auth-token-credential-id interceptor-operator-token \
-  --credential-config /etc/interceptor/credentials.yaml
-```
-
-The gateway token reference is another `HostCredentialRef`; it should point to
-a separately generated high-entropy secret and be readable by both deployment
-controllers. Interceptor never distributes or rotates it. The token is used to
-administer short-lived execution leases, not sent to the target container or
-Operator guest, and its resolution receives the same secret-free audit record.
-
-Backend locator fields are strict:
+Backend locator fields are strict:Backend locator fields are strict:
 
 | Backend | Locator fields | Bootstrap |
 | --- | --- | --- |
@@ -91,9 +77,12 @@ Each resolution appends a permission-restricted host audit record under
 root). It contains only credential/profile IDs, opaque backend version,
 timestamp, and outcome. Locators, values, bootstrap authentication, and value
 digests are never recorded. Failure to persist this audit record fails the
-dependent launch.
+dependent launch. Session/campaign purge preserves this installation-wide audit;
+`interceptor purge --all` removes it after confirming its writers are inactive.
+Credential configuration and secret-store contents are preserved. See the accepted
+[file-management requirements](file-management.md) for purge details.
 
-`--model-api-key-env` and gateway `--auth-token-env` remain local-development
+`--model-api-key-env` remains a local-development
 compatibility sources. `--production` rejects them. Bedrock, Vertex Gemini, and Azure OpenAI can instead
 use direct workload identity; use `--provider-auth workload-identity` for
 Vertex or Azure. No secret-store profile or resolution event is included in a

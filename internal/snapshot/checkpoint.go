@@ -13,12 +13,17 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/intrusive-ai/interceptor-sandbox/internal/digest"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
 )
 
+const MaxDescriptionBytes = 4096
+
 type Checkpoint struct {
+	CampaignID           string    `json:"campaign_id,omitempty"`
+	Description          string    `json:"description,omitempty"`
 	SchemaVersion        int       `json:"schema_version"`
 	ID                   string    `json:"id"`
 	Label                string    `json:"label,omitempty"`
@@ -38,7 +43,29 @@ type Checkpoint struct {
 	Hash                 string    `json:"hash"`
 }
 
-func NewCheckpoint(sessionID, parent, environmentDigest, appDigest string, journalSeq uint64, journalHash, manifestDigest string, canonicalSizeBytes int64, eventSeq uint64, label, interceptorVersion string, now time.Time) (Checkpoint, error) {
+type Metadata struct {
+	CampaignID  string
+	Description string
+}
+
+// Empty campaign metadata remains readable for legacy/standalone checkpoints.
+// Campaign APIs supply/check the associated campaign independently.
+func ValidateMetadata(campaign, description string) error {
+	if len(description) > MaxDescriptionBytes || !utf8.ValidString(description) {
+		return errors.New("snapshot description must be valid UTF-8 and at most 4096 bytes")
+	}
+	if len(campaign) > 128 {
+		return errors.New("invalid snapshot campaign ID")
+	}
+	for i, c := range campaign {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || i > 0 && (c == '_' || c == '-' || c == '.' || c == ':')) {
+			return errors.New("invalid snapshot campaign ID")
+		}
+	}
+	return nil
+}
+
+func NewCheckpoint(sessionID, parent, environmentDigest, appDigest string, journalSeq uint64, journalHash, manifestDigest string, canonicalSizeBytes int64, eventSeq uint64, label, interceptorVersion string, now time.Time, metadata ...Metadata) (Checkpoint, error) {
 	id, err := checkpointID(now)
 	if err != nil {
 		return Checkpoint{}, err
@@ -48,6 +75,16 @@ func NewCheckpoint(sessionID, parent, environmentDigest, appDigest string, journ
 		EnvironmentDigest: environmentDigest, AppDigest: appDigest, JournalSeq: journalSeq,
 		JournalHash: journalHash, FileManifestDigest: manifestDigest, CanonicalSizeBytes: canonicalSizeBytes, EventSeq: eventSeq,
 		CreatedAt: now.UTC(), InterceptorVersion: interceptorVersion, JournalSchemaVersion: 1, Status: "ready",
+	}
+	if len(metadata) > 1 {
+		return Checkpoint{}, errors.New("multiple checkpoint metadata values")
+	}
+	if len(metadata) == 1 {
+		checkpoint.CampaignID = metadata[0].CampaignID
+		checkpoint.Description = metadata[0].Description
+	}
+	if err := ValidateMetadata(checkpoint.CampaignID, checkpoint.Description); err != nil {
+		return Checkpoint{}, err
 	}
 	checkpoint.Hash, err = checkpointDigest(checkpoint)
 	return checkpoint, err
@@ -114,6 +151,9 @@ func ListCheckpoints(directory string) ([]Checkpoint, error) {
 }
 
 func VerifyCheckpoint(checkpoint Checkpoint) error {
+	if err := ValidateMetadata(checkpoint.CampaignID, checkpoint.Description); err != nil {
+		return err
+	}
 	if checkpoint.SchemaVersion != 1 || checkpoint.JournalSchemaVersion != 1 || checkpoint.Status != "ready" || !validCheckpointID(checkpoint.ID) || checkpoint.SourceSessionID == "" || checkpoint.JournalSeq == 0 || checkpoint.InterceptorVersion == "" {
 		return errors.New("checkpoint has invalid required fields")
 	}

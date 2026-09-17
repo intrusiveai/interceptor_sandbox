@@ -2,205 +2,309 @@ package adaptive
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/intrusive-ai/interceptor-sandbox/internal/digest"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
 )
 
 const testIntegrationToken = "this-is-a-long-integration-secret-token"
 
-type fakeExecutor struct{ calls int }
-
-func (f *fakeExecutor) Execute(_ *http.Request, _ ExecutionLease, _ CrossVMRequest, _ json.RawMessage) (GatewayResponse, error) {
-	f.calls++
-	return GatewayResponse{Status: http.StatusOK, Body: json.RawMessage(`{"ok":true}`), SessionRevision: 2}, nil
+type sessionExecutor struct {
+	store *ExecutionStore
+	hooks ExecutionHooks
 }
 
-type blockingExecutor struct {
-	started chan struct{}
-	release chan struct{}
-	calls   int
+func (e *sessionExecutor) Execute(_ *http.Request, p string, r OperationRequest, b json.RawMessage) (GatewayResponse, error) {
+	return e.store.Execute(p, r, b, e.hooks), nil
 }
-
-func (b *blockingExecutor) Execute(_ *http.Request, _ ExecutionLease, _ CrossVMRequest, _ json.RawMessage) (GatewayResponse, error) {
-	b.calls++
-	close(b.started)
-	<-b.release
-	return GatewayResponse{Status: http.StatusOK, Body: json.RawMessage(`{"ok":true}`), SessionRevision: 2}, nil
+func executionFixture(t *testing.T) (*sessionExecutor, *atomic.Uint64) {
+	t.Helper()
+	root := t.TempDir()
+	state := ExecutionState{APIVersion: ExecutionStateVersion, SessionID: "session-1", Records: map[string]*OperationRecord{}}
+	if err := fsutil.WriteJSON(filepath.Join(root, "execution.json"), state, 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenExecutionStore(root, "session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision := &atomic.Uint64{}
+	revision.Store(1)
+	e := &sessionExecutor{store: store, hooks: ExecutionHooks{Revision: revision.Load, OwnerChanged: func(ExecutionOwner) error { revision.Add(1); return nil }, Check: func(OperationRequest, json.RawMessage, ExecutionState) error { return nil }, Dispatch: func(context.Context, OperationRequest, json.RawMessage) GatewayResponse {
+		return GatewayResponse{Status: 200, Body: json.RawMessage(`{"ok":true}`), SessionRevision: revision.Add(1)}
+	}}}
+	return e, revision
 }
-
-func TestGatewayIssuesLeaseExecutesIdempotentlyAndRevokes(t *testing.T) {
-	now := time.Now().UTC()
+func testGateway(t *testing.T, e GatewayExecutor) *Gateway {
+	t.Helper()
 	binding := digest.Bytes([]byte("binding"))
-	executor := &fakeExecutor{}
-	gateway := testGateway(t, now, binding, executor)
-	issued := issueTestLease(t, gateway, now, binding, "lease-idem-1", []string{"application.invoke"}, Limits{})
-	if issued.Lease.Principal != "operator-runtime" || issued.Lease.Status != "active" || issued.AccessToken == "" {
-		t.Fatalf("unexpected issued lease: %+v", issued)
+	g, err := NewGateway(GatewayConfig{SessionID: "session-1", EnvironmentDigest: binding, ApplicationDigest: binding, CapabilityManifestDigest: binding, FeedbackProfile: "black-box", IntegrationPrincipal: "operator", IntegrationToken: []byte(testIntegrationToken), Executor: e})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if issued.Lease.Limits.MaximumConcurrentInvocations != 1 {
-		t.Fatalf("optional limit did not inherit server ceiling: %+v", issued.Lease.Limits)
+	return g
+}
+func operation(id, op string, body []byte, revision uint64) OperationRequest {
+	return OperationRequest{APIVersion: OperationRequestVersion, SessionID: "session-1", CampaignID: "campaign-1", WorkerInstanceID: "worker-1", RunRevision: 1, RequestID: "req-" + id, OperationID: id, Operation: op, ExpectedSessionRevision: revision, BodyDigest: digest.Bytes(body), Deadline: time.Now().Add(time.Minute)}
+}
+func serve(g http.Handler, r OperationRequest, body []byte) *httptest.ResponseRecorder {
+	request := httptest.NewRequest("POST", "/v1/operations", bytes.NewReader(EncodeOperation(r, body)))
+	request.Header.Set("Authorization", "Bearer "+testIntegrationToken)
+	w := httptest.NewRecorder()
+	g.ServeHTTP(w, request)
+	return w
+}
+func bind(t *testing.T, g http.Handler) {
+	t.Helper()
+	body := []byte(`{"action":"bind","session_id":"session-1","campaign_id":"campaign-1","worker_instance_id":"worker-1"}`)
+	w := serve(g, operation("bind", "session.owner", body, 1), body)
+	if w.Code != 200 {
+		t.Fatalf("bind: %d %s", w.Code, w.Body)
 	}
-
-	body := json.RawMessage(`{"attempt_id":"attempt-1"}`)
-	request := CrossVMRequest{APIVersion: CrossVMRequestVersion, RequestID: "request-1", IdempotencyKey: "idem-1", LeaseID: issued.Lease.LeaseID, Operation: "application.invoke", SessionID: "session-1", OperatorVMInstanceID: "opvm-1", AttemptID: "attempt-1", BodyDigest: digest.Bytes(body), Deadline: now.Add(time.Minute)}
-	envelope, _ := json.Marshal(map[string]any{"request": request, "body": body})
-	for i := 0; i < 2; i++ {
-		response := serveAuthorized(gateway, http.MethodPost, "/v1/cross-vm", issued.AccessToken, envelope)
-		if response.Code != http.StatusOK {
-			t.Fatalf("request %d failed: %d %s", i, response.Code, response.Body.String())
+}
+func TestGatewayReplacementSharesOwnershipAndResults(t *testing.T) {
+	e, rev := executionFixture(t)
+	g := testGateway(t, e)
+	bind(t, g)
+	body := []byte(`{}`)
+	r := operation("invoke", "application.invoke", body, rev.Load())
+	w := serve(g, r, body)
+	if w.Code != 200 {
+		t.Fatal(w.Body)
+	}
+	after := rev.Load()
+	replacement := testGateway(t, e)
+	if w = serve(replacement, r, body); w.Code != 200 || rev.Load() != after {
+		t.Fatalf("replay executed: %d %s", w.Code, w.Body)
+	}
+	changed := r
+	changed.WorkerInstanceID = "worker-2"
+	if w = serve(replacement, changed, body); w.Code != 200 || rev.Load() != after {
+		t.Fatalf("same-campaign retry failed or repeated effect: %d", w.Code)
+	}
+	changed = r
+	changed.BodyDigest = digest.Bytes([]byte(`{"x":1}`))
+	if w = serve(replacement, changed, []byte(`{"x":1}`)); w.Code != 409 {
+		t.Fatalf("changed bytes accepted: %d", w.Code)
+	}
+	changed = r
+	changed.OperationID = "different"
+	if w = serve(replacement, changed, body); w.Code != 409 {
+		t.Fatal("reused request ID accepted")
+	}
+}
+func TestCloseWhileDispatchedAndQueuedAcrossGateways(t *testing.T) {
+	e, rev := executionFixture(t)
+	first, second := testGateway(t, e), testGateway(t, e)
+	bind(t, first)
+	started, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	e.hooks.Dispatch = func(ctx context.Context, _ OperationRequest, _ json.RawMessage) GatewayResponse {
+		calls.Add(1)
+		close(started)
+		<-release
+		if ctx.Err() != nil {
+			t.Error("gateway cancellation propagated")
+		}
+		return GatewayResponse{Status: 200, Body: json.RawMessage(`{}`), SessionRevision: rev.Add(1)}
+	}
+	body := []byte(`{}`)
+	running := operation("active", "application.invoke", body, rev.Load())
+	done := make(chan *httptest.ResponseRecorder, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest("POST", "/v1/operations", bytes.NewReader(EncodeOperation(running, body))).WithContext(ctx)
+	request.Header.Set("Authorization", "Bearer "+testIntegrationToken)
+	go func() { w := httptest.NewRecorder(); first.ServeHTTP(w, request); done <- w }()
+	<-started
+	cancel()
+	if w := serve(second, running, body); w.Code != 202 {
+		t.Fatalf("inflight duplicate: %d %s", w.Code, w.Body)
+	}
+	queuedDone := make(chan *httptest.ResponseRecorder, 1)
+	queued := operation("queued", "application.invoke", body, rev.Load())
+	go func() { queuedDone <- serve(second, queued, body) }()
+	deadline := time.After(time.Second)
+	for {
+		if _, ok := e.store.Lookup("queued"); ok {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("not queued")
+		default:
+			time.Sleep(time.Millisecond)
 		}
 	}
-	if executor.calls != 1 {
-		t.Fatalf("idempotent retry executed %d times", executor.calls)
+	closeBody := []byte(`{"action":"close_execution","session_id":"session-1","campaign_id":"campaign-1","worker_instance_id":"worker-1"}`)
+	closed := make(chan *httptest.ResponseRecorder, 1)
+	go func() { closed <- serve(second, operation("close", "session.owner", closeBody, 0), closeBody) }()
+	select {
+	case w := <-closed:
+		if w.Code != 200 {
+			t.Fatal(w.Body)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("closure blocked on running effect")
 	}
-
-	inspect := serveAuthorized(gateway, http.MethodGet, "/v1/execution-leases/"+issued.Lease.LeaseID, testIntegrationToken, nil)
-	if inspect.Code != http.StatusOK || strings.Contains(inspect.Body.String(), issued.AccessToken) {
-		t.Fatalf("unsafe lease introspection response: %d %s", inspect.Code, inspect.Body.String())
+	close(release)
+	if w := <-done; w.Code != 200 {
+		t.Fatal(w.Body)
 	}
-	revoke := serveAuthorized(gateway, http.MethodDelete, "/v1/execution-leases/"+issued.Lease.LeaseID, testIntegrationToken, nil)
-	if revoke.Code != http.StatusNoContent {
-		t.Fatalf("lease revocation returned %d", revoke.Code)
+	if w := <-queuedDone; w.Code != 409 || !strings.Contains(w.Body.String(), "execution_closed") {
+		t.Fatalf("queued work ran: %d %s", w.Code, w.Body)
 	}
-	response := serveAuthorized(gateway, http.MethodPost, "/v1/cross-vm", issued.AccessToken, envelope)
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("revoked lease token returned %d", response.Code)
+	if calls.Load() != 1 {
+		t.Fatal("duplicate effect")
 	}
-}
-
-func TestGatewayLeaseIssuanceRequiresIntegrationTokenAndIsIdempotent(t *testing.T) {
-	now := time.Now().UTC()
-	binding := digest.Bytes([]byte("binding"))
-	gateway := testGateway(t, now, binding, &fakeExecutor{})
-	input := testLeaseRequest(now, binding, "lease-idem-1", []string{"session.status"}, Limits{})
-	body, _ := json.Marshal(input)
-
-	unauthorized := serveAuthorized(gateway, http.MethodPost, "/v1/execution-leases", "wrong-token-that-is-long-enough-to-look-real", body)
-	if unauthorized.Code != http.StatusUnauthorized || unauthorized.Header().Get("WWW-Authenticate") == "" {
-		t.Fatalf("unauthorized issuance returned %d", unauthorized.Code)
-	}
-	first := serveAuthorized(gateway, http.MethodPost, "/v1/execution-leases", testIntegrationToken, body)
-	second := serveAuthorized(gateway, http.MethodPost, "/v1/execution-leases", testIntegrationToken, body)
-	if first.Code != http.StatusCreated || second.Code != http.StatusCreated || first.Body.String() != second.Body.String() {
-		t.Fatalf("idempotent issuance mismatch: first=%d %s second=%d %s", first.Code, first.Body.String(), second.Code, second.Body.String())
-	}
-
-	input.CampaignID = "different-campaign"
-	conflicting, _ := json.Marshal(input)
-	conflict := serveAuthorized(gateway, http.MethodPost, "/v1/execution-leases", testIntegrationToken, conflicting)
-	if conflict.Code != http.StatusConflict {
-		t.Fatalf("issuance idempotency conflict returned %d", conflict.Code)
+	bindBody := []byte(`{"action":"bind","session_id":"session-1","campaign_id":"campaign-1","worker_instance_id":"worker-1"}`)
+	if w := serve(second, operation("rebind", "session.owner", bindBody, rev.Load()), bindBody); w.Code != 409 {
+		t.Fatal("closed session reopened")
 	}
 }
-
-func TestGatewayRejectsLeaseRequestAboveServerCeiling(t *testing.T) {
-	now := time.Now().UTC()
-	binding := digest.Bytes([]byte("binding"))
-	gateway := testGateway(t, now, binding, &fakeExecutor{})
-	input := testLeaseRequest(now, binding, "lease-idem-1", []string{"application.invoke"}, Limits{MaximumConcurrentInvocations: 2})
-	body, _ := json.Marshal(input)
-	response := serveAuthorized(gateway, http.MethodPost, "/v1/execution-leases", testIntegrationToken, body)
-	if response.Code != http.StatusConflict {
-		t.Fatalf("over-limit lease request returned %d: %s", response.Code, response.Body.String())
+func TestSupervisorRestartIsTerminalAndRetainsOutcomes(t *testing.T) {
+	e, rev := executionFixture(t)
+	g := testGateway(t, e)
+	bind(t, g)
+	body := []byte(`{}`)
+	r := operation("done", "artifact.register", body, rev.Load())
+	if serve(g, r, body).Code != 200 {
+		t.Fatal("dispatch")
 	}
-}
-
-func TestGatewayExpiresLeaseAndDoesNotDiscloseToken(t *testing.T) {
-	current := time.Now().UTC()
-	binding := digest.Bytes([]byte("binding"))
-	gateway, err := NewGateway(GatewayConfig{
-		SessionID: "session-1", EnvironmentDigest: binding, ApplicationDigest: binding,
-		CapabilityManifestDigest: binding, FeedbackProfile: "black-box",
-		IntegrationPrincipal: "operator-runtime", IntegrationToken: []byte(testIntegrationToken), Executor: &fakeExecutor{},
-		MaximumLeaseLimits: Limits{MaximumAttempts: 10, MaximumConcurrentInvocations: 1, MaximumArtifactBytes: 1 << 20, MaximumWallSeconds: 600, MaximumSnapshotCreations: 4, MaximumCumulativeSnapshotBytes: 4 << 20},
-		Now:                func() time.Time { return current },
-	})
+	root := filepath.Dir(e.store.path)
+	reopened, err := OpenExecutionStore(root, "session-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := testLeaseRequest(current, binding, "lease-idem-expiry", []string{"session.status"}, Limits{})
-	input.ExpiresAt = current.Add(time.Minute)
-	body, _ := json.Marshal(input)
-	response := serveAuthorized(gateway, http.MethodPost, "/v1/execution-leases", testIntegrationToken, body)
-	var issued ExecutionLeaseResponse
-	if response.Code != http.StatusCreated || json.Unmarshal(response.Body.Bytes(), &issued) != nil {
-		t.Fatalf("lease issuance failed: %d %s", response.Code, response.Body.String())
+	if reopened.State().Owner.ClosedAt == nil {
+		t.Fatal("supervisor restart reopened execution")
 	}
-	current = current.Add(2 * time.Minute)
-	inspect := serveAuthorized(gateway, http.MethodGet, "/v1/execution-leases/"+issued.Lease.LeaseID, testIntegrationToken, nil)
-	if inspect.Code != http.StatusOK || !strings.Contains(inspect.Body.String(), `"status":"expired"`) || strings.Contains(inspect.Body.String(), issued.AccessToken) {
-		t.Fatalf("expired lease introspection was unsafe: %d %s", inspect.Code, inspect.Body.String())
+	if rec, ok := reopened.Lookup("done"); !ok || rec.State != "completed" {
+		t.Fatal("lost outcome")
+	}
+	if err := os.WriteFile(e.store.path, []byte(`{"api_version":"bad"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenExecutionStore(root, "session-1"); err == nil {
+		t.Fatal("corrupt state accepted")
+	}
+}
+func TestGatewayRejectsLegacyAuthAndMalformedFrames(t *testing.T) {
+	e, _ := executionFixture(t)
+	g := testGateway(t, e)
+	for _, path := range []string{"/v1/cross-vm", "/v1/execution-leases", "/v1/execution-leases/one"} {
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, httptest.NewRequest("POST", path, strings.NewReader(`{}`)))
+		if w.Code != 404 {
+			t.Fatalf("legacy %s: %d", path, w.Code)
+		}
+	}
+	for _, token := range []string{"", "short", strings.Repeat("x", 32)} {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("POST", "/v1/operations", strings.NewReader(`{}`))
+		r.Header.Set("Authorization", "Bearer "+token)
+		g.ServeHTTP(w, r)
+		if w.Code != 401 {
+			t.Fatalf("bad auth: %d", w.Code)
+		}
+	}
+	for _, raw := range []string{`{"request":{},"request":{}}`, `{"a":{"x":1,"x":2}}`, `{} {}`, `null`, strings.Repeat(`[`, 65) + strings.Repeat(`]`, 65)} {
+		var value any
+		if err := StrictJSON([]byte(raw), &value); err == nil {
+			t.Errorf("accepted %s", raw)
+		}
+	}
+	body := []byte(`{}`)
+	r := operation("version", "session.status", body, 0)
+	r.APIVersion = "interceptor.dev/cross-vm-request/v1alpha1"
+	if w := serve(g, r, body); w.Code != 400 {
+		t.Fatal("accepted old codec")
+	}
+}
+func TestCapacityDeadlineAndStopPolicyFailBeforeEffects(t *testing.T) {
+	e, rev := executionFixture(t)
+	g := testGateway(t, e)
+	bind(t, g)
+	body := []byte(`{}`)
+	if w := serve(g, operation("stop", "session.stop", body, rev.Load()), body); w.Code != 409 {
+		t.Fatalf("stop accepted: %d", w.Code)
+	}
+	r := operation("expired", "artifact.register", body, rev.Load())
+	r.Deadline = time.Now().Add(-time.Second)
+	if w := serve(g, r, body); w.Code != 408 {
+		t.Fatalf("expired accepted: %d", w.Code)
+	}
+	e.store.mu.Lock()
+	for len(e.store.state.Records) < MaxOperationRecords {
+		id := fmt.Sprintf("filled-%d", len(e.store.state.Records))
+		e.store.state.Records[id] = &OperationRecord{State: "completed", Request: OperationRequest{OperationID: id, RequestID: id}}
+	}
+	e.store.mu.Unlock()
+	if w := serve(g, operation("overflow", "artifact.register", body, rev.Load()), body); w.Code != 429 {
+		t.Fatalf("capacity: %d", w.Code)
+	}
+	closeBody := []byte(`{"action":"close_execution","session_id":"session-1","campaign_id":"campaign-1","worker_instance_id":"worker-1"}`)
+	if w := serve(g, operation("close-full", "session.owner", closeBody, 0), closeBody); w.Code != 200 {
+		t.Fatalf("capacity prevented closure: %d %s", w.Code, w.Body)
 	}
 }
 
-func TestGatewayDoesNotExecuteConcurrentIdempotentMutationTwice(t *testing.T) {
-	now := time.Now().UTC()
-	binding := digest.Bytes([]byte("binding"))
-	executor := &blockingExecutor{started: make(chan struct{}), release: make(chan struct{})}
-	gateway := testGateway(t, now, binding, executor)
-	issued := issueTestLease(t, gateway, now, binding, "lease-idem-1", []string{"application.invoke"}, Limits{})
-	body := json.RawMessage(`{"attempt_id":"attempt-1"}`)
-	request := CrossVMRequest{APIVersion: CrossVMRequestVersion, RequestID: "request-1", IdempotencyKey: "idem-1", LeaseID: issued.Lease.LeaseID, Operation: "application.invoke", SessionID: "session-1", OperatorVMInstanceID: "opvm-1", AttemptID: "attempt-1", BodyDigest: digest.Bytes(body), Deadline: now.Add(time.Minute)}
-	envelope, _ := json.Marshal(map[string]any{"request": request, "body": body})
-	firstDone := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		firstDone <- serveAuthorized(gateway, http.MethodPost, "/v1/cross-vm", issued.AccessToken, envelope)
-	}()
-	<-executor.started
-	second := serveAuthorized(gateway, http.MethodPost, "/v1/cross-vm", issued.AccessToken, envelope)
-	if second.Code != http.StatusConflict {
-		t.Fatalf("concurrent replay returned %d", second.Code)
-	}
-	close(executor.release)
-	if first := <-firstDone; first.Code != http.StatusOK || executor.calls != 1 {
-		t.Fatalf("first call=%d executor calls=%d", first.Code, executor.calls)
-	}
-}
-
-func testGateway(t *testing.T, now time.Time, binding string, executor GatewayExecutor) *Gateway {
-	t.Helper()
-	gateway, err := NewGateway(GatewayConfig{
-		SessionID: "session-1", EnvironmentDigest: binding, ApplicationDigest: binding,
-		CapabilityManifestDigest: binding, FeedbackProfile: "black-box",
-		IntegrationPrincipal: "operator-runtime", IntegrationToken: []byte(testIntegrationToken), Executor: executor,
-		MaximumLeaseLimits: Limits{MaximumAttempts: 10, MaximumConcurrentInvocations: 1, MaximumArtifactBytes: 1 << 20, MaximumWallSeconds: 600, MaximumSnapshotCreations: 4, MaximumCumulativeSnapshotBytes: 4 << 20},
-		Now:                func() time.Time { return now },
-	})
+func TestCommittedOperationCodecFixture(t *testing.T) {
+	raw, err := os.ReadFile("testdata/operation-request-v1alpha2.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return gateway
-}
-
-func issueTestLease(t *testing.T, gateway *Gateway, now time.Time, binding, idempotencyKey string, operations []string, limits Limits) ExecutionLeaseResponse {
-	t.Helper()
-	input := testLeaseRequest(now, binding, idempotencyKey, operations, limits)
-	body, _ := json.Marshal(input)
-	response := serveAuthorized(gateway, http.MethodPost, "/v1/execution-leases", testIntegrationToken, body)
-	if response.Code != http.StatusCreated {
-		t.Fatalf("lease issuance failed: %d %s", response.Code, response.Body.String())
-	}
-	var issued ExecutionLeaseResponse
-	if err := json.Unmarshal(response.Body.Bytes(), &issued); err != nil {
+	var envelope OperationEnvelope
+	if err = StrictJSON(raw, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	return issued
+	if err = ValidateOperation(envelope.Request, envelope.Body, "session-1"); err != nil {
+		t.Fatal(err)
+	}
+	var owner OwnerRequest
+	if err = StrictJSON(envelope.Body, &owner); err != nil || owner.Action != "bind" {
+		t.Fatalf("owner fixture: %+v %v", owner, err)
+	}
+	var roundtrip OperationEnvelope
+	if err = StrictJSON(EncodeOperation(envelope.Request, envelope.Body), &roundtrip); err != nil || roundtrip.Request != envelope.Request || !bytes.Equal(roundtrip.Body, envelope.Body) {
+		t.Fatal("codec changed command")
+	}
 }
-
-func testLeaseRequest(now time.Time, binding, idempotencyKey string, operations []string, limits Limits) ExecutionLeaseRequest {
-	return ExecutionLeaseRequest{APIVersion: ExecutionLeaseRequestVersion, IdempotencyKey: idempotencyKey, OperatorVMInstanceID: "opvm-1", CampaignID: "campaign-1", SessionID: "session-1", CapabilityManifestDigest: binding, EnvironmentDigest: binding, ApplicationDigest: binding, FeedbackProfile: "black-box", AllowedOperations: operations, Limits: limits, ExpiresAt: now.Add(5 * time.Minute)}
-}
-
-func serveAuthorized(gateway *Gateway, method, path, token string, body []byte) *httptest.ResponseRecorder {
-	request := httptest.NewRequest(method, path, bytes.NewReader(body))
-	request.Header.Set("Authorization", "Bearer "+token)
-	response := httptest.NewRecorder()
-	gateway.ServeHTTP(response, request)
-	return response
+func TestPersistenceFailureAndPrebindClosureFailClosed(t *testing.T) {
+	e, rev := executionFixture(t)
+	g := testGateway(t, e)
+	bind(t, g)
+	// Replacing the file with a directory makes the next atomic rename fail.
+	if err := os.Remove(e.store.path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(e.store.path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{}`)
+	before := rev.Load()
+	if w := serve(g, operation("storage-failure", "artifact.register", body, before), body); w.Code != 503 {
+		t.Fatalf("persistence failure: %d", w.Code)
+	}
+	if rev.Load() != before || e.store.State().Owner.ClosedAt == nil {
+		t.Fatal("effect admitted after persistence failure")
+	}
+	other, _ := executionFixture(t)
+	if err := other.store.Close("administrator_stop"); err != nil {
+		t.Fatal(err)
+	}
+	ownerBody := []byte(`{"action":"bind","session_id":"session-1","campaign_id":"campaign-1","worker_instance_id":"worker-1"}`)
+	if w := serve(testGateway(t, other), operation("bind-after-stop", "session.owner", ownerBody, 1), ownerBody); w.Code != 409 {
+		t.Fatal("prebind stop allowed later admission")
+	}
 }

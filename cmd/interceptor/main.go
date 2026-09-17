@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -26,9 +25,10 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/credentials"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/environment"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/evaluation"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/filemanagement"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
-	"github.com/intrusive-ai/interceptor-sandbox/internal/gatewayhost"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/hostrun"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/localapi"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/ociruntime"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/recording"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/sandboxd"
@@ -50,6 +50,19 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	if len(arguments) == 0 {
 		usage(stderr)
 		return errors.New("command is required")
+	}
+
+	switch arguments[0] {
+	case "run", "status", "list", "logs", "snapshot", "identity", "stop", "evaluate", "coverage":
+		root, err := session.DataRoot()
+		if err != nil {
+			return err
+		}
+		lock, err := filemanagement.Lock(root, "maintenance", false)
+		if err != nil {
+			return err
+		}
+		defer lock.Close()
 	}
 	switch arguments[0] {
 	case "version", "--version", "-version":
@@ -81,9 +94,11 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	case "identity":
 		return identityCommand(arguments[1:], stdout)
 	case "restore":
-		return restoreCommand(arguments[1:], stdout)
+		return errors.New("restore is managed by the running local service; use POST /v1/lifecycle")
 	case "stop":
 		return stopCommand(arguments[1:], stdout)
+	case "purge":
+		return purgeCommand(arguments[1:], stdout)
 	case "delete":
 		return deleteCommand(arguments[1:], stdout)
 	case "evaluate":
@@ -93,7 +108,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	case "capabilities":
 		return capabilitiesCommand(arguments[1:], stdout)
 	case "gateway":
-		return gatewayCommand(arguments[1:], stdout)
+		return errors.New("gateway is integrated into interceptor run; use http://127.0.0.1:8080")
 	case "help", "-h", "--help":
 		usage(stdout)
 		return nil
@@ -101,125 +116,6 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		usage(stderr)
 		return fmt.Errorf("unknown command %q", arguments[0])
 	}
-}
-
-func gatewayCommand(arguments []string, stdout io.Writer) error {
-	if len(arguments) == 0 {
-		return errors.New("usage: interceptor gateway <session-id> --listen <private-address> --auth-principal <id> [--auth-token-credential-id <id> --credential-config <file> --production | --auth-token-env <name>]")
-	}
-	sessionID := arguments[0]
-	flags := flag.NewFlagSet("gateway", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	address := flags.String("listen", "", "private HTTP backend listen address")
-	authPrincipal := flags.String("auth-principal", "", "identity assigned to the configured integration token")
-	credentialConfig := flags.String("credential-config", "", "host secret-store profile and credential-reference YAML")
-	credentialID := flags.String("auth-token-credential-id", "", "stable credential ID for the integration token")
-	credentialEnvironment := flags.String("auth-token-env", "INTERCEPTOR_GATEWAY_TOKEN", "development-only integration-token environment variable")
-	production := flags.Bool("production", false, "require a host secret-store integration token")
-	if err := flags.Parse(arguments[1:]); err != nil {
-		return err
-	}
-	authTokenEnvSet := false
-	flags.Visit(func(value *flag.Flag) {
-		if value.Name == "auth-token-env" {
-			authTokenEnvSet = true
-		}
-	})
-	if flags.NArg() != 0 || *address == "" || *authPrincipal == "" {
-		return errors.New("gateway requires --listen and --auth-principal")
-	}
-	if *credentialID != "" && authTokenEnvSet {
-		return errors.New("--auth-token-env and --auth-token-credential-id are mutually exclusive")
-	}
-	if _, _, err := net.SplitHostPort(*address); err != nil {
-		return fmt.Errorf("gateway listen address: %w", err)
-	}
-	root, err := session.DataRoot()
-	if err != nil {
-		return err
-	}
-	metadata, _, err := session.Load(root, sessionID)
-	if err != nil {
-		return err
-	}
-	if metadata.Phase != session.Running {
-		return fmt.Errorf("gateway session is not running: %s", metadata.Phase)
-	}
-	_, report, err := environment.Verify(metadata.EnvironmentPath)
-	if err != nil {
-		return err
-	}
-	token, source, err := resolveGatewayToken(context.Background(), *credentialConfig, *credentialID, *credentialEnvironment, *production)
-	if err != nil {
-		return err
-	}
-	if source == "environment" {
-		fmt.Fprintln(stdout, "warning: using a development-only environment integration token; use --production with a host credential ID for production")
-	}
-	leaseLimits := adaptive.Limits{
-		MaximumAttempts: int64(report.Blueprint.Adaptive.MaxAttempts), MaximumConcurrentInvocations: 1,
-		MaximumArtifactBytes: boundedProduct(metadata.Limits.MaxBlobBytes, int64(report.Blueprint.Adaptive.MaxArtifacts), 1<<40),
-		MaximumWallSeconds:   metadata.Limits.MaxWallSeconds, MaximumSnapshotCreations: metadata.Limits.MaxSnapshots,
-		MaximumCumulativeSnapshotBytes: boundedProduct(metadata.Limits.MaxBlobBytes, metadata.Limits.MaxSnapshots, 16<<40),
-	}
-	tokenBytes := []byte(token)
-	token = ""
-	gateway, err := adaptive.NewGateway(adaptive.GatewayConfig{SessionID: metadata.ID, EnvironmentDigest: metadata.EnvironmentDigest, ApplicationDigest: metadata.AppDigest, CapabilityManifestDigest: metadata.CapabilityManifestDigest, FeedbackProfile: metadata.FeedbackProfile, IntegrationPrincipal: *authPrincipal, IntegrationToken: tokenBytes, Executor: gatewayhost.NewExecutor(), MaximumLeaseLimits: leaseLimits, MaxFrameBytes: adaptive.ArtifactEnvelopeLimit(metadata.Limits.MaxBlobBytes)})
-	for index := range tokenBytes {
-		tokenBytes[index] = 0
-	}
-	if err != nil {
-		return err
-	}
-	server := &http.Server{Addr: *address, Handler: gateway, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second}
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-	go func() {
-		<-ctx.Done()
-		shutdown, stop := context.WithTimeout(context.Background(), 5*time.Second)
-		defer stop()
-		_ = server.Shutdown(shutdown)
-	}()
-	fmt.Fprintf(stdout, "Cross-VM gateway for %s listening on private HTTP backend %s\n", sessionID, *address)
-	err = server.ListenAndServe()
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
-	}
-	return err
-}
-
-func resolveGatewayToken(ctx context.Context, credentialConfig, credentialID, credentialEnvironment string, production bool) (string, string, error) {
-	if credentialID != "" {
-		if credentialConfig == "" {
-			return "", "", errors.New("--auth-token-credential-id requires --credential-config")
-		}
-		value, err := resolveStoredCredential(ctx, credentialConfig, credentialID)
-		return value, "secret-store", err
-	}
-	if credentialConfig != "" {
-		return "", "", errors.New("--credential-config requires --auth-token-credential-id")
-	}
-	if production {
-		return "", "", errors.New("environment-based gateway tokens are disabled in production mode; use --auth-token-credential-id")
-	}
-	if credentialEnvironment == "" {
-		return "", "", errors.New("--auth-token-env may not be empty")
-	}
-	value := os.Getenv(credentialEnvironment)
-	if value == "" {
-		return "", "", fmt.Errorf("gateway token environment variable %s is empty", credentialEnvironment)
-	}
-	return value, "environment", nil
-}
-
-func boundedProduct(left, right, maximum int64) int64 {
-	if left <= 0 || right <= 0 {
-		return 1
-	}
-	if left > maximum/right {
-		return maximum
-	}
-	return left * right
 }
 
 func capabilitiesCommand(arguments []string, stdout io.Writer) error {
@@ -321,8 +217,11 @@ func runCommand(arguments []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("run", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	directory := flags.String("environment", "", "Environment Blueprint directory")
-	applicationPort := flags.Int("app-port", 0, "application bridge port")
-	controlPort := flags.Int("control-port", 0, "control bridge port")
+	spoolDefault, spoolConfigured := os.LookupEnv("INTERCEPTOR_SPOOL_MAX_BYTES")
+	if !spoolConfigured {
+		spoolDefault = "536870912"
+	}
+	spoolLimit := flags.String("spool-max-bytes", spoolDefault, "maximum combined spool bytes (default 536870912)")
 	bridgeTransport := flags.String("bridge-transport", "spool", "host/container bridge transport: spool or unix")
 	providerType := flags.String("model-provider", bridge.ProviderOpenAIChat, "host model-provider adapter")
 	providerURL := flags.String("provider-base-url", os.Getenv("INTERCEPTOR_PROVIDER_BASE_URL"), "fixed provider base URL")
@@ -343,6 +242,11 @@ func runCommand(arguments []string, stdout io.Writer) error {
 	if flags.NArg() != 0 || *directory == "" || len(allowedModels) == 0 {
 		return errors.New("usage: interceptor run --environment <directory> --model-provider <type> --allow-model <model> [provider options]")
 	}
+	limitValue := *spoolLimit
+	spoolMaxBytes, err := filemanagement.ParseSpoolLimit(limitValue)
+	if err != nil {
+		return err
+	}
 	if *production && strings.TrimSpace(*awsProfile) != "" {
 		return errors.New("--aws-profile is a development credential source and is disabled in production mode")
 	}
@@ -355,77 +259,16 @@ func runCommand(arguments []string, stdout io.Writer) error {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	_, err = hostrun.Run(ctx, hostrun.Config{
-		EnvironmentDirectory: *directory, ApplicationPort: *applicationPort, ControlPort: *controlPort,
-		ProviderType: *providerType, ProviderURL: *providerURL, ProviderAPIKey: apiKey,
+	err = localapi.Run(ctx, hostrun.Config{
+		EnvironmentDirectory: *directory,
+		ProviderType:         *providerType, ProviderURL: *providerURL, ProviderAPIKey: apiKey,
 		AWSRegion: *awsRegion, AWSProfile: *awsProfile, AllowedModels: allowedModels,
 		ProviderAPIVersion: *providerAPIVersion,
 		ProviderAuthMode:   *providerAuthMode,
 		BridgeTransport:    *bridgeTransport, Docker: ociruntime.Docker{}, Output: stdout,
-		FeedbackProfile: *feedbackProfile,
-	})
+		FeedbackProfile: *feedbackProfile, SpoolMaxBytes: spoolMaxBytes,
+	}, exportEvidence)
 	return err
-}
-
-func restoreCommand(arguments []string, stdout io.Writer) error {
-	if len(arguments) == 0 {
-		return errors.New("usage: interceptor restore <session-id> --checkpoint <checkpoint-id> [provider options]")
-	}
-	sourceSessionID := arguments[0]
-	flags := flag.NewFlagSet("restore", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	checkpointID := flags.String("checkpoint", "", "source checkpoint ID")
-	applicationPort := flags.Int("app-port", 0, "application bridge port")
-	controlPort := flags.Int("control-port", 0, "control bridge port")
-	bridgeTransport := flags.String("bridge-transport", "spool", "host/container bridge transport: spool or unix")
-	providerType := flags.String("model-provider", bridge.ProviderOpenAIChat, "host model-provider adapter")
-	providerURL := flags.String("provider-base-url", os.Getenv("INTERCEPTOR_PROVIDER_BASE_URL"), "fixed provider base URL")
-	credentialEnvironment := flags.String("model-api-key-env", "", "host environment variable containing provider credential (defaults to OPENAI_API_KEY for OpenAI providers)")
-	credentialConfig := flags.String("credential-config", "", "host secret-store profile and credential-reference YAML")
-	credentialID := flags.String("model-credential-id", "", "stable host credential ID used by the model provider")
-	production := flags.Bool("production", false, "enforce production credential policy")
-	feedbackProfile := flags.String("feedback-profile", "", "immutable adaptive feedback profile (defaults to source session)")
-	awsRegion := flags.String("aws-region", "", "AWS Region override for bedrock-converse")
-	awsProfile := flags.String("aws-profile", "", "AWS shared configuration profile for bedrock-converse")
-	providerAPIVersion := flags.String("provider-api-version", "", "pinned provider API version (Anthropic only in this release)")
-	providerAuthMode := flags.String("provider-auth", "", "provider authentication mode: none, api-key, workload-token, or workload-identity")
-	stopSource := flags.Bool("stop-source", false, "stop source after restored session becomes healthy")
-	var allowedModels stringList
-	flags.Var(&allowedModels, "allow-model", "allowed model identifier (repeatable)")
-	if err := flags.Parse(arguments[1:]); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 || *checkpointID == "" || len(allowedModels) == 0 {
-		return errors.New("usage: interceptor restore <session-id> --checkpoint <id> --model-provider <type> --allow-model <model> [provider options]")
-	}
-	if *production && strings.TrimSpace(*awsProfile) != "" {
-		return errors.New("--aws-profile is a development credential source and is disabled in production mode")
-	}
-	apiKey, err := resolveProviderOptions(context.Background(), *providerType, *providerURL, *credentialEnvironment, *credentialConfig, *credentialID, *providerAuthMode, *production)
-	if err != nil {
-		return err
-	}
-	if *credentialID == "" && apiKey != "" {
-		fmt.Fprintln(stdout, "warning: using a development-only environment credential; use --production with a host credential ID or workload identity for production")
-	}
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-	config := hostrun.Config{
-		ApplicationPort: *applicationPort, ControlPort: *controlPort, ProviderType: *providerType, ProviderURL: *providerURL,
-		ProviderAPIKey: apiKey, AWSRegion: *awsRegion, AWSProfile: *awsProfile,
-		ProviderAPIVersion: *providerAPIVersion,
-		ProviderAuthMode:   *providerAuthMode,
-		AllowedModels:      allowedModels, BridgeTransport: *bridgeTransport, Docker: ociruntime.Docker{}, Output: stdout,
-		FeedbackProfile: *feedbackProfile,
-	}
-	if *stopSource {
-		config.OnReady = func(session.Metadata) error { return stopCommand([]string{sourceSessionID}, stdout) }
-	}
-	_, err = hostrun.Restore(ctx, config, sourceSessionID, *checkpointID)
-	if err != nil {
-		return err
-	}
-	return nil
 }
 
 func validateProviderOptions(providerType, providerURL, credentialEnvironment string) (string, error) {
@@ -736,8 +579,11 @@ func logsCommand(arguments []string, stdout io.Writer) error {
 	if len(events) > 0 && events[0].SessionID != metadata.ID || len(transactions) > 0 && transactions[0].SessionID != metadata.ID {
 		return errors.New("log session identity mismatch")
 	}
-	store, err := blobstore.Open(filepath.Join(root, "blobs"), metadata.Limits.MaxBlobBytes)
+	store, err := blobstore.Open(paths.Blobs, metadata.Limits.MaxBlobBytes)
 	if err != nil {
+		return err
+	}
+	if err := hostrun.VerifyRestoreSource(metadata, paths, store); err != nil {
 		return err
 	}
 	for _, event := range events {
@@ -776,6 +622,11 @@ func logsCommand(arguments []string, stdout io.Writer) error {
 	if lock.EnvironmentDigest != metadata.EnvironmentDigest || lock.ApplicationDigest != metadata.AppDigest {
 		return errors.New("session digest does not match Sealed Environment")
 	}
+	if metadata.OperationAPIVersion != "" {
+		if _, err := adaptive.VerifyExecutionJournal(paths.Root, transactions); err != nil {
+			return err
+		}
+	}
 	fmt.Fprintf(stdout, "Verified %d events, %d state transactions, and %d checkpoints for %s\n", len(events), len(transactions), len(checkpoints), metadata.ID)
 	return nil
 }
@@ -805,8 +656,11 @@ func exportEvidence(dataRoot string, metadata session.Metadata, paths session.Pa
 	if err != nil || lock.EnvironmentDigest != metadata.EnvironmentDigest || lock.ApplicationDigest != metadata.AppDigest {
 		return errors.New("session does not match its Sealed Environment")
 	}
-	store, err := blobstore.Open(filepath.Join(dataRoot, "blobs"), metadata.Limits.MaxBlobBytes)
+	store, err := blobstore.Open(paths.Blobs, metadata.Limits.MaxBlobBytes)
 	if err != nil {
+		return err
+	}
+	if err := hostrun.VerifyRestoreSource(metadata, paths, store); err != nil {
 		return err
 	}
 	artifactRegistry, err := adaptive.OpenArtifactRegistry(filepath.Join(paths.Root, "artifacts.json"), store, metadata.Limits.MaxBlobBytes)
@@ -853,6 +707,21 @@ func exportEvidence(dataRoot string, metadata session.Metadata, paths session.Pa
 	for _, artifact := range artifactRegistry.List() {
 		references[artifact.Digest] = struct{}{}
 	}
+	var executionBytes []byte
+	if metadata.OperationAPIVersion != "" {
+		executionBytes, err = adaptive.VerifyExecutionJournal(paths.Root, transactions)
+		if err != nil {
+			return err
+		}
+		var execution adaptive.ExecutionState
+		if err := json.Unmarshal(executionBytes, &execution); err != nil {
+			return err
+		}
+		evidenceBundle, err = adaptive.BindExecutionEvidence(evidenceBundle, execution)
+		if err != nil {
+			return err
+		}
+	}
 	directory := filepath.Dir(output)
 	if err := os.MkdirAll(directory, 0o750); err != nil {
 		return err
@@ -874,6 +743,11 @@ func exportEvidence(dataRoot string, metadata session.Metadata, paths session.Pa
 	manifest, _ := json.MarshalIndent(map[string]any{"schema_version": 1, "session_id": metadata.ID, "environment_digest": metadata.EnvironmentDigest, "application_digest": metadata.AppDigest, "interceptor_version": version}, "", "  ")
 	if err := addBytes("manifest.json", append(manifest, '\n'), 0o640); err != nil {
 		return err
+	}
+	if executionBytes != nil {
+		if err := addBytes("execution.json", executionBytes, 0600); err != nil {
+			return err
+		}
 	}
 	bundleBytes, _ := json.MarshalIndent(evidenceBundle, "", "  ")
 	if err := addBytes("evidence-bundle.json", append(bundleBytes, '\n'), 0o640); err != nil {
@@ -905,6 +779,17 @@ func exportEvidence(dataRoot string, metadata session.Metadata, paths session.Pa
 			}
 		} else if !os.IsNotExist(readErr) {
 			return readErr
+		}
+	}
+	if metadata.ParentSessionID != "" {
+		for _, name := range []string{"checkpoint.json", "state.jsonl"} {
+			content, err := os.ReadFile(filepath.Join(paths.Root, "restore-source", name))
+			if err != nil {
+				return err
+			}
+			if err := addBytes("restore-source/"+name, content, 0600); err != nil {
+				return err
+			}
 		}
 	}
 	checkpointFiles, err := os.ReadDir(paths.Checkpoints)
@@ -976,11 +861,16 @@ func snapshotCommand(arguments []string, stdout io.Writer) error {
 		flags := flag.NewFlagSet("snapshot create", flag.ContinueOnError)
 		flags.SetOutput(io.Discard)
 		label := flags.String("name", "", "checkpoint label")
+		description := flags.String("description", "", "checkpoint purpose (up to 4096 UTF-8 bytes)")
+		campaignID := flags.String("campaign-id", "", "campaign attribution for an administrative snapshot")
 		jsonOutput := flags.Bool("json", false, "emit JSON")
 		if err := flags.Parse(arguments[2:]); err != nil || flags.NArg() != 0 {
-			return errors.New("usage: interceptor snapshot create <session-id> [--name <label>] [--json]")
+			return errors.New("usage: interceptor snapshot create <session-id> [--name <label>] [--description <text>] [--campaign-id <id>] [--json]")
 		}
-		body, _ := json.Marshal(map[string]string{"label": *label})
+		if err := snapshot.ValidateMetadata(*campaignID, *description); err != nil {
+			return err
+		}
+		body, _ := json.Marshal(map[string]string{"label": *label, "description": *description, "campaign_id": *campaignID})
 		result, err := hostrun.CallSession(context.Background(), sessionID, http.MethodPost, "/v1/snapshots", body)
 		if err != nil {
 			return err
@@ -1010,7 +900,7 @@ func snapshotCommand(arguments []string, stdout io.Writer) error {
 			return writeJSON(stdout, map[string]any{"checkpoints": items})
 		}
 		for _, item := range items {
-			fmt.Fprintf(stdout, "%s  seq=%d  %s\n", item.ID, item.JournalSeq, item.Label)
+			fmt.Fprintf(stdout, "%s  seq=%d  campaign=%q  label=%q  description=%q\n", item.ID, item.JournalSeq, item.CampaignID, item.Label, item.Description)
 		}
 		return nil
 	case "inspect":
@@ -1055,35 +945,66 @@ func stopCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) != 1 {
 		return errors.New("usage: interceptor stop <session-id>")
 	}
-	dataRoot, err := session.DataRoot()
+	root, err := session.DataRoot()
 	if err != nil {
 		return err
 	}
-	metadata, _, err := session.Load(dataRoot, arguments[0])
+	m, paths, err := session.Load(root, arguments[0])
 	if err != nil {
 		return err
 	}
-	if metadata.Phase == session.Stopped {
-		fmt.Fprintf(stdout, "Session %s is already stopped\n", metadata.ID)
-		return nil
-	}
-	if metadata.ContainerID == "" {
-		return errors.New("session has no container identity")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, apiErr := hostrun.CallSession(ctx, metadata.ID, http.MethodPost, "/v1/stop", []byte(`{}`))
 	docker := ociruntime.Docker{}
-	stopErr := docker.Stop(ctx, metadata.ContainerID, 5*time.Second)
-	if apiErr != nil && stopErr != nil {
-		return fmt.Errorf("control stop failed (%v) and container stop failed (%v)", apiErr, stopErr)
+	name := m.ContainerID
+	if name == "" {
+		name = "interceptor-" + m.ID
 	}
-	_ = docker.Remove(ctx, metadata.ContainerID)
-	metadata.Phase = session.Stopped
-	if err := session.Save(session.PathsFor(dataRoot, metadata.ID).Metadata, metadata); err != nil {
+	present, err := docker.ContainerPresent(ctx, name)
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "Stopped session %s\n", metadata.ID)
+	if present {
+		cooperative, stop := context.WithTimeout(ctx, 3*time.Second)
+		_, _ = hostrun.CallSession(cooperative, m.ID, http.MethodPost, "/v1/stop", []byte(`{}`))
+		stop()
+		if err := docker.Stop(ctx, name, 5*time.Second); err != nil {
+			return err
+		}
+		if err := docker.Remove(ctx, name); err != nil {
+			return err
+		}
+	}
+	present, err = docker.ContainerPresent(ctx, name)
+	if err != nil {
+		return err
+	}
+	if present {
+		return errors.New("container removal unconfirmed")
+	}
+	for {
+		err = filemanagement.CleanupSpools(ctx, root, m, docker)
+		if err == nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("container stopped; spool cleanup pending: %w", err)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	// Preserve the supervisor's final counters and any terminal fault reason.
+	m, _, err = session.Load(root, m.ID)
+	if err != nil {
+		return err
+	}
+	if m.Phase != session.Error {
+		m.Phase = session.Stopped
+	}
+	if err := session.Save(paths.Metadata, m); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Stopped session %s; spool directories removed\n", m.ID)
 	return nil
 }
 
@@ -1091,22 +1012,27 @@ func deleteCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) != 1 {
 		return errors.New("usage: interceptor delete <session-id>")
 	}
-	dataRoot, err := session.DataRoot()
+	return purgeCommand([]string{"--session", arguments[0]}, stdout)
+}
+func purgeCommand(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("purge", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	id := flags.String("session", "", "session ID")
+	campaign := flags.String("campaign", "", "campaign ID")
+	all := flags.Bool("all", false, "all retained evidence")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("purge accepts only --session, --campaign, or --all")
+	}
+	root, err := session.DataRoot()
 	if err != nil {
 		return err
 	}
-	metadata, paths, err := session.Load(dataRoot, arguments[0])
-	if err != nil {
-		return err
-	}
-	if metadata.Phase != session.Stopped && metadata.Phase != session.Error {
-		return fmt.Errorf("refusing to delete session in phase %s; stop it first", metadata.Phase)
-	}
-	if err := os.RemoveAll(paths.Root); err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "Deleted session directory %s (shared blobs were retained)\n", paths.Root)
-	return nil
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	return filemanagement.Purge(ctx, root, filemanagement.PurgeSelection{SessionID: *id, CampaignID: *campaign, All: *all}, ociruntime.Docker{}, stdout)
 }
 
 func sessionAPICommand(arguments []string, stdout io.Writer, apiPath string) error {
@@ -1210,14 +1136,13 @@ Commands:
   app build|verify
   run --environment <directory> --model-provider <type> --allow-model <model> [provider options]
   capabilities --environment <directory>
-  gateway <session-id> --listen <private-address> --auth-principal <id> [gateway authentication options]
   list
   status <session-id>
   stop <session-id>
+  purge --session <session-id> | --campaign <campaign-id> | --all
   delete <session-id>
   snapshot create|list|inspect
   identity caller-token <session-id> --principal <id>
-  restore <session-id> --checkpoint <checkpoint-id> [--bridge-transport spool|unix]
   evaluate <session-id>
   coverage <session-id>
   logs verify|tail|export <session-id>

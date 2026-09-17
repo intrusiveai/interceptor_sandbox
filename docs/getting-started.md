@@ -104,80 +104,34 @@ interceptor run \
   --allow-model reference-model
 ```
 
-`run` prints a session ID, application URL, and control URL and remains
-attached. Keep it running. If a fixed local port is useful, add `--app-port`
-and `--control-port`; otherwise the OS selects free loopback ports.
+`run` prints the native session ID and `http://127.0.0.1:8080`. Keep it running;
+it owns the target and provider bridge. No separate gateway process is needed.
 
-## Exercise the session
+## Exercise the local integration
 
-Use the printed application URL for the application's normal request shape:
-
-```sh
-curl -sS -X POST "$APPLICATION_URL/api/agent/invoke" \
-  -H 'Content-Type: application/json' \
-  --data '{"prompt":"List the open support tickets"}'
-```
-
-With no caller header, the reference agent uses its own synthetic identity.
-Name the Blueprint's example user to exercise delegated access instead:
+In another terminal, use the qualification client against this fresh reference
+environment:
 
 ```sh
-curl -sS -X POST "$APPLICATION_URL/api/agent/invoke" \
-  -H 'Content-Type: application/json' \
-  -H 'X-Interceptor-Caller: alice' \
-  --data '{"prompt":"List my open support tickets"}'
+go run ./examples/local-api-smoke --output /tmp/local-api-evidence
 ```
 
-Interceptor converts that harness-only header into a short-lived caller token.
-The reference agent exchanges it using its own client identity, so the ticket
-service sees Alice as the user and the support agent as the actor. No real user
-or cloud credential is involved. See [Synthetic identity and delegated
-access](identity.md) for the complete flow.
+The client attaches a test campaign, registers an artifact and attempts, invokes
+the application, creates/restores a checkpoint, verifies fresh session identity
+and stale-request rejection, then stops and exports both sessions. Add
+`--data-root <absolute-test-data-root>` to verify application state rollback too.
+The API remains available after target stop. Ctrl+C ends the host service.
 
-Or use the cooperative control URL to create a tracked turn. This wrapper gives
-the request a turn ID and records a structured result. Because the wrapper can
-carry any kind of request body, its `body` field uses base64 text (`e30=` is
-the base64 form of `{}`):
+To write another client, follow [Local Operator integration](local-api.md) and
+the [native v1alpha2 wire format](cross-vm-gateway.md). No integration credential
+is required. Native model-provider credentials stay on the host.
 
-```sh
-curl -sS -X POST "$CONTROL_URL/v1/turns" \
-  -H 'Content-Type: application/json' \
-  --data '{
-    "method":"POST",
-    "path":"/api/agent/invoke",
-    "caller_principal":"alice",
-    "headers":{"Content-Type":"application/json"},
-    "body":"eyJwcm9tcHQiOiJMaXN0IHRoZSBvcGVuIHN1cHBvcnQgdGlja2V0cyJ9"
-  }'
-```
-
-From another terminal, inspect and manage the session:
+Administrator inspection and retained evidence remain available:
 
 ```sh
 interceptor list
 interceptor status <session-id> --json
-interceptor evaluate <session-id>
-interceptor coverage <session-id>
-interceptor snapshot create <session-id> --name after-smoke-test
 interceptor snapshot list <session-id>
-```
-
-Restore creates a new, independent session containing the state saved at the
-snapshot. The original session remains running unless `--stop-source` is
-supplied:
-
-```sh
-interceptor restore <source-session-id> \
-  --checkpoint <checkpoint-id> \
-  --model-provider openai-chat \
-  --provider-base-url http://127.0.0.1:19090/v1 \
-  --allow-model reference-model
-```
-
-Stop, verify, and export a completed session:
-
-```sh
-interceptor stop <session-id>
 interceptor logs verify <session-id>
 interceptor logs export <session-id> --output ./evidence.tar
 ```

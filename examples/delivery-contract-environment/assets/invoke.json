@@ -1,0 +1,39 @@
+{
+  "description": "Submit a task to the synthetic agent",
+  "input": {
+    "media_type": "application/json",
+    "encoding": "json",
+    "max_bytes": 65536,
+    "basis": "synthetic",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Task text for the agent"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "output": {
+    "media_type": "application/json",
+    "encoding": "json",
+    "max_bytes": 65536,
+    "basis": "unknown"
+  },
+  "examples": [
+    {
+      "id": "benign",
+      "input": {
+        "query": "Summarize ticket T-1"
+      },
+      "output": {
+        "answer": "Illustrative summary"
+      }
+    }
+  ]
+}

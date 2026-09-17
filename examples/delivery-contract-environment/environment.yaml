@@ -1,0 +1,49 @@
+api_version: interceptor.dev/v1alpha2
+kind: Environment
+metadata:
+  name: delivery-contract-example
+  version: 0.1.0
+  reviewed_by: synthetic-example-not-production-review
+  reviewed_at: 2026-09-11T00:00:00Z
+application:
+  image: example/agent@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  launch:
+    command: ["/app/agent"]
+    workdir: /app
+    environment:
+      MODEL_BASE_URL: http://127.0.0.1:18080/v1
+      TICKETS_MCP_URL: http://tickets.sandbox.local:18200/mcp
+  interface:
+    kind: http
+    operations:
+      - id: invoke
+        method: POST
+        path: /invoke
+        delivery_asset: assets/invoke.json
+    http:
+      listen: http://127.0.0.1:8080
+    startup_timeout_ms: 30000
+    turn_timeout_ms: 120000
+  persistence:
+    snapshot_capable: false
+    mutable_roots: [/state/app]
+    quiesce: {kind: none}
+filesystem:
+  seed:
+    - source: assets/tickets.csv
+      target: /state/app/tickets.csv
+      read_only: false
+  injection_namespaces:
+    - id: records
+      root: /state/app
+      allow_create: false
+services:
+  - id: tickets
+    kind: mcp_http
+    implementation: generic
+    export_contracts: true
+    listen: 127.0.0.1:18200
+    hostnames: [tickets.sandbox.local]
+    endpoint: /mcp
+    tools: assets/tools.yaml
+    seed: assets/tickets.json

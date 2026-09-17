@@ -34,9 +34,10 @@ The implementation currently includes:
   verification, and portable attempt-indexed evidence exports;
 - producer-neutral payload artifacts, adaptive attempt lineage, bounded
   feedback views, and deterministic capability discovery;
-- an optional per-session Cross-VM gateway with secret-store-backed integration
-  authentication and short-lived opaque execution leases, plus host credential
-  resolution from AWS, Azure, Google Cloud, or HashiCorp Vault.
+- an integrated localhost Operator API with campaign binding, immutable native
+  ownership, durable operations, snapshot/restore, confirmed stop and evidence;
+- host model-provider credential resolution from AWS, Azure, Google Cloud or
+  HashiCorp Vault.
 
 ## Build and verify
 
@@ -71,10 +72,13 @@ interceptor run \
   --allow-model provider-model-id
 ```
 
-`run` stays attached because that host process owns the provider connector and
-the loopback bridges. Its printed application and cooperative-control URLs bind
-only to `127.0.0.1`. These local endpoints intentionally have no authentication;
-other processes running as the same OS user are inside the MVP trust boundary.
+`run` stays attached and owns the target, provider bridge and Operator API at
+`http://127.0.0.1:8080`. No separate gateway or integration authentication is
+needed. One instance is supported on a trusted local host. The API remains
+available after target stop for evidence collection; Ctrl+C ends the service.
+See the [local integration contract](docs/local-api.md) for attach, native v1alpha2
+requests, restore and evidence download.
+
 Environment-based provider credentials are a local-development compatibility
 source. Production mode resolves stable credential IDs from a configured host
 secret store or uses provider workload identity; credentials are never passed
@@ -89,9 +93,6 @@ interceptor evaluate <session-id>
 interceptor coverage <session-id>
 interceptor logs verify <session-id>
 interceptor logs export <session-id> --output evidence.tar
-interceptor restore <session-id> --checkpoint <checkpoint-id> \
-  --model-provider openai-chat --provider-base-url https://provider.example/v1 \
-  --allow-model provider-model-id
 interceptor stop <session-id>
 ```
 
@@ -106,7 +107,6 @@ socket path:
 
 ```sh
 interceptor run ... --bridge-transport unix
-interceptor restore ... --bridge-transport unix
 ```
 
 `unix` is never selected automatically and has no fallback. It requires the
@@ -125,7 +125,7 @@ The user documentation starts at [`docs/`](docs/README.md), including the
 reference](docs/environment-blueprint.md), [local API](docs/api-reference.md),
 [CLI reference](docs/cli-reference.md), [model providers](docs/model-providers.md),
 the [adaptive simulation interface](docs/adaptive-simulation.md), the guide to
-[Cross-VM gateway authentication](docs/cross-vm-gateway.md), the guide to
+[Local Operator integration](docs/local-api.md), the guide to
 [synthetic identity and delegated access](docs/identity.md), and a detailed
 guide to [logical snapshots and restore](docs/snapshots-and-restore.md).
 
@@ -140,6 +140,6 @@ kept below that root. Deleting a stopped session retains shared blobs.
 - [`specs/mvp.md`](specs/mvp.md) is the authoritative MVP specification.
 - [`specs/external-adaptive-simulation.md`](specs/external-adaptive-simulation.md)
   defines the implemented producer-neutral adaptive-harness, credential, model
-  adapter, and Cross-VM extensions to the MVP.
+  adapter, and operations extensions to the MVP.
 - [`specs/decisions/0001-local-runtime-redesign.md`](specs/decisions/0001-local-runtime-redesign.md)
   records the move from the earlier distributed design.

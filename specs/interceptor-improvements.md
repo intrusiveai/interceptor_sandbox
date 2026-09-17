@@ -1,7 +1,7 @@
 # AEF Requirements for Interceptor Adaptive Simulation
 
-Status: implemented architecture extension  
-Date: 2026-09-02
+Status: integration requirements; revised AD-010 implemented in source; deployment qualification required
+Date: 2026-09-14
 
 ## 1. Purpose and ownership
 
@@ -48,13 +48,15 @@ authority or exposing protected evidence to Operator's guest attack engine.
 | INT-AEF-AD-007 | Native MCP result injection | ideal | Interceptor MCP fidelity, Operator scenario coverage, AEF reporting |
 | INT-AEF-AD-008 | Checkpoint fork convenience | marginal | Operator branching efficiency and Interceptor session management |
 | INT-AEF-AD-009 | Typed event-match oracle | ideal | Interceptor evaluation and AEF deterministic assessment |
-| INT-AEF-AD-010 | Cross-VM harness interface | required | Operator guest, trusted Operator Runtime, Interceptor production boundary |
+| INT-AEF-AD-010 | operations harness interface | required | Operator guest, trusted Operator Runtime, Interceptor production boundary |
 | INT-AEF-AD-011 | Extended native model-provider adapters | ideal | Interceptor target applications, Operator model relay parity, AEF compatibility reporting, third-party harnesses |
-| INT-AEF-AD-012 | Host secret-store credential resolution | required | Interceptor host controller, model-provider adapters, Cross-VM gateway authentication, enterprise cloud deployment |
+| INT-AEF-AD-012 | Host secret-store credential resolution | required | Interceptor host controller, model-provider adapters, model-provider authentication |
 | INT-AEF-AD-013 | Closed DNS and locally trusted service TLS | required | Target application, simulated HTTP/MCP/identity/attacker services, Operator compatibility checks, AEF coverage analysis |
 
 Implementation status: AD-001 through AD-007 and AD-009 through AD-013 are
-implemented by the current extension. AD-008 remains deliberately deferred:
+implemented by the current extension. AD-010 campaign access and reporting are
+implemented by the native operation and local API layers. AD-008 remains
+deliberately deferred:
 the existing snapshot-create plus trusted fresh-session restore operations
 already provide safe branching, and an atomic fork API would add privileged
 surface without a demonstrated reliability or performance need.
@@ -136,10 +138,10 @@ changing its digest and invalidating Interceptor authenticity.
 AEF may place optional snapshot-create, snapshot-restore, and cumulative
 committed-snapshot-byte ceilings in its signed campaign authorization. Operator
 controls when Interceptor receives the typed mutations, persists their usage in
-one campaign ledger across sequential fresh MicroVM revisions, and reports
+one campaign ledger across target revisions while the same harness stays alive, and reports
 requests, receipts, sizes, reasons, outcomes, and revision effects.
 
-Interceptor independently enforces its live ExecutionLease, host restore authority, and
+Interceptor independently enforces the session campaign association, host restore authority and
 local hard limits and records authoritative snapshot identity, digest,
 canonical size, parent lineage, environment/application/capability/release
 bindings, and source/resulting session identities and revisions in the
@@ -147,15 +149,20 @@ corresponding EvidenceBundles. AEF correlates both views after the campaign.
 Snapshot bytes remain Interceptor-managed and are not uploaded to AEF unless a
 separate artifact-export policy explicitly requires them.
 
-### 4.6 Cross-VM authentication
+### 4.6 operations campaign access and reporting
 
-The per-session gateway is a private HTTP backend behind enterprise-managed
-TLS termination. Operator and Interceptor may run on different hosts. A shared,
-secret-store-backed integration bearer token authenticates the trusted
-Operator Runtime when it issues, inspects, or revokes a short-lived opaque
-ExecutionLease. The lease's distinct bearer token authorizes only its bound
-typed operations. Environment token input remains a development-only option
-and is rejected in production mode.
+The current MVP uses one integrated host service started by `interceptor run`
+at `127.0.0.1:8080`, without integration authentication. Attach binds the campaign;
+v1alpha2 retains supervisor-enforced campaign access, native limits and durable operations.
+The same API provides snapshot restore, confirmed stop and protected evidence.
+Restore replaces the target sequentially and returns a fresh session/revision;
+exact retries cannot create a second replacement. Host-service failure is
+terminal; no gateway restart protocol or remote provisioner is required.
+
+Operator retains its own worker fencing, operation intents/results, cumulative
+campaign accounting and per-revision native session bindings. Interceptor keeps
+its journals, attribution and evidence. See [the local contract](../docs/local-api.md)
+and native Section 13 for details and executable qualification.
 
 ## 5. Implementation conclusions for AD-006, AD-007, AD-011, AD-012, and AD-013
 
@@ -169,7 +176,7 @@ and is rejected in production mode.
   Vertex Gemini, and Azure OpenAI Chat/Responses join OpenAI, Bedrock, and
   LiteLLM under the defined non-streaming text and client-function subset.
 - **INT-AEF-AD-012 is supported.** The shared host resolver supports model
-  provider credentials and the gateway integration token in AWS Secrets
+  provider credentials in AWS Secrets
   Manager, Azure Key Vault, Google Cloud Secret Manager, and HashiCorp Vault KV
   v2, while direct cloud workload identity remains available where appropriate.
 - **INT-AEF-AD-013 is supported.** An optional bounded loopback DNS resolver
@@ -188,7 +195,7 @@ until external composition measurements justify additional fork machinery.
 The Environment Blueprint defines a sealed capability envelope, never a
 campaign payload inventory. A runtime engine supplies payload bytes, attempt
 identity, selector, placement, scope, and timing through `POST /v1/injections`
-or the typed Cross-VM `injection.arm` operation. Interceptor validates that the
+or the typed operations `injection.arm` operation. Interceptor validates that the
 specific target advertises the requested surface before it journals the arm.
 
 The capability manifest reports injection surfaces per managed service,
@@ -218,8 +225,8 @@ is separately eligible for `model_tool_result`. Arbitrary descendant-process
 stdout, undeclared localhost sockets, and public-Internet requests are not
 intercepted.
 
-The Cross-VM operation set also includes `injection.delete`, bound to the same
-lease, expected session revision, body digest, deadline, and idempotency rules
+The operations operation set also includes `injection.delete`, bound to the same
+campaign association, worker/revision attribution, expected native session revision, body digest, deadline and live request-handling rules
 as other live mutations.
 
 ## 5.2 Closed network simulation
@@ -279,3 +286,11 @@ AEF integration is conformant when:
 - Copying proprietary AEF schemas into Interceptor.
 - Treating AEF scenario prose as Interceptor authorization.
 - Requiring Operator Sandbox for local or third-party Interceptor use.
+
+## Live feedback alignment (2026-09-16)
+
+The native feedback contract now implements default all-permitted selection within
+immutable profiles, fixed exact-invocation receipts, 256 KiB content reads and
+retained reads after restore/stop. Category availability, action delivery facts,
+event-attributed oracle outcomes and truncation prevent empty/partial evidence
+from being interpreted as negative results. See [the implemented contract](../docs/feedback.md).

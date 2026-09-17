@@ -40,7 +40,7 @@ func NewMetadata(environmentPath string, lock *environment.Lock, blueprint *envi
 		return Metadata{}, fmt.Errorf("resolve Environment path: %w", err)
 	}
 	return Metadata{
-		SchemaVersion: 1, ID: id, EnvironmentPath: absolute,
+		SchemaVersion: 1, ID: id, OperationAPIVersion: "interceptor.dev/operation-request/v1alpha2", EnvironmentPath: absolute,
 		EnvironmentDigest: lock.EnvironmentDigest, AppImage: blueprint.Application.Image,
 		AppDigest: lock.ApplicationDigest, Phase: Creating, Generation: 1,
 		CreatedAt: now.UTC(), UpdatedAt: now.UTC(),
@@ -62,6 +62,12 @@ func Initialize(dataRoot string, metadata Metadata, baselineManifestDigest strin
 	for _, directory := range []string{paths.Root, paths.Checkpoints, paths.Generations, paths.Logs, paths.Sockets} {
 		if err := os.MkdirAll(directory, 0o750); err != nil {
 			return Paths{}, nil, nil, fmt.Errorf("create session directory: %w", err)
+		}
+	}
+	if metadata.OperationAPIVersion != "" {
+		initial := map[string]any{"api_version": "interceptor.dev/execution-state/v1alpha2", "session_id": metadata.ID, "records": map[string]any{}}
+		if err := fsutil.WriteJSON(filepath.Join(paths.Root, "execution.json"), initial, 0600); err != nil {
+			return Paths{}, nil, nil, err
 		}
 	}
 	if err := Save(paths.Metadata, metadata); err != nil {

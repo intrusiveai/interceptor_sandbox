@@ -37,7 +37,15 @@ name and arguments to exercise MCP initialization, discovery, and a tool call:
 ```
 
 Runtime examples use the portable file-spool bridge by default. On a native
-Linux Docker host, `interceptor run` and `interceptor restore` may opt into
+Linux Docker host, `interceptor run` may opt into
 bind-mounted Unix sockets with `--bridge-transport unix`. Do not use that mode
 with Docker Desktop or a remote Docker daemon; there is deliberately no
 automatic detection or fallback.
+
+## Integrated local API lifecycle test
+
+After starting a fresh reference environment with `interceptor run`, use
+`go run ./examples/local-api-smoke --output /tmp/local-api-evidence` to qualify
+attach, invocation, snapshot, restore, stale-session rejection, stop and both
+session evidence exports. Add `--data-root <test-data-root>` to check the reference
+application's state rollback. See [the contract](../docs/local-api.md).

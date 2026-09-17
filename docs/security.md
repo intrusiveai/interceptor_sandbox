@@ -106,25 +106,17 @@ interceptor run ... --model-api-key-env MY_PROVIDER_API_KEY
 
 ## Local APIs
 
-Application and cooperative control URLs accept connections only from the local
-machine and do not require a password. Do not make them remotely reachable
-through `0.0.0.0`, SSH forwarding, a reverse proxy, Docker port publication, or
-a shared CI runner. Choose fixed ports only when necessary; otherwise let the
-operating system choose unused local ports.
+The integrated host API listens only on `127.0.0.1:8080`. Operator and
+Interceptor share a trusted local host; no integration authentication or TLS is
+used in the MVP. All local users able to access loopback are inside the trust
+boundary. The harness has no network access and cannot call this listener.
 
-Operator-only endpoints remain behind protected bridge files or sockets and are
-not routed by the local control server. Filesystem permissions are part of this
-boundary, so keep the data root private and do not relax its modes.
-
-The optional per-session Cross-VM gateway is a distinct production boundary.
-It is a private HTTP backend intended to sit behind an enterprise-managed TLS
-load balancer; never expose it directly to an untrusted network. Lease
-administration requires a shared integration bearer token resolved from a host
-secret store. Typed execution requires a separate, short-lived opaque lease
-token issued by the gateway. The service stores token digests for lookup,
-supports immediate lease revocation, and never forwards a caller-supplied URL,
-path, header, command, or generic proxy request. Environment token storage is
-available only for local development and is rejected by `--production`.
+Attachment binds one campaign, native operations enforce campaign access and record worker/revision attribution,
+closure, expected revisions and budgets, and lifecycle restore rejects stale
+sessions and stops the old target before replacement. No extra public cooperative
+application/control ports are opened. Service failure is terminal, not a gateway
+replacement event. Model-provider credentials retain their existing host-only
+rules. See [Local integration](local-api.md).
 
 ## Transport selection
 
@@ -147,9 +139,10 @@ back or enabling container networking when the socket cannot be reached.
   by host filesystem ownership.
 - Evidence chains detect internal modification but are not externally signed.
 - Sensitive model/application data is recorded unredacted in local evidence.
-- Shared large-content files are retained after session deletion.
+- Session evidence is retained until administrative purge; purge removes managed
+  content but does not promise secure erasure of underlying media or external copies.
 - Docker Desktop and the Docker daemon are part of the trusted computing base.
-- The Cross-VM interface is single-installation and session scoped; it is not a
+- The operations interface is single-installation and session scoped; it is not a
   multi-tenant control plane. Evidence encryption and secure deletion remain
   deployment responsibilities.
 - Synthetic identity implements client credentials and same-issuer delegated

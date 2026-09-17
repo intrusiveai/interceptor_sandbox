@@ -1,0 +1,14 @@
+{
+  "tickets": {
+    "T-1": {
+      "id": "T-1",
+      "description": "Customer-provided benign record: printer needs paper.",
+      "status": "open"
+    },
+    "T-2": {
+      "id": "T-2",
+      "description": "Customer-provided benign record: request replacement keyboard.",
+      "status": "open"
+    }
+  }
+}

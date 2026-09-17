@@ -44,13 +44,22 @@ Current decisions:
 ## Adaptive simulation extension
 
 [`external-adaptive-simulation.md`](external-adaptive-simulation.md) defines the
-implemented producer-neutral interfaces for adaptive harnesses, capability
-discovery, filtered feedback, attempt-indexed evidence, and a secure Cross-VM
+producer-neutral interfaces for adaptive harnesses, capability
+discovery, filtered feedback, attempt-indexed evidence, and a secure operations
 Operator boundary. It is normative for those extension interfaces and augments
-the local MVP contract. `interceptor-improvements.md` records the cross-project
+the local MVP contract. Section 13 specifies campaign-based access, worker/revision
+attribution, terminal execution closure and campaign reporting. The native
+implementation and localhost API are covered by the current
+[validation record](../docs/local-api-validation.md).
+`interceptor-improvements.md` records the cross-project
 priorities and AEF consumption rules without redefining these schemas.
 
 ## Change discipline
+
+[`delivery-contracts.md`](delivery-contracts.md) is normative for Blueprint and
+capability v1alpha2 delivery descriptions, public MCP/HTTP endpoint context,
+implementation selection, and benign-source versus served/session-copy
+injection semantics (INT-DEL-001–005).
 
 Changes to externally visible behavior, file formats, schemas, APIs, lifecycle
 semantics, or security guarantees should update the specification in the same

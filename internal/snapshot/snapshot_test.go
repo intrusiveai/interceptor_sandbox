@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -101,3 +102,33 @@ func TestCheckpointTamperingDetected(t *testing.T) {
 func digestOf(value string) string { return digest.Bytes([]byte(value)) }
 
 func fixedTime() time.Time { return time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC) }
+
+func TestCheckpointCampaignAndDescriptionRoundTrip(t *testing.T) {
+	h := digestOf("test")
+	cp, err := NewCheckpoint("sess-test", "", h, h, 1, h, h, 0, 1, "baseline", "test", fixedTime(), Metadata{CampaignID: "campaign-1", Description: "Before scenario branch B — mutation baseline"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err = WriteCheckpoint(root, cp); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadCheckpoint(root, cp.ID)
+	if err != nil || loaded != cp {
+		t.Fatal(loaded, err)
+	}
+	for _, field := range []string{"campaign", "description"} {
+		changed := cp
+		if field == "campaign" {
+			changed.CampaignID = "campaign-2"
+		} else {
+			changed.Description = "changed"
+		}
+		if VerifyCheckpoint(changed) == nil {
+			t.Fatal("metadata not covered by checkpoint hash")
+		}
+	}
+	if _, err = NewCheckpoint("sess-test", "", h, h, 1, h, h, 0, 1, "baseline", "test", fixedTime(), Metadata{Description: strings.Repeat("x", MaxDescriptionBytes+1)}); err == nil {
+		t.Fatal("oversized description accepted")
+	}
+}

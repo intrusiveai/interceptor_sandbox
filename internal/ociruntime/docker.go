@@ -224,3 +224,77 @@ func sortedKeys(values []string) []string {
 	sort.Strings(copy)
 	return copy
 }
+
+// InterceptorContainers returns live targets, including paused containers.
+// Stopped historical containers and their evidence are left untouched.
+func (d Docker) InterceptorContainers(ctx context.Context) ([]string, error) {
+	command := exec.CommandContext(ctx, d.executable(), "ps", "--filter", "name=^/interceptor-sess-", "--format", "{{.Names}}")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("list Interceptor containers: %w: %s", err, output)
+	}
+	return strings.Fields(string(output)), nil
+}
+func (d Docker) ContainerPresent(ctx context.Context, id string) (bool, error) {
+	if id == "" {
+		return false, errors.New("container identity is missing")
+	}
+	command := exec.CommandContext(ctx, d.executable(), "ps", "--all", "--filter", "name=^/"+id+"$", "--format", "{{.Names}}")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("confirm container removal: %w: %s", err, output)
+	}
+	return strings.TrimSpace(string(output)) != "", nil
+}
+
+// Kill does not wait for cooperative shutdown or a functioning supervisor.
+func (d Docker) Kill(ctx context.Context, id string) error {
+	command := exec.CommandContext(ctx, d.executable(), "kill", "--signal", "KILL", id)
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("kill Docker container: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+// EnsureRemoved verifies exit/removal even when a concurrent stop won the race.
+func (d Docker) EnsureRemoved(ctx context.Context, id string, immediate bool) error {
+	present, err := d.ContainerPresent(ctx, id)
+	if err != nil || !present {
+		return err
+	}
+	running, err := d.Running(ctx, id)
+	if err != nil {
+		return err
+	}
+	if running {
+		if immediate {
+			err = d.Kill(ctx, id)
+		} else {
+			err = d.Stop(ctx, id, 5*time.Second)
+		}
+		if err != nil {
+			present, checkErr := d.ContainerPresent(ctx, id)
+			if checkErr == nil && !present {
+				return nil
+			}
+			running, checkErr = d.Running(ctx, id)
+			if checkErr != nil || running {
+				return err
+			}
+		}
+	}
+	if err := d.Remove(ctx, id); err != nil {
+		present, checkErr := d.ContainerPresent(ctx, id)
+		if checkErr != nil || present {
+			return err
+		}
+	}
+	present, err = d.ContainerPresent(ctx, id)
+	if err != nil {
+		return err
+	}
+	if present {
+		return errors.New("container removal unconfirmed")
+	}
+	return nil
+}
