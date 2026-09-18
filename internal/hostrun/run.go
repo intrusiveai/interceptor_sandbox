@@ -32,6 +32,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/environment"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/filemanagement"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/hostlifetime"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/ociruntime"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/session"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/snapshot"
@@ -313,13 +314,34 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 	if err != nil {
 		return metadata, err
 	}
-	ctx, cancelRun := context.WithCancel(ctx)
+	ctx, interruptRun := context.WithCancelCause(ctx)
+	cancelRun := func() { interruptRun(nil) }
 	defer cancelRun()
 	var fault atomic.Pointer[filemanagement.SpoolFault]
 	var workers sync.WaitGroup
 	var stopBridge context.CancelFunc = func() {}
 	var closeServers = func() {}
 	var quotaDone chan struct{}
+	var dockerWatchDone chan struct{}
+	sessionID := metadata.ID
+	interruptionDone := make(chan struct{})
+	go func() {
+		defer close(interruptionDone)
+		<-ctx.Done()
+		cause := context.Cause(ctx)
+		if !hostlifetime.IsInterruption(cause) {
+			return
+		}
+		// Termination must not wait for API persistence, model work, or a spool reply.
+		go func() {
+			killCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = config.Docker.Kill(killCtx, "interceptor-"+sessionID)
+		}()
+		if config.OnFault != nil {
+			config.OnFault(sessionID, cause)
+		}
+	}()
 	defer func() {
 		cancelRun()
 		if quotaDone != nil {
@@ -328,7 +350,20 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		cleanup, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		name := "interceptor-" + metadata.ID
-		err := config.Docker.EnsureRemoved(cleanup, name, fault.Load() != nil)
+		interrupted := hostlifetime.IsInterruption(context.Cause(ctx))
+		err := config.Docker.EnsureRemoved(cleanup, name, fault.Load() != nil || interrupted)
+		if dockerWatchDone != nil {
+			select {
+			case <-dockerWatchDone:
+			case <-cleanup.Done():
+				err = errors.Join(err, cleanup.Err())
+			}
+		}
+		select {
+		case <-interruptionDone:
+		case <-cleanup.Done():
+			err = errors.Join(err, cleanup.Err())
+		}
 		stopBridge()
 		closeServers()
 		done := make(chan struct{})
@@ -351,6 +386,18 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 			_ = fsutil.WriteJSON(filepath.Join(paths.Root, "transport-failure.json"), f, 0600)
 			result = metadata
 			runErr = errors.Join(runErr, f)
+		}
+		if interrupted {
+			if latest, _, e := session.Load(dataRoot, metadata.ID); e == nil {
+				metadata = latest
+			}
+			cause := context.Cause(ctx)
+			metadata.Phase = session.Error
+			metadata.TerminationReason = cause.Error()
+			_ = session.Save(paths.Metadata, metadata)
+			_ = fsutil.WriteJSON(filepath.Join(paths.Root, "host-interruption.json"), map[string]any{"reason": cause.Error(), "session_id": metadata.ID, "observed_at": time.Now().UTC()}, 0600)
+			result = metadata
+			runErr = errors.Join(runErr, cause)
 		}
 		if err != nil {
 			_ = fsutil.WriteJSON(filepath.Join(paths.Root, "cleanup-pending.json"), map[string]string{"reason": "container or writer cleanup unconfirmed"}, 0600)
@@ -502,6 +549,14 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		_ = session.Save(paths.Metadata, metadata)
 		return metadata, err
 	}
+	dockerWatchDone = make(chan struct{})
+	go func() {
+		defer close(dockerWatchDone)
+		_ = config.Docker.WatchConnection(ctx)
+		if ctx.Err() == nil {
+			interruptRun(hostlifetime.Interrupted("DOCKER_CONNECTION_LOST"))
+		}
+	}()
 	if err := waitReady(ctx, paths.Metadata, config.Docker, containerID, time.Duration(blueprint.Application.Interface.StartupTimeoutMS)*time.Millisecond); err != nil {
 		logsCtx, logsCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		logs, _ := config.Docker.Logs(logsCtx, containerID)
@@ -582,18 +637,22 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 			running, inspectErr := config.Docker.Running(inspectCtx, containerID)
 			inspectCancel()
 			if inspectErr == nil && !running {
+				if latest, _, e := session.Load(dataRoot, metadata.ID); e != nil || (latest.Phase != session.Stopped && latest.Phase != session.Error) {
+					interruptRun(hostlifetime.Interrupted("CONTAINER_INTERRUPTED"))
+				}
 				waiting = false
 			} else if inspectErr != nil {
-				if latest, _, loadErr := session.Load(dataRoot, metadata.ID); loadErr == nil && (latest.Phase == session.Stopped || latest.Phase == session.Error) {
-					waiting = false
+				if ctx.Err() == nil {
+					interruptRun(hostlifetime.Interrupted("DOCKER_UNAVAILABLE"))
 				}
+				waiting = false
 			}
 		}
 	}
 	monitor.Stop()
 	stopContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if requestedStop && fault.Load() == nil {
+	if requestedStop && fault.Load() == nil && !hostlifetime.IsInterruption(context.Cause(ctx)) {
 		_, _ = callControl(stopContext, metadata, paths, http.MethodPost, "/v1/stop", []byte(`{}`))
 		_ = config.Docker.Stop(stopContext, containerID, 5*time.Second)
 	}

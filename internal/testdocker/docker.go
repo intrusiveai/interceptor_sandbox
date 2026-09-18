@@ -37,6 +37,7 @@ kill|stop)
  rm -f "$root/$name.running";;
 rm)
  rm -f "$root/$2.present";;
+events) exec sleep 180;;
 logs) :;;
 *) exit 1;;
 esac

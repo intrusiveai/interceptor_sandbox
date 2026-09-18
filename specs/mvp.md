@@ -377,6 +377,25 @@ resources are not deleted or reused. Never follow spool links during removal. He
 target restore cleans up the old session's spool and creates empty directories for
 the replacement; transport files are not snapshot state and are never replayed.
 
+#### 4.3.3 Host lifetime and macOS sleep prevention
+
+[Host lifetime](../docs/host-lifetime.md) is normative. On macOS, the host MUST run
+as the logged-in Docker Desktop user and manage `/usr/bin/caffeinate -i -w <host-pid>`
+while execution or shutdown cleanup is active. Verify the idle-system-sleep assertion
+before target startup; retain it continuously through snapshot restore, and release
+it after cleanup even if the evidence API remains open. Display sleep/lock are allowed.
+Each Operator/Interceptor host manages its own helper. An optional per-user LaunchAgent
+uses explicit startup with `RunAtLoad=false` and `KeepAlive=false`.
+
+Actual sleep, logout/SIGTERM, SIGHUP, helper failure, unreadable host power state,
+Docker connection loss/restart or unexpected container exit MUST close execution.
+Detect macOS sleep using kernel sleep/wake markers every 500 ms and before API
+admission. Terminate through Docker independently of native replies and persistence;
+retain the reason and uncertainty, confirm cleanup before removing spools, and report
+unconfirmed outcomes when Docker is unavailable. Recovery performs cleanup/reporting
+only, never execution resumption. Linux uses the same terminal Docker/signal behavior
+without macOS sleep prevention. Ctrl+C retains normal shutdown behavior.
+
 ### 4.4 Host model connector
 
 The application sends supported provider requests to the in-container

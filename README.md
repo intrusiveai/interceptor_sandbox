@@ -143,3 +143,10 @@ kept below that root. Deleting a stopped session retains shared blobs.
   adapter, and operations extensions to the MVP.
 - [`specs/decisions/0001-local-runtime-redesign.md`](specs/decisions/0001-local-runtime-redesign.md)
   records the move from the earlier distributed design.
+
+## macOS host lifetime
+
+`interceptor run` automatically manages `caffeinate -i -w <host-pid>` during active
+execution, restore and cleanup. It releases the assertion while serving only retained
+evidence. Screen lock is supported; actual sleep, logout or Docker interruption ends
+execution. See [host lifetime and recovery](docs/host-lifetime.md).

@@ -137,6 +137,9 @@ func read(w http.ResponseWriter, r *http.Request, target any, limit int64) bool 
 	return true
 }
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if runtime, ok := s.runtime.(interface{ CheckHost() error }); ok {
+		_ = runtime.CheckHost()
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Method != "POST" {
 		w.Header().Set("Allow", "POST")
@@ -528,6 +531,18 @@ func (s *Service) transition(input LifecycleRequest) adaptive.GatewayResponse {
 		return adaptive.OperationError(503, "service_stopping")
 	}
 	defer s.unlockGate()
+	if input.Operation == "snapshot.restore" {
+		if runtime, ok := s.runtime.(interface {
+			HoldRestore(context.Context) (func(), error)
+		}); ok {
+			release, err := runtime.HoldRestore(ctx)
+			if err != nil {
+				_ = s.failTransport()
+				return adaptive.OperationError(503, "host_lifetime_unavailable")
+			}
+			defer release()
+		}
+	}
 	s.mu.Lock()
 	b := s.state.Active
 	closed := s.state.Closed || s.transportFailed.Load()

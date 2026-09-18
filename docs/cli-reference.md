@@ -289,3 +289,10 @@ rename behavior, so choose the output path deliberately.
 `sandboxd` and `app-helper` are wrapper-image entry points used by Interceptor.
 They are not user-facing administration commands and should not be invoked
 directly.
+
+## macOS host lifetime
+
+`interceptor run` automatically manages `caffeinate -i -w <host-pid>` during active
+execution, restore and cleanup. It releases the assertion while serving only retained
+evidence. Screen lock is supported; actual sleep, logout or Docker interruption ends
+execution. See [host lifetime and recovery](host-lifetime.md).

@@ -27,6 +27,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/evaluation"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/filemanagement"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/hostlifetime"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/hostrun"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/localapi"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/ociruntime"
@@ -257,8 +258,22 @@ func runCommand(arguments []string, stdout io.Writer) error {
 	if *credentialID == "" && apiKey != "" {
 		fmt.Fprintln(stdout, "warning: using a development-only environment credential; use --production with a host credential ID or workload identity for production")
 	}
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(signals)
+	defer cancel(nil)
+	go func() {
+		select {
+		case sig := <-signals:
+			if sig == os.Interrupt {
+				cancel(nil)
+			} else {
+				cancel(hostlifetime.Interrupted("HOST_SERVICE_INTERRUPTED"))
+			}
+		case <-ctx.Done():
+		}
+	}()
 	err = localapi.Run(ctx, hostrun.Config{
 		EnvironmentDirectory: *directory,
 		ProviderType:         *providerType, ProviderURL: *providerURL, ProviderAPIKey: apiKey,
@@ -790,6 +805,26 @@ func exportEvidence(dataRoot string, metadata session.Metadata, paths session.Pa
 			if err := addBytes("restore-source/"+name, content, 0600); err != nil {
 				return err
 			}
+		}
+	}
+	for _, name := range []string{"host-interruption.json", "transport-failure.json", "cleanup-pending.json"} {
+		path := filepath.Join(paths.Root, name)
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Size() > 4096 {
+			return errors.New("invalid host failure record")
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err := addBytes(name, content, 0600); err != nil {
+			return err
 		}
 	}
 	checkpointFiles, err := os.ReadDir(paths.Checkpoints)

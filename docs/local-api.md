@@ -357,3 +357,10 @@ receipt/entry reads, profile boundaries, availability/completeness and retained
 source-session reads. Rebuild the host and supervisor together; capabilities
 advertise the new view version and bounded content-read operation. Operator
 and harness runtime support remains a separate implementation deliverable.
+
+## macOS host lifetime
+
+`interceptor run` automatically manages `caffeinate -i -w <host-pid>` during active
+execution, restore and cleanup. It releases the assertion while serving only retained
+evidence. Screen lock is supported; actual sleep, logout or Docker interruption ends
+execution. See [host lifetime and recovery](host-lifetime.md).

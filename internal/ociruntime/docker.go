@@ -1,6 +1,7 @@
 package ociruntime
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -297,4 +298,30 @@ func (d Docker) EnsureRemoved(ctx context.Context, id string, immediate bool) er
 		return errors.New("container removal unconfirmed")
 	}
 	return nil
+}
+
+// WatchConnection holds a daemon event stream. Losing it is terminal even if
+// Docker later returns with a live-restored container. The caller never reconnects.
+func (d Docker) WatchConnection(ctx context.Context) error {
+	command := exec.CommandContext(ctx, d.executable(), "events", "--format", "{{.Action}}")
+	command.WaitDelay = time.Second
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := command.Start(); err != nil {
+		return err
+	}
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 1024), 1024)
+	for scanner.Scan() {
+	}
+	if scanner.Err() != nil {
+		_ = command.Process.Kill()
+	}
+	err = errors.Join(scanner.Err(), command.Wait())
+	if err == nil {
+		err = errors.New("Docker event stream closed")
+	}
+	return err
 }

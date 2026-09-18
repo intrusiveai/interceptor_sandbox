@@ -20,6 +20,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/environment"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/filemanagement"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/gatewayhost"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/hostlifetime"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/hostrun"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/session"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/snapshot"
@@ -28,7 +29,7 @@ import (
 
 type EvidenceExporter func(string, session.Metadata, session.Paths, string) error
 type nativeRun struct {
-	cancel   context.CancelFunc
+	cancel   context.CancelCauseFunc
 	done     chan struct{}
 	metadata session.Metadata
 	err      error
@@ -44,6 +45,7 @@ type NativeRuntime struct {
 	faultMu       sync.Mutex
 	service       *Service
 	terminalFault error
+	power         *hostlifetime.Manager
 }
 
 // Run owns the localhost listener and target lifetime. Closing a target leaves
@@ -78,6 +80,7 @@ func Run(ctx context.Context, config hostrun.Config, export EvidenceExporter) (r
 	defer cancel()
 	config.InternalOnly = true
 	n := &NativeRuntime{ctx: serviceCtx, config: config, root: root, export: export, exportGate: make(chan struct{}, 1)}
+	n.power = hostlifetime.New(n.hostInterrupted)
 	defer func() {
 		cleanup, stop := context.WithTimeout(context.Background(), 30*time.Second)
 		defer stop()
@@ -134,7 +137,12 @@ func (n *NativeRuntime) start(ctx context.Context, source, checkpoint string) (s
 			return session.Metadata{}, errors.New("target already active")
 		}
 	}
-	life, cancel := context.WithCancel(n.ctx)
+	release, err := n.holdActivity(ctx)
+	if err != nil {
+		n.mu.Unlock()
+		return session.Metadata{}, err
+	}
+	life, cancel := context.WithCancelCause(n.ctx)
 	run := &nativeRun{cancel: cancel, done: make(chan struct{})}
 	n.active = run
 	ready := make(chan session.Metadata, 1)
@@ -144,6 +152,7 @@ func (n *NativeRuntime) start(ctx context.Context, source, checkpoint string) (s
 	n.mu.Unlock()
 	go func() {
 		defer close(run.done)
+		defer release()
 		if source == "" {
 			run.metadata, run.err = hostrun.Run(life, config)
 		} else {
@@ -154,13 +163,13 @@ func (n *NativeRuntime) start(ctx context.Context, source, checkpoint string) (s
 	case m := <-ready:
 		return m, nil
 	case <-run.done:
-		cancel()
+		cancel(nil)
 		if run.err != nil {
 			return run.metadata, run.err
 		}
 		return run.metadata, errors.New("target exited before readiness")
 	case <-ctx.Done():
-		cancel()
+		cancel(nil)
 		timer := time.NewTimer(30 * time.Second)
 		defer timer.Stop()
 		select {
@@ -177,10 +186,16 @@ func (n *NativeRuntime) Metadata(id string) (session.Metadata, error) {
 	return m, err
 }
 func (n *NativeRuntime) Execute(ctx context.Context, principal string, q adaptive.OperationRequest, body json.RawMessage) (adaptive.GatewayResponse, error) {
+	if err := n.CheckHost(); err != nil && !readOnly(q.Operation) {
+		return adaptive.OperationError(409, "host_interrupted"), nil
+	}
 	request, _ := http.NewRequestWithContext(ctx, "POST", "http://localhost/v1/operations", nil)
 	return gatewayhost.NewExecutor().Execute(request, principal, q, body)
 }
 func (n *NativeRuntime) ValidateRestore(ctx context.Context, source, id string) error {
+	if err := n.CheckHost(); err != nil {
+		return err
+	}
 	m, paths, err := session.Load(n.root, source)
 	if err != nil {
 		return err
@@ -231,7 +246,7 @@ func (n *NativeRuntime) stopActive(ctx context.Context) error {
 	if active == nil {
 		return nil
 	}
-	active.cancel()
+	active.cancel(nil)
 	select {
 	case <-active.done:
 	case <-ctx.Done():
@@ -250,7 +265,7 @@ func (n *NativeRuntime) Stop(ctx context.Context, id string) error {
 	if active == nil {
 		return errors.New("no target managed by this instance")
 	}
-	active.cancel()
+	active.cancel(nil)
 	select {
 	case <-active.done:
 	case <-ctx.Done():
@@ -347,4 +362,29 @@ func (n *NativeRuntime) transportFailed(_ string, err error) {
 	if n.service != nil {
 		_ = n.service.failTransport()
 	}
+}
+
+func (n *NativeRuntime) holdActivity(ctx context.Context) (func(), error) {
+	if n.power == nil {
+		return func() {}, nil
+	}
+	return n.power.Acquire(ctx)
+}
+func (n *NativeRuntime) HoldRestore(ctx context.Context) (func(), error) { return n.holdActivity(ctx) }
+func (n *NativeRuntime) CheckHost() error {
+	if n.power == nil {
+		return nil
+	}
+	return n.power.Check()
+}
+func (n *NativeRuntime) hostInterrupted(err error) {
+	// Cancellation carries the reason into hostrun's independent Docker kill and
+	// durable failure record; API closure does not wait for a native response.
+	n.mu.Lock()
+	active := n.active
+	n.mu.Unlock()
+	if active != nil {
+		active.cancel(err)
+	}
+	n.transportFailed("", err)
 }
