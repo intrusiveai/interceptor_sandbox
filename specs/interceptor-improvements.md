@@ -135,9 +135,11 @@ changing its digest and invalidating Interceptor authenticity.
 
 ### 4.5 Snapshot and restore correlation
 
-AEF may place optional snapshot-create, snapshot-restore, and cumulative
-committed-snapshot-byte ceilings in its signed campaign authorization. Operator
-controls when Interceptor receives the typed mutations, persists their usage in
+ScenarioBundle submissions MAY request snapshot-creation and cumulative
+committed-snapshot-byte ceilings through the public requested-limits fields.
+Operator MUST resolve these requests against its configured ceilings; producer
+identity MUST NOT grant execution authority. Operator controls when Interceptor
+receives snapshot creation and restore requests, persists their usage in
 one campaign ledger across target revisions while the same harness stays alive, and reports
 requests, receipts, sizes, reasons, outcomes, and revision effects.
 
