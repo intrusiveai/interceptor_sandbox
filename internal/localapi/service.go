@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/intrusive-ai/interceptor-sandbox/internal/adaptive"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/digest"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/evidence"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/session"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/snapshot"
@@ -22,7 +24,6 @@ import (
 
 const Version = "interceptor.dev/local-lifecycle/v1alpha1"
 const MaxLifecycleRecords = 1024
-const MaxEvidenceBytes int64 = 256 << 20
 
 var identifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
 
@@ -34,7 +35,7 @@ type Runtime interface {
 	ValidateRestore(context.Context, string, string) error
 	Restore(context.Context, string, string) (session.Metadata, error)
 	Stop(context.Context, string) error
-	Export(context.Context, string) (*os.File, error)
+	Export(context.Context, string, int64) (*os.File, error)
 }
 type Binding struct {
 	SessionID        string `json:"session_id"`
@@ -64,7 +65,14 @@ type Record struct {
 	State       string                   `json:"state"`
 	Response    adaptive.GatewayResponse `json:"response"`
 }
+type ExecutionFailure struct {
+	SessionID  string    `json:"session_id"`
+	Reason     string    `json:"reason"`
+	ObservedAt time.Time `json:"observed_at"`
+}
+
 type State struct {
+	Failure             *ExecutionFailure  `json:"failure,omitempty"`
 	TransitionSessionID string             `json:"transition_session_id,omitempty"`
 	APIVersion          string             `json:"api_version"`
 	InstanceID          string             `json:"instance_id"`
@@ -78,23 +86,29 @@ type State struct {
 	Records             map[string]*Record `json:"records"`
 }
 type Service struct {
-	frameLimit      int64
-	ctx             context.Context
-	runtime         Runtime
-	path            string
-	mu              sync.Mutex
-	gate            chan struct{}
-	state           State
-	failed          bool
-	transportFailed atomic.Bool
+	evidenceMaxBytes int64
+	frameLimit       int64
+	ctx              context.Context
+	runtime          Runtime
+	path             string
+	mu               sync.Mutex
+	gate             chan struct{}
+	state            State
+	failed           bool
+	transportFailed  atomic.Bool
 }
 
-func New(ctx context.Context, runtime Runtime, metadata session.Metadata, instanceID, path string) (*Service, error) {
+func New(ctx context.Context, runtime Runtime, metadata session.Metadata, instanceID, path string, evidenceMaxBytes int64) (*Service, error) {
+	var err error
+	evidenceMaxBytes, err = evidence.ResolveLimit(evidenceMaxBytes)
+	if err != nil {
+		return nil, err
+	}
 	if !identifier.MatchString(instanceID) || metadata.ID == "" || path == "" {
 		return nil, errors.New("local API requires instance, session and ledger path")
 	}
 	b := Binding{SessionID: metadata.ID, RunRevision: 1}
-	s := &Service{frameLimit: adaptive.OperationFrameLimit(metadata.Limits.MaxBlobBytes), ctx: ctx, runtime: runtime, path: path, gate: make(chan struct{}, 1), state: State{APIVersion: Version, InstanceID: instanceID, Active: b, Sessions: map[string]Binding{b.SessionID: b}, Phase: "ready", Records: map[string]*Record{}}}
+	s := &Service{evidenceMaxBytes: evidenceMaxBytes, frameLimit: adaptive.OperationFrameLimit(metadata.Limits.MaxBlobBytes), ctx: ctx, runtime: runtime, path: path, gate: make(chan struct{}, 1), state: State{APIVersion: Version, InstanceID: instanceID, Active: b, Sessions: map[string]Binding{b.SessionID: b}, Phase: "ready", Records: map[string]*Record{}}}
 	// An instance ledger is audit data, never a restart/ownership takeover mechanism.
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		return nil, errors.New("instance ledger already exists or is inaccessible")
@@ -102,6 +116,10 @@ func New(ctx context.Context, runtime Runtime, metadata session.Metadata, instan
 	return s, s.saveLocked()
 }
 func (s *Service) saveLocked() error {
+	if s.transportFailed.Load() {
+		s.state.Closed = true
+		s.state.Phase = "error"
+	}
 	if err := fsutil.WriteJSON(s.path, s.state, 0600); err != nil {
 		s.failed = true
 		return err
@@ -262,7 +280,7 @@ func (s *Service) attach(w http.ResponseWriter, r *http.Request) {
 		write(w, caps)
 		return
 	}
-	write(w, response(200, map[string]any{"api_version": Version, "campaign_id": input.CampaignID, "binding": b, "session": metadata, "capabilities": caps.Body}))
+	write(w, response(200, map[string]any{"api_version": Version, "campaign_id": input.CampaignID, "binding": b, "session": metadata, "capabilities": caps.Body, "evidence_max_bytes": s.evidenceMaxBytes}))
 }
 func (s *Service) native(ctx context.Context, b Binding, campaign, op, id string, body []byte) adaptive.GatewayResponse {
 	m, err := s.runtime.Metadata(b.SessionID)
@@ -578,8 +596,14 @@ func (s *Service) transition(input LifecycleRequest) adaptive.GatewayResponse {
 
 		if err := s.runtime.ValidateRestore(ctx, source, input.CheckpointID); err != nil {
 			s.mu.Lock()
-			s.state.Phase = "ready"
+			closed := s.state.Closed || s.transportFailed.Load()
+			if !closed {
+				s.state.Phase = "ready"
+			}
 			s.mu.Unlock()
+			if closed {
+				return fail("execution_closed")
+			}
 			return adaptive.OperationError(409, "checkpoint_unavailable_or_incompatible")
 		}
 	}
@@ -606,7 +630,9 @@ func (s *Service) transition(input LifecycleRequest) adaptive.GatewayResponse {
 	}
 	if input.Operation == "session.stop" {
 		s.mu.Lock()
-		s.state.Phase = "stopped"
+		if !s.transportFailed.Load() {
+			s.state.Phase = "stopped"
+		}
 		s.state.Closed = true
 		s.mu.Unlock()
 		return response(200, map[string]any{"session_id": b.SessionID, "phase": "stopped"})
@@ -684,7 +710,10 @@ func (s *Service) status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Marshal under lock; never expose a live map to an encoder after unlocking.
-	write(w, response(200, map[string]any{"instance_id": s.state.InstanceID, "campaign_id": s.state.CampaignID, "active": s.state.Active, "sessions": s.state.Sessions, "phase": s.state.Phase, "closed": s.state.Closed, "store_available": !s.failed}))
+	write(w, response(200, map[string]any{"instance_id": s.state.InstanceID, "campaign_id": s.state.CampaignID, "active": s.state.Active, "sessions": s.state.Sessions, "phase": s.state.Phase, "closed": s.state.Closed, "store_available": !s.failed, "evidence_max_bytes": s.evidenceMaxBytes, "failure": s.state.Failure}))
+}
+func (s *Service) rejectEvidenceLimit(w http.ResponseWriter) {
+	write(w, response(413, map[string]any{"code": "evidence_limit_exceeded", "maximum_bytes": s.evidenceMaxBytes, "evidence_retained": true}))
 }
 func (s *Service) evidence(w http.ResponseWriter, r *http.Request) {
 	var input struct {
@@ -703,16 +732,24 @@ func (s *Service) evidence(w http.ResponseWriter, r *http.Request) {
 		reject(w, 403, "session_not_in_campaign")
 		return
 	}
-	file, err := s.runtime.Export(r.Context(), input.SessionID)
+	file, err := s.runtime.Export(r.Context(), input.SessionID, s.evidenceMaxBytes)
 	if err != nil {
+		if errors.Is(err, evidence.ErrLimitExceeded) {
+			s.rejectEvidenceLimit(w)
+			return
+		}
 		reject(w, 409, "evidence_unavailable_or_target_not_stopped")
 		return
 	}
 	defer file.Close()
 	defer os.Remove(file.Name())
 	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() > MaxEvidenceBytes {
-		reject(w, 413, "evidence_limit_exceeded")
+	if err != nil || !info.Mode().IsRegular() {
+		reject(w, 503, "evidence_read_failed")
+		return
+	}
+	if info.Size() > s.evidenceMaxBytes {
+		s.rejectEvidenceLimit(w)
 		return
 	}
 	hash, _, err := digest.Reader(file)
@@ -726,16 +763,27 @@ func (s *Service) evidence(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/x-tar")
 	w.Header().Set("X-Content-SHA256", hash)
+	w.Header().Set("X-Evidence-Max-Bytes", fmt.Sprint(s.evidenceMaxBytes))
 	http.ServeContent(w, r, "evidence.tar", time.Time{}, file)
 }
 
 // Fault closure bypasses a stuck mutation gate. The latch closes admission even
 // if persisting the ledger fails; Docker termination runs independently.
 func (s *Service) failTransport() error {
+	return s.failExecution(ExecutionFailure{Reason: "EXECUTION_UNAVAILABLE", ObservedAt: time.Now().UTC()})
+}
+
+func (s *Service) failExecution(failure ExecutionFailure) error {
 	s.transportFailed.Store(true)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.state.Closed = true
 	s.state.Phase = "error"
+	if s.state.Failure == nil {
+		if failure.SessionID == "" {
+			failure.SessionID = s.state.Active.SessionID
+		}
+		s.state.Failure = &failure
+	}
 	return s.saveLocked()
 }

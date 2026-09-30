@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/ociruntime"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/session"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/testdocker"
 	"io"
@@ -14,7 +15,7 @@ import (
 
 func group(t *testing.T, root, id, campaign string) session.Metadata {
 	t.Helper()
-	m := session.Metadata{SchemaVersion: 1, ID: id, CampaignID: campaign, Phase: session.Stopped, ContainerID: "interceptor-" + id}
+	m := session.Metadata{SchemaVersion: 1, ID: id, CampaignID: campaign, Phase: session.Stopped, ContainerID: testdocker.Retired(t, root, id)}
 	p := session.PathsFor(root, id)
 	if err := session.Save(p.Metadata, m); err != nil {
 		t.Fatal(err)
@@ -121,5 +122,63 @@ func TestPurgePrunesLifecycleInventoryAndPreservesExternalLinks(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("empty ledger survived")
+	}
+}
+
+func TestPurgeAndSpoolCleanupPreserveEvidenceWhenDaemonUnconfirmed(t *testing.T) {
+	for _, mode := range []string{"unavailable", "changed-daemon", "legacy"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			docker, fake := testdocker.New(t)
+			m := group(t, root, "sess-1-000000000000000000000000", "campaign")
+			paths := session.PathsFor(root, m.ID)
+			spool := filepath.Join(SpoolRoots(paths)[0], "pending")
+			if err := fsutil.WriteFile(spool, []byte("retain"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			switch mode {
+			case "unavailable":
+				os.WriteFile(filepath.Join(fake, "unavailable"), nil, 0600)
+			case "changed-daemon":
+				os.WriteFile(filepath.Join(fake, "daemon-id"), []byte("replacement"), 0600)
+			case "legacy":
+				os.Remove(ociruntime.BindingPath(root, m.ID))
+			}
+			if err := CleanupSpools(context.Background(), root, m, docker); err == nil {
+				t.Fatal("cleaned unconfirmed spool")
+			}
+			if err := Purge(context.Background(), root, PurgeSelection{All: true}, docker, io.Discard); err == nil {
+				t.Fatal("purged unconfirmed session")
+			}
+			for _, path := range []string{spool, paths.Metadata, filepath.Join(paths.Checkpoints, "saved.json")} {
+				if _, err := os.Stat(path); err != nil {
+					t.Fatal("evidence lost", err)
+				}
+			}
+		})
+	}
+}
+
+func TestStartupChecksOriginalBindingForUnixOrphanWithoutSpools(t *testing.T) {
+	root := t.TempDir()
+	docker, fake := testdocker.New(t)
+	m := group(t, root, "sess-1-000000000000000000000000", "")
+	m.BridgeTransport = "unix"
+	originalID := m.ContainerID
+	m.ContainerID = "a-mutable-name-from-session-metadata"
+	if err := session.Save(session.PathsFor(root, m.ID).Metadata, m); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{".present", ".running"} {
+		os.WriteFile(filepath.Join(fake, originalID+suffix), nil, 0600)
+	}
+	t.Setenv("DOCKER_CONTEXT", "different")
+	t.Setenv("DOCKER_HOST", "tcp://elsewhere:2375")
+	if err := CleanupAbandoned(context.Background(), root, docker); err == nil {
+		t.Fatal("started beside an orphan on the original daemon")
+	}
+	os.Remove(filepath.Join(fake, originalID+".running"))
+	if err := CleanupAbandoned(context.Background(), root, docker); err != nil {
+		t.Fatal(err)
 	}
 }

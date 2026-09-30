@@ -30,6 +30,12 @@ type injectionArm struct {
 	Definition   injection.Definition `json:"definition"`
 	EligibleTurn string               `json:"eligible_turn,omitempty"`
 }
+type snapshotOperationRequest struct {
+	Label                 string                 `json:"label,omitempty"`
+	Description           string                 `json:"description,omitempty"`
+	MaximumCommittedBytes snapshot.ByteAllowance `json:"maximum_committed_bytes,omitzero"`
+}
+
 type artifactRegistration struct {
 	Descriptor adaptive.ArtifactDescriptor `json:"descriptor"`
 	Content    []byte                      `json:"content"`
@@ -144,10 +150,7 @@ func (s *Server) checkOperation(r adaptive.OperationRequest, body json.RawMessag
 			return errors.New("invalid_operation_lookup")
 		}
 	case "snapshot.create":
-		var input struct {
-			Label       string `json:"label,omitempty"`
-			Description string `json:"description,omitempty"`
-		}
+		var input snapshotOperationRequest
 		if adaptive.StrictJSON(body, &input) != nil || snapshot.ValidateMetadata(r.CampaignID, input.Description) != nil {
 			return errors.New("invalid_snapshot_request")
 		}
@@ -231,22 +234,14 @@ func (s *Server) dispatchOperation(ctx context.Context, r adaptive.OperationRequ
 		_ = json.Unmarshal(body, &input)
 		return adaptive.ReadFeedback(s.paths.Root, s.blobs, r, input)
 	case "snapshot.create":
-		var input struct {
-			Label       string `json:"label,omitempty"`
-			Description string `json:"description,omitempty"`
-		}
+		var input snapshotOperationRequest
 		_ = json.Unmarshal(body, &input)
-		s.metadataMu.RLock()
-		maxBlob, maxSnapshots, used := s.metadata.Limits.MaxBlobBytes, s.metadata.Limits.MaxSnapshots, s.metadata.Consumed.SnapshotBytes
-		s.metadataMu.RUnlock()
-		ceiling := int64(16 << 40)
-		if maxBlob > 0 && maxSnapshots > 0 && maxBlob <= ceiling/maxSnapshots {
-			ceiling = maxBlob * maxSnapshots
-		}
-		if ceiling <= used {
-			return adaptive.OperationError(429, "snapshot_bytes_exhausted")
-		}
-		body, _ = json.Marshal(map[string]any{"label": input.Label, "description": input.Description, "campaign_id": r.CampaignID, "maximum_committed_bytes": ceiling - used})
+		// Keep the caller's exact allowance; current native limits are checked
+		// inside createSnapshot, under the snapshot/control lock.
+		body, _ = json.Marshal(struct {
+			snapshotOperationRequest
+			CampaignID string `json:"campaign_id"`
+		}{input, r.CampaignID})
 		method, path = http.MethodPost, "/v1/snapshots"
 	case "session.stop":
 		method, path = http.MethodPost, "/v1/stop"

@@ -61,16 +61,16 @@ func Purge(ctx context.Context, root string, selection PurgeSelection, docker oc
 			return err
 		}
 		writerLocks = append(writerLocks, f)
-		name := m.ContainerID
-		if name == "" {
-			name = "interceptor-" + m.ID
+		bound, containerID, err := docker.ForSession(ctx, root, m.ID)
+		if err != nil {
+			return err
 		}
-		present, err := docker.ContainerPresent(ctx, name)
+		present, err := bound.ContainerPresent(ctx, containerID)
 		if err != nil {
 			return err
 		}
 		if present {
-			running, err := docker.Running(ctx, name)
+			running, err := bound.Running(ctx, containerID)
 			if err != nil {
 				return err
 			}
@@ -142,6 +142,11 @@ func Purge(ctx context.Context, root string, selection PurgeSelection, docker oc
 		group.Close()
 		if err := parent.RemoveAll(relative); err != nil {
 			return fmt.Errorf("partial purge %s (retry): %w", m.ID, err)
+		}
+		for _, path := range []string{ociruntime.BindingPath(root, m.ID), ociruntime.BindingPath(root, m.ID) + ".exited"} {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return err
+			}
 		}
 		fmt.Fprintf(output, "Purged session %s: %s\n", m.ID, filepath.Join(root, relative))
 	}

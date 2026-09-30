@@ -76,7 +76,17 @@ They do not establish worker ownership or require transfers after restore.
 
 Injection cleanup accepts any existing injection in the addressed campaign session,
 including checkpoint-restored injections with no arm record in the new execution
-store. Missing injections return not-found. Duplicate injection IDs cannot overwrite
+store. Confirmed missing injections return `404 not_found`; persistence/journal
+failures return `500 injection_delete_failed`, never a false not-found result.
+Operator's `engine.injection_delete` resolves a known campaign attempt-receipt/action
+handle to the native ID and sends the deletion to its current target binding.
+It may normalize only a confirmed missing injection for that exact operation to
+successful `already_absent` cleanup. Unknown host handles or transport/session
+errors cannot be normalized. The request needs no original arm record or attempt
+context. Worker/revision remain attribution, not resource ownership. Old cleanup
+records cannot prove absence after a restore that resurrects the injection.
+Removing an injection does not roll back its previous target effects.
+See the [shared cleanup contract](../../operator_sandbox/schemas/INJECTION_CLEANUP_CONTRACT.md). Duplicate injection IDs cannot overwrite
 existing definitions; use a fresh ID or delete before reusing an ID. Mutated payloads
 use new operation IDs. Native expected-session-revision checks, current-target
 addressing, closure, visibility, budgets and stop opt-in remain in force.
@@ -97,6 +107,14 @@ and does not wait for a running operation. It bypasses the expected-revision che
 so concurrent completion cannot prevent shutdown. Queued effects recheck closure
 and revision at dispatch; already-admitted effects may finish. Close remains
 available when operation-record capacity is full. Binding cannot reopen closure.
+
+A successful `session.owner` closure returns the ExecutionOwner object directly
+as `body` in the standard `{status, body, session_revision}` response. Both live
+and retained stopped/error sessions use this same shape. The body includes the
+original campaign/worker/revision attribution, `closed_at` and the recorded
+`closure_reason` when present. Retained closure succeeds only when native records
+already confirm closure; otherwise it returns `409 closure_unconfirmed`.
+`session.status` has its separate `{session, owner, execution_available}` body.
 
 After binding, direct local control mutations are rejected. The explicit local
 administrator `interceptor stop` command remains available and closes admission.
@@ -119,7 +137,7 @@ Operator integrations use `/v1/lifecycle` `session.stop`, which enforces the rec
 | `observation.read` | `turn_id` for exact invocation (optional only when unambiguous), or `receipt_id` for a fixed view; matching envelope attempt ID/digest. |
 | `observation.content.read` | `receipt_id`, `entry_id`, byte `offset`, `max_bytes` (1–262,144); bounded bytes from the fixed permitted view. |
 | `operation.status` | Exactly one of `receipt_id` (native application turn) or `operation_id` (durable mutation record). |
-| `snapshot.create` | Optional `label` and `description` (UTF-8, at most 4,096 bytes); supervisor records campaign ID from the request/session and supplies remaining snapshot-byte allowance. Response includes that hash-covered metadata. |
+| `snapshot.create` | Optional `label` and `description` (UTF-8, at most 4,096 bytes); optional `maximum_committed_bytes` tightens the native remaining byte allowance. Supervisor records campaign ID from the request/session. Operator supplies its remaining campaign allowance; omission uses native limits and zero is exhausted. Response includes that hash-covered metadata. |
 | `session.stop` | `{}`; requires the bind-time target-stop opt-in and closes admission. |
 
 Mutations other than closure require `expected_session_revision` to match at

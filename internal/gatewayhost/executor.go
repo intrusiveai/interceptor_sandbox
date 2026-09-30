@@ -100,7 +100,7 @@ func retainedOperation(metadata session.Metadata, paths session.Paths, principal
 		if state.Owner.ClosedAt == nil {
 			return adaptive.OperationError(409, "closure_unconfirmed"), nil
 		}
-		content, _ := json.Marshal(map[string]any{"owner": state.Owner})
+		content, _ := json.Marshal(state.Owner)
 		return adaptive.GatewayResponse{Status: 200, Body: content, SessionRevision: metadata.Revision}, nil
 	case "session.status":
 		if adaptive.StrictJSON(body, &struct{}{}) != nil {

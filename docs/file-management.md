@@ -53,6 +53,11 @@ lifetime of `interceptor run` and while evidence commands run. Exit the local AP
 service before purging; purge refuses when it cannot acquire exclusive access.
 No container is stopped implicitly. Before any deletion, refuse the selection if it includes active or
 unconfirmed containers, bridge writers or ongoing reads, reports, exports or restores.
+Use each session's host-owned Docker binding to verify its original daemon and
+full container ID; context/name changes do not change the target. An unavailable
+or changed daemon and missing identity/exit proof preserve all selected evidence.
+Successful purge also removes the selected host bindings and exit receipts.
+See [Docker identity and recovery](docker-identity.md).
 Serialize the check and deletion with those operations. Partial filesystem failures
 are reported with nonzero exit status and may be retried.
 

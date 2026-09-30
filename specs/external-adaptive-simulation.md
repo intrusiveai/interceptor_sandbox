@@ -58,7 +58,7 @@ view with execution truth without giving the engine unfair live knowledge.
 | INT-AEF-AD-008 | Checkpoint fork convenience | marginal | Improves branching efficiency; existing snapshot/restore primitives can compose it externally. |
 | INT-AEF-AD-009 | Typed event-match oracle | ideal | Makes post-run scoring more expressive without scripts. |
 | INT-AEF-AD-010 | Operations harness interface | required | Provides the secure production boundary between Operator and Interceptor. |
-| INT-AEF-AD-011 | Extended native model-provider adapters | ideal | Gives target applications and Operator's attack engine a consistent provider matrix without protocol translation. |
+| INT-AEF-AD-011 | Extended native model-provider adapters | ideal | Gives target applications and Operator's Attack Harness a consistent provider matrix without protocol translation. |
 | INT-AEF-AD-012 | Host secret-store credential resolution | required | Lets production Interceptor controllers retrieve external-service credentials without plaintext environment variables. |
 | INT-AEF-AD-013 | Closed DNS and locally trusted service TLS | required | Preserves realistic service origins while keeping DNS and HTTP/MCP traffic inside the sealed environment. |
 
@@ -126,6 +126,13 @@ causal ancestry rather than relying on timing.
 
 Dynamic registration is bounded by attempt, artifact, byte, and rate limits.
 
+Operator's public export and submitted-bundle references use the separate
+[public capability integration](../docs/operator-capabilities.md). Preserve native
+manifest identity; Operator maps allowlisted fields into its versioned schema.
+Source digests record authoring provenance. Operator checks live compatibility by
+default, or exact public projection equality when explicitly requested by a bundle.
+This does not alter native attempt, execution or feedback enforcement.
+
 ## 5. INT-AEF-AD-002 — feedback visibility and ObservationView
 
 ### 5.1 Visibility classes
@@ -151,6 +158,13 @@ Every session selects one immutable profile, initially:
   never raw secrets or unrestricted events.
 
 The environment declares which profiles it supports. Operator may narrow the visible feedback but cannot broaden the active profile.
+Native AttemptContext MUST retain the exact session `feedback_profile`; the
+bundle's effective harness profile is a separate Operator policy. Operator sends
+only the permitted selected kinds, independently projects all response fields and
+receipt reads, and reports the effective profile to Attack Harness. Empty intersections skip
+native feedback collection using the registration and category rules in
+[Operator feedback narrowing](../docs/feedback.md#operator-feedback-narrowing).
+Interceptor retains its immutable-profile equality check.
 
 ### 5.3 ObservationView and content
 
@@ -417,6 +431,12 @@ handling remains unchanged.
 
 The normative [local integration contract](../docs/local-api.md) defines startup,
 attachment, routes, restore, stop, evidence, request limits and failure behavior.
+Evidence archives use the configured per-session export limit (default 4 GiB),
+advertised as `evidence_max_bytes` on attach/status. The limit covers generated tar
+bytes as well as transfer. Oversize exports preserve retained sources and return
+an explicit collection gap; administrative export with a larger limit can support
+later reporting without campaign replay. Operator accounts these host-only archives
+separately from harness artifact/read budgets and verifies full size/digest.
 AEF supplies immutable inputs and receives finalized bundles; it is not a live
 caller. All host users who can reach loopback are trusted in this MVP.
 
@@ -457,6 +477,36 @@ ledger-failure latch still block mutations and restore. Known rejections do not
 close an otherwise healthy campaign. Status reads, exact owned injection cleanup
 and opted-in final stop remain available subject to existing failure checks.
 
+The host MUST also report independent execution failure without waiting for another
+Operator request. Its existing 500 ms health loop checks native terminal metadata
+and container state; native errors such as `WALL_TIME_LIMIT` close admission even
+while the supervisor is still shutting down. Unexpected target exit and model
+connector failure do the same. A final notification check on every runtime return
+covers startup/early-return paths before that run is declared finished.
+
+Persist `phase: "error"`, `closed: true` and a `failure` object containing
+`session_id`, `reason`, and UTC `observed_at` in the instance ledger. Return the same
+object from lifecycle `POST /v1/status`; it is null until a failure is recorded.
+Preserve the first recorded reason/time, including the supervisor's specific reason;
+later cleanup errors must not replace it. These fields describe execution failure,
+not confirmed container removal or the outcome of an interrupted native operation.
+Close admission in memory before ledger persistence, bypass the mutation gate, and
+report `store_available: false` on write failure. Docker termination must proceed
+independently of the notification/persistence path. Retain uncertain in-flight
+outcomes; existing successful receipts remain successful.
+
+Mark a requested stop/restore shutdown before initiating target termination. A clean
+planned source exit keeps restore transitioning; a clean final stop yields stopped
+and closed. Explicit native errors and cleanup failures take precedence over the
+planned marker. Merely being in restore preflight is not a planned shutdown. Scope
+callbacks to the actual target run: a delayed old-run callback cannot close a
+replacement, while failure of a replacement not yet published in the API binding
+must close execution. Latch failures arriving before API initialization as well.
+Preflight rejection, replacement binding and final-stop completion MUST NOT overwrite
+a latched failure with ready/stopped status. Healthy restore and rejected healthy
+preflight retain their existing behavior. No extra service, push channel or restart
+mechanism is required.
+
 Before a restore closes or stops the source, the integrated handler independently
 queries native `session.status` under the mutation gate. It requires the matching
 session/campaign association, open execution and running target; a cached `closed: false`
@@ -477,7 +527,17 @@ They do not establish worker ownership or require transfers after restore.
 
 Injection cleanup accepts any existing injection in the addressed campaign session,
 including checkpoint-restored injections with no arm record in the new execution
-store. Missing injections return not-found. Duplicate injection IDs cannot overwrite
+store. Confirmed missing injections return `404 not_found`; persistence/journal
+failures return `500 injection_delete_failed`, never a false not-found result.
+Operator's `engine.injection_delete` resolves a known campaign attempt-receipt/action
+handle to the native ID and sends the deletion to its current target binding.
+It may normalize only a confirmed missing injection for that exact operation to
+successful `already_absent` cleanup. Unknown host handles or transport/session
+errors cannot be normalized. The request needs no original arm record or attempt
+context. Worker/revision remain attribution, not resource ownership. Old cleanup
+records cannot prove absence after a restore that resurrects the injection.
+Removing an injection does not roll back its previous target effects.
+See the [shared cleanup contract](../../operator_sandbox/schemas/INJECTION_CLEANUP_CONTRACT.md). Duplicate injection IDs cannot overwrite
 existing definitions; use a fresh ID or delete before reusing an ID. Mutated payloads
 use new operation IDs. Native expected-session-revision checks, current-target
 addressing, closure, visibility, budgets and stop opt-in remain in force.
@@ -563,14 +623,19 @@ authentication. Host-owned `session.owner` is never derived from an engine opera
 | `application.invoke` | Invoke one declared application operation. |
 | `observation.read` | Collect an exact-invocation fixed permitted view or retrieve its receipt. |
 | `observation.content.read` | Read at most 256 KiB of receipt-scoped permitted bytes with explicit availability and truncation. |
-| `snapshot.create` | Planned target checkpoint within capacity; optional label/description with campaign ID from request/session, never failed-session continuation. |
+| `snapshot.create` | Planned target checkpoint within capacity; optional label/description and `maximum_committed_bytes`, with campaign ID from request/session, never failed-session continuation. |
 | `session.stop` | Use `/v1/lifecycle` for permitted, confirmed target stop. |
 
 Execution mutations require the same campaign and expected native session revision.
 Worker ID and campaign revision are attribution only.
 `close_execution` bypasses the revision check and running mutation queue, so
-concurrent completion cannot prevent shutdown. The explicit local administrator
-stop command closes admission; Operator must use typed `session.stop` and must
+concurrent completion cannot prevent shutdown. Successful `session.owner` closure
+MUST return the ExecutionOwner directly in the standard response `body` for both
+live and retained stopped/error sessions, preserving original attribution and
+closure state. Retained confirmation requires an already-recorded `closed_at`;
+unconfirmed native closure returns `409 closure_unconfirmed`. The distinct
+`session.status` response retains its nested `owner` field.
+The explicit local administrator stop command closes admission; Operator must use typed `session.stop` and must
 not fall back to the administrator command to bypass its recorded stop policy.
 Read-only reporting and bounded finalization use the configured session scope.
 Restore, confirmed stop and protected evidence export are provided by the same
@@ -875,6 +940,10 @@ Do not put AEF client logic or attack-engine behavior in Interceptor.
   attribution and explicit partial/unknown outcomes after failure.
 - Residual cleanup remains bounded and attributable. Failure never delays guest
   teardown, fabricates a clean result or reopens experimental execution.
+- Supervisor limits, unexpected exits and connector failures promptly publish durable
+  error/closed status with the original session/reason/time. Planned stops/restores,
+  failed preflight races, replacement startup races, stale callbacks and failed
+  persistence cannot produce a false healthy status or block Docker termination.
 - Snapshot and restore actions require Operator control, preserve
   content-addressed lineage, enforce local and Operator-held cumulative limits
   across planned target-state revisions, and appear in protected evidence.
@@ -928,3 +997,47 @@ remains readable after stop without target restart. Wrong-campaign/source reads,
 corrupt metadata and limit overruns fail explicitly. Healthy target restore
 preserves the live harness context; only its active target binding/revision changes.
 See the normative [local API contract](../docs/local-api.md#snapshot-inventory-and-metadata).
+
+### Snapshot caller byte allowance
+
+The closed `snapshot.create` body accepts optional `maximum_committed_bytes`, a
+nonnegative signed 64-bit JSON integer. Null, negative, fractional, string and
+out-of-range values are invalid. Omission selects the native remaining allowance;
+explicit zero is exhausted. The private snapshot API and standalone CLI
+`--maximum-committed-bytes` have the same semantics. Campaign ID remains bound
+from the operation envelope, not a body override.
+
+Under the exclusive snapshot/control and activity locks, compute the native
+remaining allowance as `min(16 TiB, max_blob_bytes * max_snapshots)` minus native
+consumed snapshot bytes, saturating safely and treating zero/negative remaining
+as exhausted. If supplied, the caller allowance can only reduce that value.
+After the final stable filesystem scan, sum canonical file sizes and reject any
+candidate exceeding the effective allowance before filesystem-delta/snapshot-state
+commitment or checkpoint publication. Equality is allowed. Exhaustion returns
+`429 snapshot_bytes_exhausted`, with no checkpoint or snapshot counter charge and
+no terminal closure of a healthy target. Scanning may stage blobs; this allowance
+limits checkpoint commitment, not all temporary disk writes.
+
+Operator always supplies its remaining campaign allowance (default cumulative
+budget 1 GiB), with a separate default 20 creation admissions. Those campaign
+counters do not rewind when native counters are restored; Interceptor does not
+maintain Operator's campaign ledger. Native snapshot count limits remain in force.
+The supplied field is covered by the body digest and operation identity. Retry
+with the same operation ID and unchanged body/envelope returns the saved result
+without a second checkpoint/charge; changing the allowance conflicts. Reconcile
+unknown outcomes using that original operation rather than issuing a fresh one.
+
+### Operator attempt numbering and loop accounting
+
+Operator/Attack Harness use the [shared campaign allocator and loop rules](../../operator_sandbox/schemas/HARNESS_EXECUTION_RULES.md).
+An allocated rejected submission keeps its attempt_index; a corrected submission
+uses fresh IDs and a higher index. Gaps are valid, and healthy restore never resets
+Operator's campaign high-water mark or admission budget. Operator sends the index
+unchanged to native AttemptContext. Interceptor requires an index greater than the
+highest currently registered index, not the next consecutive integer. It limits
+the number of registered attempts, not their index values. A rejected registration
+adds no native entry. Native registry state can rewind on restore; cumulative
+campaign enforcement stays in Operator and the continuing harness. Exact native
+operation retries use the existing durable operation ID/body and saved result.
+No Interceptor RPC, ownership check or native attempt version change is introduced
+for harness-local numbering or loop limits.

@@ -46,7 +46,7 @@ func fixture(t *testing.T, allow bool) (*Service, *fakeRuntime) {
 	root := t.TempDir()
 	f := &fakeRuntime{active: "session-1", root: root, metadata: map[string]session.Metadata{}, stores: map[string]*adaptive.ExecutionStore{}}
 	f.add(t, "session-1")
-	s, err := New(t.Context(), f, f.metadata["session-1"], "instance-1", filepath.Join(root, "instance.json"))
+	s, err := New(t.Context(), f, f.metadata["session-1"], "instance-1", filepath.Join(root, "instance.json"), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func (f *fakeRuntime) Restore(ctx context.Context, _, _ string) (session.Metadat
 	f.active = id
 	return m, nil
 }
-func (f *fakeRuntime) Export(_ context.Context, id string) (*os.File, error) {
+func (f *fakeRuntime) Export(_ context.Context, id string, _ int64) (*os.File, error) {
 	m, err := f.Metadata(id)
 	if err != nil || m.Phase != session.Stopped {
 		return nil, errors.New("not stopped")

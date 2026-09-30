@@ -243,6 +243,13 @@ Deletes a definition and returns `204`. The deletion is included in saved state,
 so restoring a later snapshot does not unexpectedly bring the injection back.
 Injection IDs may not contain `/` or `\`.
 
+Returns `204` on deletion, `404 not_found` only when that injection is absent,
+and `500 injection_delete_failed` when durable deletion fails. Storage failures
+must not be interpreted as successful absence. For attached campaigns use native
+`injection.delete`; Operator resolves the harness's attempt-receipt/action handle
+and treats only a confirmed native not-found result for that exact deletion as
+`already_absent`. See the [shared cleanup contract](../../operator_sandbox/schemas/INJECTION_CLEANUP_CONTRACT.md).
+
 ### `POST /v1/snapshots`
 
 ```json
@@ -256,11 +263,20 @@ characters. Campaign ID and description are included in the returned, hash-cover
 checkpoint and in list/inspect results. This private administrative route remains
 unavailable for mutation after campaign attachment. The native `snapshot.create`
 operation instead takes campaign ID from its v1alpha2 envelope and accepts only
-label/description in its body. Public campaign-wide list/inspect routes are
+label/description plus optional `maximum_committed_bytes` in its body. Public campaign-wide list/inspect routes are
 defined in [the local API](local-api.md#snapshot-inventory-and-metadata). The
 application must support snapshots. If the application cannot reach a safe save
 point or keeps changing files during the save, the API returns `409` and does
 not create a usable checkpoint.
+
+Both creation routes accept optional `maximum_committed_bytes`: a nonnegative
+signed 64-bit JSON integer. Omission uses native limits, explicit zero is exhausted,
+and null/negative/fractional/string/out-of-range values are invalid. The supervisor
+checks the smaller of caller/native remaining allowances under the snapshot lock.
+A candidate over the allowance returns `429 snapshot_bytes_exhausted` before
+checkpoint commitment; a candidate equal to it is allowed. Returned
+`canonical_size_bytes` counts all canonical file bytes, including deduplicated
+content. See [the normative allowance contract](../specs/external-adaptive-simulation.md#snapshot-caller-byte-allowance).
 
 ### `GET /v1/snapshots`
 

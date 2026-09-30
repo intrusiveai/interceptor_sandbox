@@ -18,7 +18,8 @@ correlation, not credentials. Model-provider credentials remain host-only and
 continue to use their existing provider configuration.
 
 The listener is reserved before target startup. A second run fails without
-creating a target; live (including paused) leftover `interceptor-sess-*` containers
+creating a target; live (including paused) leftover session-labelled containers and legacy
+`interceptor-sess-*` containers
 also prevent startup until an administrator resolves them. Stopped historical
 containers and evidence remain untouched. The service does not adopt orphaned
 containers or resume an old campaign. `run` no longer opens separate public
@@ -133,7 +134,17 @@ They do not establish worker ownership or require transfers after restore.
 
 Injection cleanup accepts any existing injection in the addressed campaign session,
 including checkpoint-restored injections with no arm record in the new execution
-store. Missing injections return not-found. Duplicate injection IDs cannot overwrite
+store. Confirmed missing injections return `404 not_found`; persistence/journal
+failures return `500 injection_delete_failed`, never a false not-found result.
+Operator's `engine.injection_delete` resolves a known campaign attempt-receipt/action
+handle to the native ID and sends the deletion to its current target binding.
+It may normalize only a confirmed missing injection for that exact operation to
+successful `already_absent` cleanup. Unknown host handles or transport/session
+errors cannot be normalized. The request needs no original arm record or attempt
+context. Worker/revision remain attribution, not resource ownership. Old cleanup
+records cannot prove absence after a restore that resurrects the injection.
+Removing an injection does not roll back its previous target effects.
+See the [shared cleanup contract](../../operator_sandbox/schemas/INJECTION_CLEANUP_CONTRACT.md). Duplicate injection IDs cannot overwrite
 existing definitions; use a fresh ID or delete before reusing an ID. Mutated payloads
 use new operation IDs. Native expected-session-revision checks, current-target
 addressing, closure, visibility, budgets and stop opt-in remain in force.
@@ -150,8 +161,16 @@ caller attribution while preserving the admitted request in its ledger.
 ## Snapshot and restore
 
 Create a checkpoint with native `snapshot.create`, body
-`{ "label": "baseline", "description": "Before trying the next mutation" }`.
-Both fields are optional. The authoritative `campaign_id` comes from the native
+`{ "label": "baseline", "description": "Before trying the next mutation", "maximum_committed_bytes": 1073741824 }`.
+All body fields are optional for standalone clients. Operator always supplies its
+remaining campaign byte allowance. The native supervisor enforces the smaller of
+that value and its own remaining allowance under the snapshot lock. Zero is
+exhausted; omission uses native limits; invalid integers/null are rejected. An
+oversized candidate returns `429 snapshot_bytes_exhausted` before commitment.
+Campaign defaults are 20 snapshot admissions and 1 GiB cumulative canonical file
+bytes, configurable in Operator; its counters survive restores. Retries preserve
+the original allowance and envelope and do not double-charge. See the
+[allowance contract](../specs/external-adaptive-simulation.md#snapshot-caller-byte-allowance). The authoritative `campaign_id` comes from the native
 request envelope and associated session; a campaign override in the body is
 rejected. Description is valid UTF-8, at most 4,096 bytes, and stored verbatim.
 Creation returns the checkpoint including campaign ID and description. Both are
@@ -277,10 +296,40 @@ The host service remains available after target stop for status and evidence.
 `POST /v1/evidence` can export both source and restored session IDs. Only stopped
 or error sessions whose containers are absent qualify. It generates a host-owned
 temporary archive, verifies the existing native journals/blob/checkpoint inputs,
-and streams at most 256 MiB with `X-Content-SHA256: sha256:...`. No caller chooses
+and streams the completed archive with its full `Content-Length`,
+`X-Content-SHA256: sha256:...` and `X-Evidence-Max-Bytes` headers. No caller chooses
 a host output path. Native evidence completeness/partial markers are retained.
-Archive generation uses native storage/resource limits; the download ceiling is
-not a universal disk quota. Exports are generated one at a time.
+
+The per-session archive ceiling defaults to **4 GiB (4294967296 bytes)**.
+`interceptor run --evidence-max-bytes <bytes>` overrides
+`INTERCEPTOR_EVIDENCE_MAX_BYTES`, which overrides the default. Accept integer byte
+counts from 1 through 9007199254740991; explicit zero is invalid. This is trusted
+host configuration, fixed for the service instance. Both successful attach and
+ordinary status response bodies include `evidence_max_bytes`; operation-record
+status responses retain their existing record shape. Operator records this limit
+and checks its own evidence-download capacity before collection.
+
+The exporter enforces capacity while writing the tar, including headers, padding
+and trailer. Oversize generation aborts, closes/removes temporary output, and does
+not replace a completed export or delete retained evidence. The API also checks
+the completed size before sending bytes. HTTP 413 uses the ordinary response
+envelope with `body: {"code":"evidence_limit_exceeded", "maximum_bytes":<limit>,
+"evidence_retained":true}`. No complete archive size is promised on early failure.
+This export failure does not change campaign execution/closure status.
+
+Archives and large members are streamed through bounded copy buffers; a completed
+archive is hashed before serving. The receiver must verify full size and digest
+before accepting completion. Generation is serialized. The archive ceiling is
+separate from native storage/resource limits and does not bound aggregate retained
+data or concurrent downloads. Failed requests remove their temporary archive;
+source journals, blobs and checkpoints remain until administrator purge.
+
+For an existing oversized session, an administrator can use
+`interceptor logs export <session-id> --output <path> --evidence-max-bytes <larger-limit>`.
+This exports retained state with no campaign replay or service takeover, even after
+service exit. Operator's retained-evidence import/reporting path can consume that
+verified archive. A larger CLI override does not reconfigure the running service;
+retries against an unchanged API ceiling remain limited.
 
 Operator verifies the bounded archive and native hashes, attaches each native
 session to its campaign revision, and never exposes protected evidence to the
@@ -289,6 +338,46 @@ harness. Without final-stop permission, reporting may remain
 collection can finish. Ctrl+C stops the host service and any remaining target.
 After service exit, retained evidence remains available through administrator
 `logs verify` / `logs export`, not through a resurrected campaign.
+
+## Execution failure status
+
+`POST /v1/status` with `api_version` and the attached `campaign_id` returns the
+instance's cached lifecycle state and a nullable `failure` field. For example:
+
+```json
+{
+  "phase": "error",
+  "closed": true,
+  "store_available": true,
+  "failure": {
+    "session_id": "sess-example",
+    "reason": "WALL_TIME_LIMIT",
+    "observed_at": "2026-09-18T12:00:00Z"
+  }
+}
+```
+
+This is an excerpt of the response `body`; binding and session inventory fields
+remain present. `failure` is null until a failure has been recorded. Its first
+reason/time are retained in the instance ledger and are not replaced by subsequent
+cleanup diagnostics. Reasons may be supervisor codes or descriptive host errors;
+clients use `phase`/`closed` to decide availability. A failure is not proof that the
+container was removed or that an interrupted attempt had no effects.
+
+The host checks native error metadata and container health every 500 ms. A native
+error closes the API without waiting for container exit or a new Operator request;
+connector failures notify directly. Every runtime return has a final failure check.
+Timing is subject to host scheduling and bounded Docker calls. Before initiating
+an intentional stop, the host marks it planned: healthy restore keeps transitioning,
+and normal final stop becomes stopped/closed. A native error or cleanup failure
+still takes precedence. A failure during restore preflight or replacement startup
+cannot be overwritten with ready status, and delayed callbacks from an older run
+cannot close its replacement.
+
+Failure notification bypasses the mutation gate. If the ledger cannot be written,
+execution remains closed in memory and status reports `store_available: false`.
+Docker termination proceeds independently of API notification or persistence. The
+API remains available for status and eligible evidence export after a target fails.
 
 ## Lost responses, concurrency and limits
 
@@ -332,7 +421,9 @@ readable audit data; there is no live-session adoption or in-place upgrade.
 
 `go test ./internal/localapi` covers campaign mismatch, exact restore replay,
 stale sessions, shutdown policy, failed stop, and close during replacement startup.
-Closure regressions also cover native 5xx and oversized mutation results, transport
+Closure regressions also cover supervisor limits, unexpected exits, model-connector
+failures, planned shutdown, preflight/replacement failure races, stale target callbacks
+and fault-persistence failure, along with native 5xx and oversized mutation results, transport
 failure, stale API closure state, unavailable native status, native closure during
 restore preflight, ledger-write failure, known rejection, and retained cleanup.
 For a fresh reference environment, the standalone test client is:
@@ -364,3 +455,25 @@ and harness runtime support remains a separate implementation deliverable.
 execution, restore and cleanup. It releases the assertion while serving only retained
 evidence. Screen lock is supported; actual sleep, logout or Docker interruption ends
 execution. See [host lifetime and recovery](host-lifetime.md).
+
+## Docker identity during recovery
+
+The host saves a local Docker socket, daemon ID and full container ID before
+starting each target. Stop, restore finalization, export and purge use that saved
+binding even after the administrator changes Docker contexts or renames the target.
+See [Docker identity and recovery](docker-identity.md) for storage and failure rules.
+
+### Operator attempt numbering and loop accounting
+
+Operator/Attack Harness use the [shared campaign allocator and loop rules](../../operator_sandbox/schemas/HARNESS_EXECUTION_RULES.md).
+An allocated rejected submission keeps its attempt_index; a corrected submission
+uses fresh IDs and a higher index. Gaps are valid, and healthy restore never resets
+Operator's campaign high-water mark or admission budget. Operator sends the index
+unchanged to native AttemptContext. Interceptor requires an index greater than the
+highest currently registered index, not the next consecutive integer. It limits
+the number of registered attempts, not their index values. A rejected registration
+adds no native entry. Native registry state can rewind on restore; cumulative
+campaign enforcement stays in Operator and the continuing harness. Exact native
+operation retries use the existing durable operation ID/body and saved result.
+No Interceptor RPC, ownership check or native attempt version change is introduced
+for harness-local numbering or loop limits.

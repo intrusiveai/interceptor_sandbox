@@ -102,6 +102,7 @@ interceptor run \
   [--aws-profile <profile>] \
   [--bridge-transport spool|unix] \
   [--spool-max-bytes <bytes>]
+  [--evidence-max-bytes <bytes>]
 ```
 
 `--spool-max-bytes` takes a positive integer, overriding
@@ -179,6 +180,10 @@ interceptor stop <session-id>
 
 Stop the supervisor/container and host bridge writers, confirm exit and remove
 transient spool directories. Retain journals and artifacts until explicit purge.
+The command uses the original saved Docker socket and full container ID, verifies
+the daemon/session identity, and reports unconfirmed cleanup if verification fails.
+It does not use the CLI's current context to locate an existing session. See
+[Docker identity and recovery](docker-identity.md).
 An already stopped session still retries pending spool cleanup.
 
 ```sh
@@ -203,10 +208,15 @@ complete rules.
 ## Snapshots and restore
 
 ```sh
-interceptor snapshot create <session-id> [--name <label>] [--description <text>] [--campaign-id <id>] [--json]
+interceptor snapshot create <session-id> [--name <label>] [--description <text>] [--campaign-id <id>] [--maximum-committed-bytes <bytes>] [--json]
 interceptor snapshot list <session-id> [--json]
 interceptor snapshot inspect <session-id> <checkpoint-id>
 ```
+
+`--maximum-committed-bytes` optionally tightens the remaining native byte
+allowance. It accepts nonnegative signed 64-bit integers; explicit zero rejects
+creation as exhausted, while omission uses native limits. The allowance counts
+all canonical file bytes in the candidate checkpoint, including reused content.
 
 Create asks the application to reach a safe save point and records a logical
 restore point. Inspect always prints the detailed checkpoint JSON.
@@ -260,6 +270,15 @@ optional flag is accepted for consistency; output is JSON either way.
 
 ## Logs and evidence
 
+Evidence export defaults to 4 GiB (4294967296 bytes) per session archive. The
+`--evidence-max-bytes` flag on `run` and `logs export` overrides
+`INTERCEPTOR_EVIDENCE_MAX_BYTES`. Values must be integer byte counts from 1 through
+9007199254740991; zero is invalid. `run` fixes the API limit for that service instance
+and advertises it in attach/status. CLI export selects its own limit, so a larger
+one can recover retained evidence without restarting a campaign. The limit counts
+the complete tar, including padding/trailer. Failure removes temporary output and
+preserves the source evidence and any previous completed output.
+
 ```sh
 interceptor logs tail <session-id> [--channel attack|control|evaluation]
 ```
@@ -277,7 +296,7 @@ large files are complete and unchanged, and that they belong to the expected
 session, application, and Sealed Environment.
 
 ```sh
-interceptor logs export <session-id> --output <tar-path>
+interceptor logs export <session-id> --output <tar-path> [--evidence-max-bytes <bytes>]
 ```
 
 Exports a verified, portable tar archive. The session must be `stopped` or

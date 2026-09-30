@@ -396,6 +396,56 @@ unconfirmed outcomes when Docker is unavailable. Recovery performs cleanup/repor
 only, never execution resumption. Linux uses the same terminal Docker/signal behavior
 without macOS sleep prevention. Ctrl+C retains normal shutdown behavior.
 
+Independent native failures (including `WALL_TIME_LIMIT`), unexpected target exits
+and model-connector failures MUST also close the integrated API and publish durable
+error status. Poll native metadata/container health every 500 ms and perform a final
+notification check on runtime return. Distinguish explicitly requested stop/restore
+shutdowns from independent failures; native error reasons override planned shutdown.
+Preserve the first failure session/reason/time in the instance ledger and status
+response. Late old-run callbacks and concurrent restore completion cannot change
+which run failed or republish healthy execution. Failure reporting and persistence
+must not block Docker termination. See
+[execution failure reporting](external-adaptive-simulation.md)
+and the [local status contract](../docs/local-api.md#execution-failure-status).
+
+#### 4.3.4 Durable Docker identity
+
+At startup, resolve the administrator-selected Docker CLI context/environment to
+one local Unix-socket endpoint and record the Docker server's identity. Remote
+Docker endpoints are unsupported. Pin that endpoint for all launch, runtime and
+restore calls; subsequent ambient context, `DOCKER_HOST`, or TLS environment changes
+MUST NOT redirect session operations.
+
+Create the target without starting it, with automatic restart and automatic removal
+disabled and the immutable label `ai.intrusive.interceptor.session=<session-id>`.
+Durably save the endpoint, server identity, session ID and full 64-character Docker
+container ID before start. `session.json.container_id` contains this full ID. The
+authoritative record lives at `container-bindings/<session-id>.json` under the data
+root, outside every target mount. Container names are display/discovery aids only.
+Each restored session gets its own record; historical session operations use their
+own saved binding.
+
+Administrative stop, host fault termination, native finalization, evidence export
+preflight, abandoned-spool cleanup and purge MUST use the saved binding. Check the
+server identity, exact container ID and session label before signaling/removing a
+container or trusting its state. Use full-ID presence queries; renaming or reusing
+a name must neither hide the target nor redirect cleanup to another container.
+Unavailable/replaced daemons, missing bindings, label mismatches and ambiguous
+create outcomes leave termination unconfirmed, return an error and preserve files.
+Never fall back to another context, a generated name or a saved session phase.
+
+Record confirmed exit in a host-owned `container-bindings/<session-id>.json.exited`
+receipt before removal, so cleanup can recover after host loss between removal and
+final session persistence. An absent container without this receipt is unconfirmed.
+A never-attempted launch may be cleaned up using its saved launch record. A create
+interrupted before the full ID was saved can be reconciled only when the original
+daemon has exactly one matching session-labelled container; verify and save its
+full ID before cleanup. Reconciliation never starts or resumes a container.
+
+Purge removes selected session bindings/exit receipts after successful preflight
+and evidence deletion. Stop/fault termination uses bounded contexts and attempts
+Docker termination independently of target responses and journal persistence.
+
 ### 4.4 Host model connector
 
 The application sends supported provider requests to the in-container
@@ -1920,11 +1970,15 @@ checkpoint file that appears ready.
 
 `POST /v1/snapshots` or `interceptor snapshot create`:
 
-1. checks snapshot support and the remaining snapshot-attempt budget;
-2. acquires the exclusive snapshot/control lock;
+1. acquires the exclusive snapshot/control and activity locks;
+2. checks snapshot support, the remaining snapshot-attempt budget and effective
+   byte allowance (the smaller of native remaining bytes and optional caller
+   `maximum_committed_bytes`);
 3. reaches quiescence;
 4. flushes pending managed-service transactions;
-5. writes the filesystem delta transaction;
+5. sums canonical file bytes after the final stable scan, rejects candidates
+   exceeding the effective allowance before commitment, then writes the filesystem
+   delta transaction;
 6. increments the snapshot-attempt counter and writes one transaction containing
    current injection, clock, oracle, budget, and completed-idempotency state;
 7. flushes the journal and verifies its new head;
@@ -1940,6 +1994,10 @@ session to `error` and preserves evidence. Snapshot limits count attempts that
 reach the durable transaction in step 6, including an attempt whose manifest
 publication later fails; this prevents repeated durability failures from
 bypassing the limit.
+
+The optional caller field, native byte ceiling, zero/omission behavior and retry
+rules are defined in [Snapshot caller byte allowance](external-adaptive-simulation.md#snapshot-caller-byte-allowance). Byte exhaustion returns
+`429 snapshot_bytes_exhausted`; it does not close a healthy session.
 
 ### 13.8 Restore algorithm
 
@@ -2127,7 +2185,7 @@ interceptor app verify --environment <directory> --image <image-ref>
 ### 16.3 Session commands
 
 ```text
-interceptor run --environment <directory> [--bridge-transport spool|unix] [--spool-max-bytes <bytes>]
+interceptor run --environment <directory> [--bridge-transport spool|unix] [--spool-max-bytes <bytes>] [--evidence-max-bytes <bytes>]
 interceptor status <session-id>
 interceptor list
 interceptor stop <session-id>
@@ -2146,7 +2204,7 @@ ends the host service and any remaining target.
 ### 16.4 Snapshot commands
 
 ```text
-interceptor snapshot create <session-id> [--name <label>] [--description <text>] [--campaign-id <id>]
+interceptor snapshot create <session-id> [--name <label>] [--description <text>] [--campaign-id <id>] [--maximum-committed-bytes <bytes>]
 interceptor snapshot list <session-id>
 interceptor snapshot inspect <session-id> <checkpoint-id>
 ```
@@ -2169,7 +2227,7 @@ metadata; it never obtains a real user or cloud credential.
 
 ```text
 interceptor logs tail <session-id> [--channel attack|control|evaluation]
-interceptor logs export <session-id> --output <path>
+interceptor logs export <session-id> --output <path> [--evidence-max-bytes <bytes>]
 interceptor logs verify <session-id>
 interceptor evaluate <session-id> [--json]
 interceptor coverage <session-id>
@@ -2496,6 +2554,10 @@ The implementation is ready to call an MVP only if all are true:
 - [ ] The default/custom spool byte limit, one-second checks, concurrent deletion,
       temporary/unexpected files, scan failure and quota-triggered Docker shutdown
       pass; uncertainty cannot reopen execution.
+- [ ] Full-ID/daemon bindings are saved before start; renamed containers and reused
+      names cannot redirect stop/recovery/purge. Context changes use the original
+      socket. Unavailable/replaced daemons, wrong labels and absence without exit
+      provenance preserve evidence and report unconfirmed cleanup.
 - [ ] Normal, failed and abandoned-session cleanup removes spools only after target
       and host writers stop, while retaining evidence.
 - [ ] Session/campaign/all purge removes complete groups, refuses active selections
@@ -2540,3 +2602,21 @@ shape the initial implementation prematurely:
 Any hosted extension MUST preserve the local file formats and container runtime
 contract rather than replacing them. The standalone implementation is the
 product core, not a development-only approximation.
+
+### Evidence archive capacity
+
+API and administrative CLI exports MUST use a configurable per-session archive
+ceiling, default 4 GiB. `--evidence-max-bytes` takes precedence over
+`INTERCEPTOR_EVIDENCE_MAX_BYTES`; explicit values are integer byte counts from
+1 through 9007199254740991. Attach and ordinary status expose `evidence_max_bytes`.
+The API limit is fixed for its service instance; CLI export can select a larger
+limit for retained sessions without restarting execution.
+
+Enforce the ceiling during tar generation, including headers, padding and trailer;
+stream large archive members and the resulting download. On capacity failure,
+remove temporary output and preserve native retained evidence and previous complete
+exports. The API returns HTTP 413 `evidence_limit_exceeded` with `maximum_bytes`
+and `evidence_retained: true` in the ordinary body. Successful transfer advertises
+full length/digest for receiver verification. This is a reporting/collection
+failure, not a new execution failure or evidence deletion. The
+[local API contract](../docs/local-api.md#stop-and-evidence) defines the wire fields.

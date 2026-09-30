@@ -41,7 +41,7 @@ func TestQuotaTerminatesDuringUnresponsiveBootstrap(t *testing.T) {
 	}()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		if _, err := os.Stat(filepath.Join(dockerRoot, "interceptor-"+m.ID+".running")); err == nil {
+		if _, err := os.Stat(filepath.Join(dockerRoot, testdocker.CreatedID+".running")); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -70,7 +70,7 @@ func TestQuotaTerminatesDuringUnresponsiveBootstrap(t *testing.T) {
 		t.Fatal("termination blocked by bootstrap")
 	}
 	calls, _ := os.ReadFile(filepath.Join(dockerRoot, "calls"))
-	if !strings.Contains(string(calls), "kill --signal KILL interceptor-"+m.ID) {
+	if !strings.Contains(string(calls), "kill --signal KILL "+testdocker.CreatedID) {
 		t.Fatal("did not kill Docker", string(calls))
 	}
 	for _, spool := range filemanagement.SpoolRoots(paths) {
@@ -126,7 +126,7 @@ func TestHostInterruptionTerminatesUnresponsiveBootstrap(t *testing.T) {
 			}()
 			if mode == "sleep" {
 				for {
-					if _, err := os.Stat(filepath.Join(dockerRoot, "interceptor-"+m.ID+".running")); err == nil {
+					if _, err := os.Stat(filepath.Join(dockerRoot, testdocker.CreatedID+".running")); err == nil {
 						break
 					}
 					select {
@@ -155,7 +155,7 @@ func TestHostInterruptionTerminatesUnresponsiveBootstrap(t *testing.T) {
 				t.Fatal("cleanup blocked")
 			}
 			calls, _ := os.ReadFile(filepath.Join(dockerRoot, "calls"))
-			if !strings.Contains(string(calls), "kill --signal KILL interceptor-"+m.ID) {
+			if !strings.Contains(string(calls), "kill --signal KILL "+testdocker.CreatedID) {
 				t.Fatal("no independent Docker kill", string(calls))
 			}
 			for _, spool := range filemanagement.SpoolRoots(paths) {

@@ -438,12 +438,15 @@ func (m *Manager) ArmTransaction(definition Definition, eligibleTurn string, ext
 	return nil
 }
 
+// ErrNotFound identifies confirmed absence, distinct from a failed durable deletion.
+var ErrNotFound = errors.New("injection does not exist")
+
 func (m *Manager) Delete(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, exists := m.items[id]
 	if !exists {
-		return fmt.Errorf("injection %q does not exist", id)
+		return fmt.Errorf("%w: %q", ErrNotFound, id)
 	}
 	if _, err := m.journal.Append("injection_delete", []statejournal.Operation{{Kind: "injection_delete", ID: id}}); err != nil {
 		return err

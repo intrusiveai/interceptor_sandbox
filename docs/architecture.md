@@ -29,7 +29,7 @@ operator / harness
   +---------------------------------------------------------------+
 ```
 
-For Operator integration, the network-disabled attack engine talks only to the
+For Operator integration, the network-disabled attack harness talks only to the
 trusted Operator broker over inherited pipes. Operator calls the integrated
 host service on `127.0.0.1:8080`, without integration authentication:
 

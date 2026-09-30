@@ -1,6 +1,7 @@
 package gatewayhost
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -107,5 +108,79 @@ func TestRetainedCloseRequiresConfirmedNativeClosure(t *testing.T) {
 		if err != nil || got.Status != want {
 			t.Fatalf("closed=%v: %+v %v", closed, got, err)
 		}
+	}
+}
+
+// A target exit between closure and confirmation must not change the body schema.
+func TestLiveAndRetainedClosureUseSameResponse(t *testing.T) {
+	root := t.TempDir()
+	const sessionID = "session-1"
+	journal, err := statejournal.Open(filepath.Join(root, "state.jsonl"), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+	initial := adaptive.ExecutionState{APIVersion: adaptive.ExecutionStateVersion, SessionID: sessionID, Records: map[string]*adaptive.OperationRecord{}}
+	if err := fsutil.WriteJSON(filepath.Join(root, "execution.json"), initial, 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := adaptive.OpenExecutionStore(root, sessionID, journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision := uint64(1)
+	hooks := adaptive.ExecutionHooks{
+		Revision:     func() uint64 { return revision },
+		OwnerChanged: func(adaptive.ExecutionOwner) error { revision++; return nil },
+		Check:        func(adaptive.OperationRequest, json.RawMessage, adaptive.ExecutionState) error { return nil },
+	}
+	request := func(action string) (adaptive.OperationRequest, []byte) {
+		t.Helper()
+		body, err := json.Marshal(adaptive.OwnerRequest{Action: action, SessionID: sessionID, CampaignID: "campaign", WorkerInstanceID: "worker"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return adaptive.OperationRequest{APIVersion: adaptive.OperationRequestVersion, SessionID: sessionID, CampaignID: "campaign", WorkerInstanceID: "worker", RunRevision: 1, OperationID: action, RequestID: action, Operation: "session.owner", ExpectedSessionRevision: revision, BodyDigest: digest.Bytes(body), Deadline: time.Now().Add(time.Minute)}, body
+	}
+	bind, body := request("bind")
+	if got := store.Execute("host", bind, body, hooks); got.Status != 200 {
+		t.Fatalf("bind: %+v", got)
+	}
+	closeRequest, closeBody := request("close_execution")
+	live := store.Execute("host", closeRequest, closeBody, hooks)
+	decode := func(t *testing.T, response adaptive.GatewayResponse) {
+		t.Helper()
+		// Decode both the actual wire envelope and its body through the same strict types.
+		raw, err := json.Marshal(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var envelope adaptive.GatewayResponse
+		if err := adaptive.StrictJSON(raw, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Status != 200 || envelope.SessionRevision != revision {
+			t.Fatalf("closure envelope: %+v", envelope)
+		}
+		var owner adaptive.ExecutionOwner
+		if err := adaptive.StrictJSON(envelope.Body, &owner); err != nil {
+			t.Fatalf("closure body: %v; %s", err, envelope.Body)
+		}
+		if owner.CampaignID != "campaign" || owner.WorkerInstanceID != "worker" || owner.RunRevision != 1 || owner.ClosedAt == nil || owner.ClosureReason != "controller_closed_execution" {
+			t.Fatalf("closure identity/state: %+v", owner)
+		}
+	}
+	decode(t, live)
+	for _, phase := range []session.Phase{session.Stopped, session.Error} {
+		t.Run(string(phase), func(t *testing.T) {
+			got, err := retainedOperation(session.Metadata{ID: sessionID, Phase: phase, Revision: revision}, session.Paths{Root: root}, "host", closeRequest, closeBody)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decode(t, got)
+			if !bytes.Equal(got.Body, live.Body) {
+				t.Fatalf("closure body changed after target exit: live=%s retained=%s", live.Body, got.Body)
+			}
+		})
 	}
 }

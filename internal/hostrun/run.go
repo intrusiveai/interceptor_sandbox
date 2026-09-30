@@ -40,6 +40,7 @@ import (
 )
 
 type Config struct {
+	EvidenceMaxBytes     int64
 	SpoolMaxBytes        int64
 	OnFault              func(string, error)
 	InternalOnly         bool // Integrated local API owns all public target access.
@@ -84,6 +85,10 @@ func Run(ctx context.Context, config Config) (session.Metadata, error) {
 	if err != nil {
 		return session.Metadata{}, fmt.Errorf("load application lock; run 'interceptor app build' first: %w", err)
 	}
+	config.Docker, err = config.Docker.Pin(ctx)
+	if err != nil {
+		return session.Metadata{}, err
+	}
 	if err := config.Docker.Available(ctx); err != nil {
 		return session.Metadata{}, err
 	}
@@ -108,7 +113,15 @@ func Run(ctx context.Context, config Config) (session.Metadata, error) {
 	if err := bindAdaptiveMetadata(&metadata, report.Blueprint, config.FeedbackProfile); err != nil {
 		return session.Metadata{}, err
 	}
+	config.Docker, err = config.Docker.PrepareBinding(dataRoot, metadata.ID)
+	if err != nil {
+		return metadata, err
+	}
 	paths := session.PathsFor(dataRoot, metadata.ID)
+	// Make even a failed preparation discoverable and safely purgeable.
+	if err := session.Save(paths.Metadata, metadata); err != nil {
+		return metadata, err
+	}
 	for _, directory := range []string{paths.Root, paths.Checkpoints, paths.Generations, paths.Logs, paths.Sockets} {
 		if err := os.MkdirAll(directory, 0o750); err != nil {
 			return session.Metadata{}, err
@@ -176,6 +189,10 @@ func Restore(ctx context.Context, config Config, sourceSessionID, checkpointID s
 	if err != nil {
 		return session.Metadata{}, err
 	}
+	config.Docker, err = config.Docker.Pin(ctx)
+	if err != nil {
+		return session.Metadata{}, err
+	}
 	if err := config.Docker.Available(ctx); err != nil {
 		return session.Metadata{}, err
 	}
@@ -217,7 +234,15 @@ func Restore(ctx context.Context, config Config, sourceSessionID, checkpointID s
 	if err := bindAdaptiveMetadata(&metadata, report.Blueprint, config.FeedbackProfile); err != nil {
 		return session.Metadata{}, err
 	}
+	config.Docker, err = config.Docker.PrepareBinding(dataRoot, metadata.ID)
+	if err != nil {
+		return metadata, err
+	}
 	paths := session.PathsFor(dataRoot, metadata.ID)
+	// Make even a failed preparation discoverable and safely purgeable.
+	if err := session.Save(paths.Metadata, metadata); err != nil {
+		return metadata, err
+	}
 	for _, directory := range []string{paths.Root, paths.Checkpoints, paths.Generations, paths.Logs, paths.Sockets} {
 		if err := os.MkdirAll(directory, 0o750); err != nil {
 			return metadata, err
@@ -310,6 +335,23 @@ func Restore(ctx context.Context, config Config, sourceSessionID, checkpointID s
 }
 
 func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint *environment.Blueprint, applicationLock appimage.Lock, metadata session.Metadata, paths session.Paths, roots []snapshot.Root) (result session.Metadata, runErr error) {
+	var err error
+	config.Docker, err = config.Docker.Pin(ctx)
+	if err != nil {
+		return metadata, err
+	}
+	if config.Docker.SessionID != metadata.ID {
+		config.Docker, err = config.Docker.PrepareBinding(dataRoot, metadata.ID)
+		if err != nil {
+			return metadata, err
+		}
+	}
+	var launchedID atomic.Pointer[string]
+	killTarget := func(killCtx context.Context) {
+		if id := launchedID.Load(); id != nil {
+			_ = config.Docker.Kill(killCtx, *id)
+		}
+	}
 	writer, err := filemanagement.Lock(dataRoot, "writers-"+metadata.ID, false)
 	if err != nil {
 		return metadata, err
@@ -324,6 +366,23 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 	var quotaDone chan struct{}
 	var dockerWatchDone chan struct{}
 	sessionID := metadata.ID
+	var faultOnce sync.Once
+	notifyFault := func(err error) {
+		faultOnce.Do(func() {
+			if config.OnFault != nil {
+				config.OnFault(sessionID, err)
+			}
+		})
+	}
+	// Termination starts before notifying the API or attempting any persistence.
+	terminateFailed := func(err error) {
+		go func() {
+			killCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			killTarget(killCtx)
+		}()
+		notifyFault(err)
+	}
 	interruptionDone := make(chan struct{})
 	go func() {
 		defer close(interruptionDone)
@@ -336,11 +395,9 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		go func() {
 			killCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			_ = config.Docker.Kill(killCtx, "interceptor-"+sessionID)
+			killTarget(killCtx)
 		}()
-		if config.OnFault != nil {
-			config.OnFault(sessionID, cause)
-		}
+		notifyFault(cause)
 	}()
 	defer func() {
 		cancelRun()
@@ -349,9 +406,14 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		}
 		cleanup, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		name := "interceptor-" + metadata.ID
 		interrupted := hostlifetime.IsInterruption(context.Cause(ctx))
-		err := config.Docker.EnsureRemoved(cleanup, name, fault.Load() != nil || interrupted)
+		bound, id, err := config.Docker.ForSession(cleanup, dataRoot, metadata.ID)
+		if known := launchedID.Load(); known != nil {
+			bound, id, err = config.Docker, *known, nil
+		}
+		if err == nil {
+			err = bound.EnsureRemoved(cleanup, id, fault.Load() != nil || interrupted)
+		}
 		if dockerWatchDone != nil {
 			select {
 			case <-dockerWatchDone:
@@ -403,6 +465,16 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 			_ = fsutil.WriteJSON(filepath.Join(paths.Root, "cleanup-pending.json"), map[string]string{"reason": "container or writer cleanup unconfirmed"}, 0600)
 			runErr = errors.Join(runErr, fmt.Errorf("shutdown cleanup pending: %w", err))
 		}
+		if latest, _, err := session.Load(dataRoot, sessionID); err == nil {
+			result = latest
+			if nativeErr := terminalError(latest); nativeErr != nil {
+				notifyFault(nativeErr)
+				runErr = errors.Join(nativeErr, runErr)
+			}
+		}
+		if runErr != nil {
+			notifyFault(runErr)
+		}
 	}()
 	if config.BridgeTransport == "spool" {
 		for _, root := range filemanagement.SpoolRoots(paths) {
@@ -415,12 +487,9 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 			if errors.As(err, &f) {
 				fault.Store(f)
 			}
-			if config.OnFault != nil {
-				config.OnFault(metadata.ID, err)
-			}
+			notifyFault(err)
 			return metadata, err
 		}
-		sessionID := metadata.ID
 		limit := metadata.SpoolMaxBytes
 		quotaDone = make(chan struct{})
 		go func() {
@@ -435,12 +504,10 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 				go func() {
 					killCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 					defer cancel()
-					_ = config.Docker.Kill(killCtx, "interceptor-"+sessionID)
+					killTarget(killCtx)
 				}()
 				cancelRun()
-				if config.OnFault != nil {
-					config.OnFault(sessionID, f)
-				}
+				notifyFault(f)
 			})
 		}()
 	}
@@ -461,7 +528,6 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		metadata.ControlURL = "http://" + controlListener.Addr().String()
 	}
 	containerName := "interceptor-" + metadata.ID
-	metadata.ContainerID = containerName
 	if err := session.Transition(&metadata, session.Starting); err != nil {
 		return metadata, err
 	}
@@ -533,7 +599,7 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 	if blueprint.Network.DNS.Enabled || blueprint.Network.HTTP.Enabled || blueprint.Network.TLS.Enabled {
 		sysctls["net.ipv4.ip_unprivileged_port_start"] = "53"
 	}
-	containerID, err := config.Docker.Run(ctx, ociruntime.RunConfig{
+	containerID, err := config.Docker.Create(ctx, ociruntime.RunConfig{
 		Name: containerName, Image: applicationLock.WrapperImage, User: "0:0",
 		Environment: map[string]string{
 			"INTERCEPTOR_HOST_UID": strconv.Itoa(os.Getuid()), "INTERCEPTOR_HOST_GID": strconv.Itoa(os.Getgid()),
@@ -544,9 +610,19 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		CPUs: metadata.Limits.CPUs, ReadOnly: true, NetworkNone: true, NoNewPrivileges: true, DropAllCaps: true,
 		AddCaps: []string{"SETUID", "SETGID", "KILL"}, TmpfsBytes: 64 << 20,
 	})
+	if containerID != "" {
+		launchedID.Store(&containerID)
+	}
 	if err != nil {
 		metadata.Phase, metadata.TerminationReason = session.Error, err.Error()
 		_ = session.Save(paths.Metadata, metadata)
+		return metadata, err
+	}
+	metadata.ContainerID = containerID
+	if err := session.Save(paths.Metadata, metadata); err != nil {
+		return metadata, err
+	}
+	if err := config.Docker.Start(ctx, containerID); err != nil {
 		return metadata, err
 	}
 	dockerWatchDone = make(chan struct{})
@@ -620,6 +696,15 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		}
 	}
 	requestedStop := false
+	var executionErr error
+	failExecution := func(err error) {
+		executionErr = err
+		terminateFailed(err)
+		if metadata.Phase != session.Error {
+			metadata.Phase, metadata.TerminationReason = session.Error, err.Error()
+			_ = session.Save(paths.Metadata, metadata)
+		}
+	}
 	monitor := time.NewTicker(500 * time.Millisecond)
 	waiting := true
 	for waiting {
@@ -627,17 +712,41 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		case <-ctx.Done():
 			requestedStop, waiting = true, false
 		case bridgeErr := <-bridgeErrors:
-			if bridgeErr != nil && !errors.Is(bridgeErr, http.ErrServerClosed) {
-				metadata.Phase, metadata.TerminationReason = session.Error, "model connector: "+bridgeErr.Error()
-				_ = session.Save(paths.Metadata, metadata)
+			independentFailure := bridgeErr != nil && !errors.Is(bridgeErr, context.Canceled) && !errors.Is(bridgeErr, http.ErrServerClosed)
+			if independentFailure || !plannedShutdown(ctx) {
+				if bridgeErr == nil {
+					bridgeErr = errors.New("connector stopped unexpectedly")
+				}
+				failExecution(fmt.Errorf("MODEL_CONNECTOR_FAILED: %w", bridgeErr))
 			}
 			waiting = false
 		case <-monitor.C:
+			// Native error metadata is sufficient to close execution; do not wait for
+			// the container's shutdown/flush to finish before notifying Operator.
+			latest, _, loadErr := session.Load(dataRoot, sessionID)
+			if loadErr != nil {
+				failExecution(fmt.Errorf("TARGET_STATE_UNAVAILABLE: %w", loadErr))
+				waiting = false
+				continue
+			}
+			metadata = latest
+			if nativeErr := terminalError(latest); nativeErr != nil {
+				failExecution(nativeErr)
+				waiting = false
+				continue
+			}
 			inspectCtx, inspectCancel := context.WithTimeout(ctx, 2*time.Second)
 			running, inspectErr := config.Docker.Running(inspectCtx, containerID)
 			inspectCancel()
 			if inspectErr == nil && !running {
-				if latest, _, e := session.Load(dataRoot, metadata.ID); e != nil || (latest.Phase != session.Stopped && latest.Phase != session.Error) {
+				// Re-read after inspection in case the supervisor finalized during it.
+				latest, _, loadErr = session.Load(dataRoot, sessionID)
+				if loadErr == nil {
+					metadata = latest
+				}
+				if nativeErr := terminalError(metadata); nativeErr != nil {
+					failExecution(nativeErr)
+				} else if !plannedShutdown(ctx) {
 					interruptRun(hostlifetime.Interrupted("CONTAINER_INTERRUPTED"))
 				}
 				waiting = false
@@ -661,7 +770,7 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 	if loadErr == nil {
 		metadata = latest
 	}
-	return metadata, nil
+	return metadata, executionErr
 }
 
 func modelProvider(ctx context.Context, config Config) (bridge.ModelProvider, error) {

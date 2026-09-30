@@ -33,7 +33,7 @@ or restored session, and relays their unchanged verified digests in
 `FinalSubmission`.
 
 This design gives AEF full post-run truth without giving AEF live Interceptor
-authority or exposing protected evidence to Operator's guest attack engine.
+authority or exposing protected evidence to Operator's guest attack harness.
 
 ## 3. Enhancement classification
 

@@ -127,9 +127,10 @@ briefly near the end.
 
 Under the hood, the coordinator:
 
-1. verifies that snapshots are enabled and within the configured limit;
-2. temporarily prevents another administrative action or application request
+1. temporarily prevents another administrative action or application request
    from changing state at the same time;
+2. verifies that snapshots are enabled and within native count/byte limits and
+   the optional caller byte allowance;
 3. marks the session `quiescing` (preparing for a safe save);
 4. asks the application to finish and save pending work using its configured
    quiescence method;
@@ -139,9 +140,10 @@ Under the hood, the coordinator:
 7. briefly pauses the application for one final check;
 8. determines which files changed since the last snapshot and saves their
    contents;
-   for typed `snapshot.create`, the supervisor supplies the remaining session
-   byte allowance and Interceptor
-   rejects an oversized candidate before committing it;
+   Interceptor compares all canonical file bytes against the smaller of the
+   remaining native allowance and optional caller `maximum_committed_bytes`,
+   rejecting an oversized candidate with `429 snapshot_bytes_exhausted` before
+   commitment (zero is exhausted, omission uses native limits);
 9. records the file changes and other restorable state in the state journal;
 10. saves the complete list and fingerprints of current files;
 11. records current usage limits, oracle results, and virtual time;
@@ -265,7 +267,8 @@ interceptor snapshot list <session-id> --json
 interceptor snapshot inspect <session-id> <checkpoint-id>
 ```
 
-For an attached campaign, Operator uses native `snapshot.create` with label and
+For an attached campaign, Operator uses native `snapshot.create` with host-supplied
+`maximum_committed_bytes` (its remaining campaign allowance), label and
 description; campaign ID comes from its request envelope. Description is optional,
 valid UTF-8 and at most 4,096 bytes. Both fields are stored in the checkpoint,
 covered by its hash and returned by create/list/inspect. Older records may omit

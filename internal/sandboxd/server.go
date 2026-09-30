@@ -1297,7 +1297,11 @@ func (s *Server) deleteInjectionHandler(writer http.ResponseWriter, request *htt
 	s.activityMu.Lock()
 	defer s.activityMu.Unlock()
 	if err := s.injections.Delete(request.PathValue("id")); err != nil {
-		writeError(writer, http.StatusNotFound, "not_found", err.Error())
+		if errors.Is(err, injection.ErrNotFound) {
+			writeError(writer, http.StatusNotFound, "not_found", err.Error())
+		} else {
+			writeError(writer, http.StatusInternalServerError, "injection_delete_failed", "could not durably delete injection")
+		}
 		return
 	}
 	s.bumpRevision()
@@ -1306,10 +1310,10 @@ func (s *Server) deleteInjectionHandler(writer http.ResponseWriter, request *htt
 
 func (s *Server) createSnapshotHandler(writer http.ResponseWriter, request *http.Request) {
 	var input struct {
-		Label                 string `json:"label,omitempty"`
-		CampaignID            string `json:"campaign_id,omitempty"`
-		Description           string `json:"description,omitempty"`
-		MaximumCommittedBytes int64  `json:"maximum_committed_bytes,omitempty"`
+		Label                 string                 `json:"label,omitempty"`
+		CampaignID            string                 `json:"campaign_id,omitempty"`
+		Description           string                 `json:"description,omitempty"`
+		MaximumCommittedBytes snapshot.ByteAllowance `json:"maximum_committed_bytes,omitzero"`
 	}
 	if err := decodeStrict(request, &input, 64<<10); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_snapshot", err.Error())
@@ -1330,13 +1334,17 @@ func (s *Server) createSnapshotHandler(writer http.ResponseWriter, request *http
 	}
 	checkpoint, err := s.createSnapshot(request.Context(), input.Label, input.MaximumCommittedBytes, snapshot.Metadata{CampaignID: input.CampaignID, Description: input.Description})
 	if err != nil {
-		writeError(writer, http.StatusConflict, "snapshot_failed", err.Error())
+		if errors.Is(err, snapshot.ErrBytesExhausted) {
+			writeError(writer, http.StatusTooManyRequests, "snapshot_bytes_exhausted", err.Error())
+		} else {
+			writeError(writer, http.StatusConflict, "snapshot_failed", err.Error())
+		}
 		return
 	}
 	writeJSON(writer, http.StatusCreated, checkpoint)
 }
 
-func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommittedBytes int64, checkpointMetadata snapshot.Metadata) (snapshot.Checkpoint, error) {
+func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommittedBytes snapshot.ByteAllowance, checkpointMetadata snapshot.Metadata) (snapshot.Checkpoint, error) {
 	s.controlMu.Lock()
 	defer s.controlMu.Unlock()
 	s.activityMu.Lock()
@@ -1346,9 +1354,14 @@ func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommit
 	}
 	s.metadataMu.RLock()
 	snapshotAttempts, maxSnapshots := s.metadata.Consumed.SnapshotAttempts, s.metadata.Limits.MaxSnapshots
+	maxBlob, usedBytes := s.metadata.Limits.MaxBlobBytes, s.metadata.Consumed.SnapshotBytes
 	s.metadataMu.RUnlock()
 	if snapshotAttempts >= maxSnapshots {
 		return snapshot.Checkpoint{}, errors.New("snapshot limit is exhausted")
+	}
+	allowance, err := snapshot.RemainingBytes(maxBlob, maxSnapshots, usedBytes, maximumCommittedBytes)
+	if err != nil {
+		return snapshot.Checkpoint{}, err
 	}
 	s.metadataMu.Lock()
 	s.metadata.Phase = session.Quiescing
@@ -1389,11 +1402,11 @@ func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommit
 	canonicalSize := int64(0)
 	for _, entry := range current.Entries {
 		if entry.Type == "file" {
+			if entry.Size < 0 || entry.Size > allowance-canonicalSize {
+				return snapshot.Checkpoint{}, snapshot.ErrBytesExhausted
+			}
 			canonicalSize += entry.Size
 		}
-	}
-	if maximumCommittedBytes > 0 && canonicalSize > maximumCommittedBytes {
-		return snapshot.Checkpoint{}, errors.New("snapshot exceeds caller cumulative-byte allowance")
 	}
 	previous, err := snapshot.LoadManifest(s.paths.FileManifest)
 	if err != nil {

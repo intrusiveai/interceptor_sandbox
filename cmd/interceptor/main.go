@@ -25,6 +25,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/credentials"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/environment"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/evaluation"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/evidence"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/filemanagement"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/hostlifetime"
@@ -214,6 +215,13 @@ func (values *stringList) Set(value string) error {
 	return nil
 }
 
+func evidenceLimitFlag(flags *flag.FlagSet) *string {
+	value, configured := os.LookupEnv("INTERCEPTOR_EVIDENCE_MAX_BYTES")
+	if !configured {
+		value = "4294967296"
+	}
+	return flags.String("evidence-max-bytes", value, "maximum bytes per evidence archive (default 4294967296)")
+}
 func runCommand(arguments []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("run", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -222,6 +230,7 @@ func runCommand(arguments []string, stdout io.Writer) error {
 	if !spoolConfigured {
 		spoolDefault = "536870912"
 	}
+	evidenceLimit := evidenceLimitFlag(flags)
 	spoolLimit := flags.String("spool-max-bytes", spoolDefault, "maximum combined spool bytes (default 536870912)")
 	bridgeTransport := flags.String("bridge-transport", "spool", "host/container bridge transport: spool or unix")
 	providerType := flags.String("model-provider", bridge.ProviderOpenAIChat, "host model-provider adapter")
@@ -242,6 +251,10 @@ func runCommand(arguments []string, stdout io.Writer) error {
 	}
 	if flags.NArg() != 0 || *directory == "" || len(allowedModels) == 0 {
 		return errors.New("usage: interceptor run --environment <directory> --model-provider <type> --allow-model <model> [provider options]")
+	}
+	evidenceMaxBytes, err := evidence.ParseLimit(*evidenceLimit)
+	if err != nil {
+		return err
 	}
 	limitValue := *spoolLimit
 	spoolMaxBytes, err := filemanagement.ParseSpoolLimit(limitValue)
@@ -281,7 +294,7 @@ func runCommand(arguments []string, stdout io.Writer) error {
 		ProviderAPIVersion: *providerAPIVersion,
 		ProviderAuthMode:   *providerAuthMode,
 		BridgeTransport:    *bridgeTransport, Docker: ociruntime.Docker{}, Output: stdout,
-		FeedbackProfile: *feedbackProfile, SpoolMaxBytes: spoolMaxBytes,
+		FeedbackProfile: *feedbackProfile, SpoolMaxBytes: spoolMaxBytes, EvidenceMaxBytes: evidenceMaxBytes,
 	}, exportEvidence)
 	return err
 }
@@ -565,13 +578,18 @@ func logsCommand(arguments []string, stdout io.Writer) error {
 		flags := flag.NewFlagSet("logs export", flag.ContinueOnError)
 		flags.SetOutput(io.Discard)
 		output := flags.String("output", "", "output tar path")
+		evidenceLimit := evidenceLimitFlag(flags)
 		if err := flags.Parse(arguments[2:]); err != nil || flags.NArg() != 0 || *output == "" {
-			return errors.New("usage: interceptor logs export <session-id> --output <path>")
+			return errors.New("usage: interceptor logs export <session-id> --output <path> [--evidence-max-bytes <bytes>]")
 		}
 		if metadata.Phase != session.Stopped && metadata.Phase != session.Error {
 			return fmt.Errorf("evidence export requires a stopped or error session; current phase is %s", metadata.Phase)
 		}
-		if err := exportEvidence(root, metadata, paths, *output); err != nil {
+		maximumBytes, err := evidence.ParseLimit(*evidenceLimit)
+		if err != nil {
+			return err
+		}
+		if err := exportEvidence(context.Background(), root, metadata, paths, *output, maximumBytes); err != nil {
 			return err
 		}
 		fmt.Fprintf(stdout, "Exported verified evidence to %s\n", *output)
@@ -646,7 +664,13 @@ func logsCommand(arguments []string, stdout io.Writer) error {
 	return nil
 }
 
-func exportEvidence(dataRoot string, metadata session.Metadata, paths session.Paths, output string) error {
+func exportEvidence(ctx context.Context, dataRoot string, metadata session.Metadata, paths session.Paths, output string, maximumBytes int64) error {
+	if _, err := evidence.ResolveLimit(maximumBytes); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if _, err := recording.VerifyFile(paths.Events); err != nil {
 		return err
 	}
@@ -747,7 +771,43 @@ func exportEvidence(dataRoot string, metadata session.Metadata, paths session.Pa
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
-	archive := tar.NewWriter(temporary)
+	defer temporary.Close()
+	limited, err := evidence.NewWriter(ctx, temporary, maximumBytes)
+	if err != nil {
+		return err
+	}
+	archive := tar.NewWriter(limited)
+	addReader := func(name string, reader io.Reader, size, mode int64) error {
+		if err := archive.WriteHeader(&tar.Header{Name: name, Mode: mode, Size: size, ModTime: time.Unix(0, 0)}); err != nil {
+			return err
+		}
+		if err := limited.Check(size); err != nil {
+			return err
+		}
+		written, err := io.Copy(archive, reader)
+		if err != nil {
+			return err
+		}
+		if written != size {
+			return errors.New("evidence member size changed during export")
+		}
+		return nil
+	}
+	addFile := func(name, path string, mode int64) error {
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		info, err := file.Stat()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("evidence input is not a regular file")
+		}
+		return addReader(name, file, info.Size(), mode)
+	}
 	addBytes := func(name string, content []byte, mode int64) error {
 		if err := archive.WriteHeader(&tar.Header{Name: name, Mode: mode, Size: int64(len(content)), ModTime: time.Unix(0, 0)}); err != nil {
 			return err
@@ -769,11 +829,7 @@ func exportEvidence(dataRoot string, metadata session.Metadata, paths session.Pa
 		return err
 	}
 	for _, file := range []struct{ name, path string }{{"session.json", paths.Metadata}, {"events.jsonl", paths.Events}, {"state.jsonl", paths.Journal}, {"file-manifest.json", paths.FileManifest}} {
-		content, err := os.ReadFile(file.path)
-		if err != nil {
-			return err
-		}
-		if err := addBytes(file.name, content, 0o640); err != nil {
+		if err := addFile(file.name, file.path, 0o640); err != nil {
 			return err
 		}
 	}
@@ -853,14 +909,14 @@ func exportEvidence(dataRoot string, metadata session.Metadata, paths session.Pa
 		if err != nil {
 			return err
 		}
-		content, err := io.ReadAll(reader)
-		reader.Close()
-		if err != nil || int64(len(content)) != object.Size {
-			return errors.New("read evidence blob failed or size changed")
-		}
 		name := "blobs/sha256/" + strings.TrimPrefix(reference, "sha256:")
-		if err := addBytes(name, content, 0o640); err != nil {
-			return err
+		copyErr := addReader(name, reader, object.Size, 0o640)
+		closeErr := reader.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
 		}
 	}
 	if err := archive.Close(); err != nil {
@@ -898,14 +954,29 @@ func snapshotCommand(arguments []string, stdout io.Writer) error {
 		label := flags.String("name", "", "checkpoint label")
 		description := flags.String("description", "", "checkpoint purpose (up to 4096 UTF-8 bytes)")
 		campaignID := flags.String("campaign-id", "", "campaign attribution for an administrative snapshot")
+		maximumBytes := flags.Int64("maximum-committed-bytes", 0, "optional snapshot byte allowance; zero is exhausted")
 		jsonOutput := flags.Bool("json", false, "emit JSON")
 		if err := flags.Parse(arguments[2:]); err != nil || flags.NArg() != 0 {
-			return errors.New("usage: interceptor snapshot create <session-id> [--name <label>] [--description <text>] [--campaign-id <id>] [--json]")
+			return errors.New("usage: interceptor snapshot create <session-id> [--name <label>] [--description <text>] [--campaign-id <id>] [--maximum-committed-bytes <bytes>] [--json]")
 		}
 		if err := snapshot.ValidateMetadata(*campaignID, *description); err != nil {
 			return err
 		}
-		body, _ := json.Marshal(map[string]string{"label": *label, "description": *description, "campaign_id": *campaignID})
+		if *maximumBytes < 0 {
+			return errors.New("maximum-committed-bytes must be nonnegative")
+		}
+		input := struct {
+			Label                 string                 `json:"label,omitempty"`
+			Description           string                 `json:"description,omitempty"`
+			CampaignID            string                 `json:"campaign_id,omitempty"`
+			MaximumCommittedBytes snapshot.ByteAllowance `json:"maximum_committed_bytes,omitzero"`
+		}{Label: *label, Description: *description, CampaignID: *campaignID}
+		flags.Visit(func(f *flag.Flag) {
+			if f.Name == "maximum-committed-bytes" {
+				input.MaximumCommittedBytes = snapshot.ByteAllowance{Value: *maximumBytes, Set: true}
+			}
+		})
+		body, _ := json.Marshal(input)
 		result, err := hostrun.CallSession(context.Background(), sessionID, http.MethodPost, "/v1/snapshots", body)
 		if err != nil {
 			return err
@@ -990,12 +1061,11 @@ func stopCommand(arguments []string, stdout io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	docker := ociruntime.Docker{}
-	name := m.ContainerID
-	if name == "" {
-		name = "interceptor-" + m.ID
+	docker, containerID, err := (ociruntime.Docker{}).ForSession(ctx, root, m.ID)
+	if err != nil {
+		return err
 	}
-	present, err := docker.ContainerPresent(ctx, name)
+	present, err := docker.ContainerPresent(ctx, containerID)
 	if err != nil {
 		return err
 	}
@@ -1003,19 +1073,9 @@ func stopCommand(arguments []string, stdout io.Writer) error {
 		cooperative, stop := context.WithTimeout(ctx, 3*time.Second)
 		_, _ = hostrun.CallSession(cooperative, m.ID, http.MethodPost, "/v1/stop", []byte(`{}`))
 		stop()
-		if err := docker.Stop(ctx, name, 5*time.Second); err != nil {
-			return err
-		}
-		if err := docker.Remove(ctx, name); err != nil {
-			return err
-		}
 	}
-	present, err = docker.ContainerPresent(ctx, name)
-	if err != nil {
+	if err := docker.EnsureRemoved(ctx, containerID, false); err != nil {
 		return err
-	}
-	if present {
-		return errors.New("container removal unconfirmed")
 	}
 	for {
 		err = filemanagement.CleanupSpools(ctx, root, m, docker)

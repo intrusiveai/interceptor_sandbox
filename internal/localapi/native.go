@@ -12,12 +12,14 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/intrusive-ai/interceptor-sandbox/internal/adaptive"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/blobstore"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/buildinfo"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/environment"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/evidence"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/filemanagement"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/gatewayhost"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/hostlifetime"
@@ -27,12 +29,14 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/statejournal"
 )
 
-type EvidenceExporter func(string, session.Metadata, session.Paths, string) error
+type EvidenceExporter func(context.Context, string, session.Metadata, session.Paths, string, int64) error
 type nativeRun struct {
-	cancel   context.CancelCauseFunc
-	done     chan struct{}
-	metadata session.Metadata
-	err      error
+	sessionID   string // guarded by NativeRuntime.mu until ready
+	plannedStop atomic.Bool
+	cancel      context.CancelCauseFunc
+	done        chan struct{}
+	metadata    session.Metadata
+	err         error
 }
 type NativeRuntime struct {
 	ctx           context.Context
@@ -44,13 +48,18 @@ type NativeRuntime struct {
 	exportGate    chan struct{}
 	faultMu       sync.Mutex
 	service       *Service
-	terminalFault error
+	terminalFault *ExecutionFailure
 	power         *hostlifetime.Manager
 }
 
 // Run owns the localhost listener and target lifetime. Closing a target leaves
 // the listener available for status and evidence until the parent is cancelled.
 func Run(ctx context.Context, config hostrun.Config, export EvidenceExporter) (runErr error) {
+	var err error
+	config.EvidenceMaxBytes, err = evidence.ResolveLimit(config.EvidenceMaxBytes)
+	if err != nil {
+		return err
+	}
 	listener, err := net.Listen("tcp4", "127.0.0.1:8080")
 	if err != nil {
 		return fmt.Errorf("reserve local API (one instance is supported): %w", err)
@@ -65,6 +74,10 @@ func Run(ctx context.Context, config hostrun.Config, export EvidenceExporter) (r
 		return err
 	}
 	defer maintenance.Close()
+	config.Docker, err = config.Docker.Pin(ctx)
+	if err != nil {
+		return err
+	}
 	// Do not silently adopt or run alongside a target left by an earlier service.
 	active, err := config.Docker.InterceptorContainers(ctx)
 	if err != nil {
@@ -97,14 +110,14 @@ func Run(ctx context.Context, config hostrun.Config, export EvidenceExporter) (r
 		return err
 	}
 	instance := "inst-" + hex.EncodeToString(random)
-	service, err := New(serviceCtx, n, metadata, instance, filepath.Join(root, "instances", instance+".json"))
+	service, err := New(serviceCtx, n, metadata, instance, filepath.Join(root, "instances", instance+".json"), config.EvidenceMaxBytes)
 	if err != nil {
 		return err
 	}
 	n.faultMu.Lock()
 	n.service = service
 	if n.terminalFault != nil {
-		_ = service.failTransport()
+		_ = service.failExecution(*n.terminalFault)
 	}
 	n.faultMu.Unlock()
 	server := &http.Server{Handler: service, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
@@ -147,8 +160,14 @@ func (n *NativeRuntime) start(ctx context.Context, source, checkpoint string) (s
 	n.active = run
 	ready := make(chan session.Metadata, 1)
 	config := n.config
-	config.OnReady = func(m session.Metadata) error { ready <- m; return nil }
-	config.OnFault = n.transportFailed
+	config.OnReady = func(m session.Metadata) error {
+		n.mu.Lock()
+		run.sessionID = m.ID
+		n.mu.Unlock()
+		ready <- m
+		return nil
+	}
+	config.OnFault = func(id string, err error) { n.targetFailed(run, id, err) }
 	n.mu.Unlock()
 	go func() {
 		defer close(run.done)
@@ -158,6 +177,9 @@ func (n *NativeRuntime) start(ctx context.Context, source, checkpoint string) (s
 		} else {
 			run.metadata, run.err = hostrun.Restore(life, config, source, checkpoint)
 		}
+		// Covers every return, including exits during startup and paths which did
+		// not report a fault before cleanup. Publish before signaling run.done.
+		n.targetEnded(run)
 	}()
 	select {
 	case m := <-ready:
@@ -169,7 +191,8 @@ func (n *NativeRuntime) start(ctx context.Context, source, checkpoint string) (s
 		}
 		return run.metadata, errors.New("target exited before readiness")
 	case <-ctx.Done():
-		cancel(nil)
+		run.plannedStop.Store(true)
+		cancel(hostrun.PlannedStop)
 		timer := time.NewTimer(30 * time.Second)
 		defer timer.Stop()
 		select {
@@ -246,7 +269,8 @@ func (n *NativeRuntime) stopActive(ctx context.Context) error {
 	if active == nil {
 		return nil
 	}
-	active.cancel(nil)
+	active.plannedStop.Store(true)
+	active.cancel(hostrun.PlannedStop)
 	select {
 	case <-active.done:
 	case <-ctx.Done():
@@ -255,7 +279,7 @@ func (n *NativeRuntime) stopActive(ctx context.Context) error {
 	if active.metadata.ID == "" {
 		return active.err
 	}
-	return n.confirmStopped(ctx, active.metadata.ID)
+	return n.confirmStopped(ctx, active.metadata.ID, active)
 }
 func (n *NativeRuntime) Stop(ctx context.Context, id string) error {
 	n.mu.Lock()
@@ -265,7 +289,21 @@ func (n *NativeRuntime) Stop(ctx context.Context, id string) error {
 	if active == nil {
 		return errors.New("no target managed by this instance")
 	}
-	active.cancel(nil)
+	n.mu.Lock()
+	activeID := active.sessionID
+	select {
+	case <-active.done:
+		if activeID == "" {
+			activeID = active.metadata.ID
+		}
+	default:
+	}
+	n.mu.Unlock()
+	if activeID != id {
+		return errors.New("active target mismatch")
+	}
+	active.plannedStop.Store(true)
+	active.cancel(hostrun.PlannedStop)
 	select {
 	case <-active.done:
 	case <-ctx.Done():
@@ -274,31 +312,24 @@ func (n *NativeRuntime) Stop(ctx context.Context, id string) error {
 	if active.metadata.ID != id {
 		return errors.New("active target mismatch")
 	}
-	return n.confirmStopped(ctx, id)
+	return n.confirmStopped(ctx, id, active)
 }
-func (n *NativeRuntime) confirmStopped(ctx context.Context, id string) error {
+func (n *NativeRuntime) confirmStopped(ctx context.Context, id string, run *nativeRun) (resultErr error) {
+	defer func() {
+		if resultErr != nil {
+			n.targetFailed(run, id, resultErr)
+		}
+	}()
 	m, paths, err := session.Load(n.root, id)
 	if err != nil {
 		return err
 	}
-	present, err := n.config.Docker.ContainerPresent(ctx, m.ContainerID)
+	docker, containerID, err := n.config.Docker.ForSession(ctx, n.root, id)
 	if err != nil {
 		return err
 	}
-	if present {
-		if err = n.config.Docker.Stop(ctx, m.ContainerID, 5*time.Second); err != nil {
-			return err
-		}
-		if err = n.config.Docker.Remove(ctx, m.ContainerID); err != nil {
-			return err
-		}
-	}
-	present, err = n.config.Docker.ContainerPresent(ctx, m.ContainerID)
-	if err != nil {
+	if err := docker.EnsureRemoved(ctx, containerID, false); err != nil {
 		return err
-	}
-	if present {
-		return errors.New("target removal unconfirmed")
 	}
 	// Reload after the supervisor's final journal flush; never overwrite final
 	// native counters/evaluation with a pre-stop copy of the metadata.
@@ -309,11 +340,24 @@ func (n *NativeRuntime) confirmStopped(ctx context.Context, id string) error {
 	if m.Phase != session.Stopped && m.Phase != session.Error {
 		m.Phase = session.Error
 		m.TerminationReason = "host confirmed target removal; native finalization incomplete"
-		return session.Save(paths.Metadata, m)
+		failure := errors.New(m.TerminationReason)
+		n.targetFailed(run, id, failure)
+		return errors.Join(failure, session.Save(paths.Metadata, m))
 	}
-	return filemanagement.CleanupSpools(ctx, n.root, m, n.config.Docker)
+	if m.Phase == session.Error {
+		reason := m.TerminationReason
+		if reason == "" {
+			reason = "TARGET_FAILED"
+		}
+		n.targetFailed(run, id, errors.New(reason))
+	}
+	if err := filemanagement.CleanupSpools(ctx, n.root, m, n.config.Docker); err != nil {
+		n.targetFailed(run, id, err)
+		return err
+	}
+	return nil
 }
-func (n *NativeRuntime) Export(ctx context.Context, id string) (*os.File, error) {
+func (n *NativeRuntime) Export(ctx context.Context, id string, maximumBytes int64) (*os.File, error) {
 	select {
 	case n.exportGate <- struct{}{}:
 		defer func() { <-n.exportGate }()
@@ -327,7 +371,11 @@ func (n *NativeRuntime) Export(ctx context.Context, id string) (*os.File, error)
 	if m.Phase != session.Stopped && m.Phase != session.Error {
 		return nil, errors.New("target must be stopped")
 	}
-	present, err := n.config.Docker.ContainerPresent(ctx, m.ContainerID)
+	docker, containerID, err := n.config.Docker.ForSession(ctx, n.root, id)
+	if err != nil {
+		return nil, err
+	}
+	present, err := docker.ContainerPresent(ctx, containerID)
 	if err != nil {
 		return nil, err
 	}
@@ -344,7 +392,7 @@ func (n *NativeRuntime) Export(ctx context.Context, id string) (*os.File, error)
 	}
 	path := file.Name()
 	_ = file.Close()
-	if err = n.export(n.root, m, paths, path); err != nil {
+	if err = n.export(ctx, n.root, m, paths, path, maximumBytes); err != nil {
 		_ = os.Remove(path)
 		return nil, err
 	}
@@ -355,12 +403,45 @@ func (n *NativeRuntime) Export(ctx context.Context, id string) (*os.File, error)
 	return file, err
 }
 
-func (n *NativeRuntime) transportFailed(_ string, err error) {
+// targetFailed scopes delayed callbacks to the actual running target, including
+// a replacement whose binding has not yet been published by the API.
+func (n *NativeRuntime) targetFailed(run *nativeRun, id string, err error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.active != run {
+		return
+	}
+	if id == "" {
+		id = run.sessionID
+	}
+	n.transportFailed(id, err)
+}
+
+func (n *NativeRuntime) targetEnded(run *nativeRun) {
+	err := run.err
+	if run.metadata.Phase == session.Error {
+		reason := run.metadata.TerminationReason
+		if reason == "" {
+			reason = "TARGET_FAILED"
+		}
+		err = errors.New(reason)
+	}
+	if err == nil && !run.plannedStop.Load() && (n.ctx == nil || n.ctx.Err() == nil) {
+		err = errors.New("CONTAINER_INTERRUPTED")
+	}
+	if err != nil {
+		n.targetFailed(run, run.metadata.ID, err)
+	}
+}
+
+func (n *NativeRuntime) transportFailed(id string, err error) {
 	n.faultMu.Lock()
 	defer n.faultMu.Unlock()
-	n.terminalFault = err
+	if n.terminalFault == nil {
+		n.terminalFault = &ExecutionFailure{SessionID: id, Reason: err.Error(), ObservedAt: time.Now().UTC()}
+	}
 	if n.service != nil {
-		_ = n.service.failTransport()
+		_ = n.service.failExecution(*n.terminalFault)
 	}
 }
 

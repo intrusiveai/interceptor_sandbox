@@ -9,9 +9,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -23,6 +25,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/gatewayhost"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/injection"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/session"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/snapshot"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/statejournal"
 )
 
@@ -212,7 +215,7 @@ func TestNativeBodyValidationAndStopOptIn(t *testing.T) {
 	if result := nativeCall(t, g, s, "bind", "session.owner", owner, nil); result.Status != 200 {
 		t.Fatal(result)
 	}
-	for i, body := range []any{map[string]any{"label": "safe", "maximum_committed_bytes": 999999}, map[string]any{"label": "safe", "unknown": true}} {
+	for i, body := range []any{map[string]any{"label": "safe", "maximum_committed_bytes": -1}, map[string]any{"label": "safe", "unknown": true}} {
 		id := []string{"budget", "unknown"}[i]
 		if result := nativeCall(t, g, s, id, "snapshot.create", body, nil); result.Status != 409 {
 			t.Fatalf("snapshot schema: %+v", result)
@@ -229,7 +232,7 @@ func TestNativeBodyValidationAndStopOptIn(t *testing.T) {
 func TestSnapshotOperationCarriesCampaignAndDescription(t *testing.T) {
 	s, _ := nativeOperationServer(t)
 	r := adaptive.OperationRequest{CampaignID: "campaign", Operation: "snapshot.create"}
-	body := json.RawMessage(`{"label":"baseline","description":"Before branch B — preserve this state"}`)
+	body := json.RawMessage(`{"label":"baseline","description":"Before branch B — preserve this state","maximum_committed_bytes":12345}`)
 	if err := s.checkOperation(r, body, adaptive.ExecutionState{}); err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +248,7 @@ func TestSnapshotOperationCarriesCampaignAndDescription(t *testing.T) {
 		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
 			t.Fatal(err)
 		}
-		if input.CampaignID != "campaign" || input.Description != "Before branch B — preserve this state" || input.Label != "baseline" || input.MaximumCommittedBytes <= 0 {
+		if input.CampaignID != "campaign" || input.Description != "Before branch B — preserve this state" || input.Label != "baseline" || input.MaximumCommittedBytes != 12345 {
 			t.Fatalf("lost metadata: %+v", input)
 		}
 		writeJSON(w, 201, input)
@@ -255,6 +258,10 @@ func TestSnapshotOperationCarriesCampaignAndDescription(t *testing.T) {
 	}
 	for _, invalid := range []json.RawMessage{
 		json.RawMessage(`{"campaign_id":"other"}`),
+		json.RawMessage(`{"maximum_committed_bytes":null}`),
+		json.RawMessage(`{"maximum_committed_bytes":-1}`),
+		json.RawMessage(`{"maximum_committed_bytes":0.5}`),
+		json.RawMessage(`{"maximum_committed_bytes":9223372036854775808}`),
 		json.RawMessage(`{"description":42}`),
 		json.RawMessage(`{"description":"` + strings.Repeat("x", 4097) + `"}`),
 	} {
@@ -388,5 +395,99 @@ func TestNativeExecutionStateTamperFailsJournalVerification(t *testing.T) {
 	}
 	if _, err := adaptive.VerifyExecutionJournal(s.paths.Root, transactions); err == nil {
 		t.Fatal("changed owner policy passed journal verification")
+	}
+}
+
+// Exercise real snapshot scanning, commitment and operation replay through both
+// transports. The idle child has its own process group for snapshot SIGSTOP.
+func TestSnapshotCallerAllowanceAndReplay(t *testing.T) {
+	for _, transport := range []string{"unix", "spool"} {
+		t.Run(transport, func(t *testing.T) {
+			s, _ := nativeOperationServer(t, transport)
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, "state"), []byte("12345678"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			s.blueprint.Application.Persistence.SnapshotCapable = true
+			s.blueprint.Application.Persistence.MutableRoots = []string{root}
+			s.blueprint.Application.Persistence.Quiesce.Kind = "none"
+			s.metadata.EnvironmentDigest = digest.Bytes([]byte("environment"))
+			s.metadata.AppDigest = digest.Bytes([]byte("application"))
+			s.app = exec.Command("/bin/sleep", "60")
+			s.app.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			if err := s.app.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.app.Process.Kill(); _ = s.app.Wait() })
+			if err := snapshot.WriteManifest(s.paths.FileManifest, snapshot.EmptyManifest()); err != nil {
+				t.Fatal(err)
+			}
+			g := nativeGateway(t, s)
+			owner := adaptive.OwnerRequest{Action: "bind", SessionID: s.metadata.ID, CampaignID: "campaign", WorkerInstanceID: "worker"}
+			if res := nativeCall(t, g, s, "bind", "session.owner", owner, nil); res.Status != 200 {
+				t.Fatal(res)
+			}
+			assertNoCommit := func(id string, allowance int64) {
+				t.Helper()
+				before := s.metadata.Consumed
+				res := nativeCall(t, g, s, id, "snapshot.create", map[string]any{"maximum_committed_bytes": allowance}, nil)
+				if res.Status != 429 || !strings.Contains(string(res.Body), "snapshot_bytes_exhausted") {
+					t.Fatalf("%s: %+v %s", id, res, res.Body)
+				}
+				if s.metadata.Consumed != before || s.metadata.Phase != session.Running {
+					t.Fatal("rejection consumed budget or stopped execution")
+				}
+				checkpoints, err := snapshot.ListCheckpoints(s.paths.Checkpoints)
+				if err != nil || len(checkpoints) != 0 {
+					t.Fatalf("rejection committed checkpoint: %v %v", checkpoints, err)
+				}
+			}
+			assertNoCommit("zero", 0)
+			assertNoCommit("caller-small", 7)
+			// A larger caller allowance must not bypass current native consumption.
+			s.metadata.Consumed.SnapshotBytes = 2*(1<<20) - 7
+			assertNoCommit("native-small", 100)
+			// Simulate counters rewound by restore: caller's campaign allowance still wins.
+			s.metadata.Consumed.SnapshotBytes = 0
+			assertNoCommit("after-rewind", 7)
+			body := map[string]any{"label": "exact-boundary", "maximum_committed_bytes": 8}
+			result := nativeCall(t, g, s, "create", "snapshot.create", body, nil)
+			if result.Status != 201 {
+				t.Fatalf("create: %+v %s", result, result.Body)
+			}
+			var cp snapshot.Checkpoint
+			if err := json.Unmarshal(result.Body, &cp); err != nil || cp.CanonicalSizeBytes != 8 {
+				t.Fatalf("checkpoint: %s %v", result.Body, err)
+			}
+			retry := func(body any) adaptive.GatewayResponse {
+				saved := s.execution.State().Records["create"].Request
+				raw, _ := json.Marshal(body)
+				saved.BodyDigest = digest.Bytes(raw)
+				request := httptest.NewRequest("POST", "/v1/operations", bytes.NewReader(adaptive.EncodeOperation(saved, raw)))
+				request.Header.Set("Authorization", "Bearer long-enough-secret-integration-token")
+				w := httptest.NewRecorder()
+				g.ServeHTTP(w, request)
+				var response adaptive.GatewayResponse
+				if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+					t.Fatal(err)
+				}
+				return response
+			}
+			replay := retry(body)
+			if replay.Status != 201 || !bytes.Equal(replay.Body, result.Body) {
+				t.Fatalf("replay: %+v %s", replay, replay.Body)
+			}
+			body["maximum_committed_bytes"] = 9
+			if conflict := retry(body); conflict.Status != 409 {
+				t.Fatal("mutated allowance replayed", conflict)
+			}
+			if s.metadata.Consumed.SnapshotAttempts != 1 || s.metadata.Consumed.SnapshotBytes != 8 {
+				t.Fatal("replay charged twice", s.metadata.Consumed)
+			}
+			// Omission uses the native limit, including for standalone-compatible callers.
+			if res := nativeCall(t, g, s, "native-only", "snapshot.create", map[string]any{}, nil); res.Status != 201 {
+				t.Fatalf("omitted: %+v %s", res, res.Body)
+			}
+		})
 	}
 }

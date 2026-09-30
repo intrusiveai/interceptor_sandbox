@@ -160,3 +160,73 @@ func TestEvidenceBundleCarriesFinalEvaluationCompleteness(t *testing.T) {
 		t.Fatalf("missing final evaluation was not marked partial: %#v", partial.Completeness)
 	}
 }
+
+func TestAttemptIndexGapsDoNotConsumeRegistrationCapacity(t *testing.T) {
+	root := t.TempDir()
+	store, err := blobstore.Open(filepath.Join(root, "blobs"), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := OpenArtifactRegistry(filepath.Join(root, "artifacts.json"), store, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"message":"baseline"}`)
+	descriptor := ArtifactDescriptor{Digest: digest.Bytes(body), SizeBytes: int64(len(body)), MediaType: "application/json", Canonicalization: "raw"}
+	if _, err = artifacts.Register(t.Context(), descriptor, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "attempts.json")
+	attempts, err := OpenAttemptRegistry(path, "black-box", 2, artifacts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := AttemptContext{APIVersion: AttemptContextVersion, CampaignID: "campaign", ThreadID: "thread", AttemptID: "attempt-1", Generation: 1, AttemptIndex: 1, Payload: descriptor, Generator: Generator{Kind: "custom-harness"}, FeedbackProfile: "black-box", CreatedAt: time.Now()}
+	if _, err = attempts.Register(baseline); err != nil {
+		t.Fatal(err)
+	}
+	rejected := baseline
+	rejected.AttemptID = "attempt-7"
+	rejected.AttemptIndex = 7
+	rejected.ParentAttemptID = baseline.AttemptID
+	rejected.Generation = 2
+	rejected.Payload.Digest = digest.Bytes([]byte("unavailable"))
+	if _, err = attempts.Register(rejected); err == nil {
+		t.Fatal("unavailable payload accepted")
+	}
+	if _, ok := attempts.Get(rejected.AttemptID); ok {
+		t.Fatal("rejected registration persisted")
+	}
+	corrected := rejected
+	corrected.AttemptID = "attempt-8"
+	corrected.AttemptIndex = 8
+	corrected.Payload = descriptor
+	if _, err = attempts.Register(corrected); err != nil {
+		t.Fatalf("gap consumed quota or required consecutive indices: %v", err)
+	}
+	reopened, err := OpenAttemptRegistry(path, "black-box", 2, artifacts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := reopened.Get(corrected.AttemptID); !ok || got.AttemptIndex != 8 {
+		t.Fatal("persisted gap lost")
+	}
+	extra := baseline
+	extra.AttemptID = "attempt-9"
+	extra.AttemptIndex = 9
+	if _, err = reopened.Register(extra); err == nil {
+		t.Fatal("registered more than two attempts")
+	}
+	// Model the registry prefix retained by a checkpoint: the next campaign index
+	// must still be accepted even though the native maximum has rewound to 1.
+	restored, err := OpenAttemptRegistry(filepath.Join(root, "restored-attempts.json"), "black-box", 2, artifacts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = restored.Register(baseline); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = restored.Register(extra); err != nil {
+		t.Fatalf("campaign index rejected after native prefix rewind: %v", err)
+	}
+}

@@ -79,6 +79,7 @@ func TestCleanupRequiresExitAndStoppedWriters(t *testing.T) {
 	docker, dockerRoot := testdocker.New(t)
 	root := t.TempDir()
 	m := session.Metadata{SchemaVersion: 1, ID: "sess-1-000000000000000000000000", ContainerID: "interceptor-sess-1-000000000000000000000000", Phase: session.Error}
+	m.ContainerID = testdocker.Retired(t, root, m.ID)
 	paths := session.PathsFor(root, m.ID)
 	if err := session.Save(paths.Metadata, m); err != nil {
 		t.Fatal(err)
@@ -137,6 +138,7 @@ func TestCleanupDoesNotFollowReplacedSocketsDirectory(t *testing.T) {
 	docker, _ := testdocker.New(t)
 	root := t.TempDir()
 	m := session.Metadata{SchemaVersion: 1, ID: "sess-1-000000000000000000000000", Phase: session.Stopped}
+	m.ContainerID = testdocker.Retired(t, root, m.ID)
 	paths := session.PathsFor(root, m.ID)
 	if err := session.Save(paths.Metadata, m); err != nil {
 		t.Fatal(err)

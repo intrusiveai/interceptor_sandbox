@@ -32,6 +32,7 @@ Reference and operational guides:
 - [Snapshots and restore](snapshots-and-restore.md)
 - [Evidence and storage](evidence-and-storage.md)
 - [Spool file management and evidence purge](file-management.md)
+- [Docker identity and recovery](docker-identity.md)
 - [Security and trust model](security.md)
 - [Troubleshooting](troubleshooting.md)
 

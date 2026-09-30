@@ -178,16 +178,16 @@ func CleanupSpools(ctx context.Context, root string, m session.Metadata, docker 
 		return err
 	}
 	defer lock.Close()
-	name := m.ContainerID
-	if name == "" {
-		name = "interceptor-" + m.ID
+	bound, containerID, err := docker.ForSession(ctx, root, m.ID)
+	if err != nil {
+		return err
 	}
-	present, err := docker.ContainerPresent(ctx, name)
+	present, err := bound.ContainerPresent(ctx, containerID)
 	if err != nil {
 		return err
 	}
 	if present {
-		running, err := docker.Running(ctx, name)
+		running, err := bound.Running(ctx, containerID)
 		if err != nil {
 			return err
 		}
@@ -231,7 +231,38 @@ func CleanupAbandoned(ctx context.Context, root string, docker ociruntime.Docker
 		return err
 	}
 	for _, m := range sessions {
-		if m.BridgeTransport == "unix" {
+		needsCleanup := false
+		for _, path := range SpoolRoots(session.PathsFor(root, m.ID)) {
+			if _, err := os.Lstat(path); err == nil {
+				needsCleanup = true
+			} else if !os.IsNotExist(err) {
+				return err
+			}
+		}
+		// Check the original daemon even for Unix transport or an empty spool.
+		// A context switch must not allow a second run beside an orphaned target.
+		if _, err := os.Stat(ociruntime.BindingPath(root, m.ID)); err == nil || needsCleanup {
+			bound, id, err := docker.ForSession(ctx, root, m.ID)
+			if err != nil {
+				return err
+			}
+			present, err := bound.ContainerPresent(ctx, id)
+			if err != nil {
+				return err
+			}
+			if present {
+				running, err := bound.Running(ctx, id)
+				if err != nil {
+					return err
+				}
+				if running {
+					return fmt.Errorf("session %s target is still active on its saved Docker daemon; run interceptor stop first", m.ID)
+				}
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		if !needsCleanup {
 			continue
 		}
 		if err := CleanupSpools(ctx, root, m, docker); err != nil {

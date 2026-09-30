@@ -34,20 +34,23 @@ func TestSnapshotCLIMetadataRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	allowances := make(chan snapshot.ByteAllowance, 4)
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" || r.URL.Path != "/v1/snapshots" {
 			http.Error(w, "wrong route", 400)
 			return
 		}
 		var input struct {
-			CampaignID  string `json:"campaign_id"`
-			Description string `json:"description"`
-			Label       string `json:"label"`
+			Maximum     snapshot.ByteAllowance `json:"maximum_committed_bytes,omitzero"`
+			CampaignID  string                 `json:"campaign_id"`
+			Description string                 `json:"description"`
+			Label       string                 `json:"label"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
+		allowances <- input.Maximum
 		h := digest.Bytes([]byte("test"))
 		cp, err := snapshot.NewCheckpoint(source, "", h, h, 1, h, h, 0, 1, input.Label, "test", time.Now(), snapshot.Metadata{CampaignID: input.CampaignID, Description: input.Description})
 		if err == nil {
@@ -66,6 +69,9 @@ func TestSnapshotCLIMetadataRoundTrip(t *testing.T) {
 	var out bytes.Buffer
 	if err := snapshotCommand([]string{"create", source, "--name", "baseline", "--campaign-id", "campaign-1", "--description", "Before branch B — baseline", "--json"}, &out); err != nil {
 		t.Fatal(err)
+	}
+	if got := <-allowances; got.Set {
+		t.Fatal("omitted allowance sent", got)
 	}
 	var created snapshot.Checkpoint
 	if err := json.Unmarshal(out.Bytes(), &created); err != nil {
@@ -89,6 +95,24 @@ func TestSnapshotCLIMetadataRoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "campaign-1") || !strings.Contains(out.String(), created.Description) {
 		t.Fatal(out.String())
+	}
+	for _, value := range []string{"0", "12345"} {
+		out.Reset()
+		if err := snapshotCommand([]string{"create", source, "--maximum-committed-bytes", value, "--json"}, &out); err != nil {
+			t.Fatal(err)
+		}
+		got := <-allowances
+		if !got.Set || value == "0" && got.Value != 0 || value == "12345" && got.Value != 12345 {
+			t.Fatal("flag lost", got)
+		}
+	}
+	if err := snapshotCommand([]string{"create", source, "--maximum-committed-bytes", "-1"}, &out); err == nil {
+		t.Fatal("accepted negative allowance")
+	}
+	select {
+	case <-allowances:
+		t.Fatal("negative allowance dispatched")
+	default:
 	}
 	if err := snapshotCommand([]string{"create", source, "--description", strings.Repeat("x", 4097)}, &out); err == nil {
 		t.Fatal("accepted oversized description")

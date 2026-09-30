@@ -35,6 +35,30 @@ the attempt digest; it does not mutate an existing attempt or profile. A request
 for a profile-disallowed kind reports withheld, without hidden detector details.
 Basic operation status always remains present.
 
+### Operator feedback narrowing
+
+`AttemptContext.feedback_profile` MUST equal the immutable native session profile,
+not Operator's effective harness profile. For a diagnostic session and a black-box
+bundle, register `feedback_profile: diagnostic` and select only `target_output`.
+The native view still reports diagnostic. Operator projects that view to black-box
+and suppresses all other feedback, including legacy aliases and detailed errors.
+Narrowing does not require a new session or a native profile change.
+
+Operator intersects native permissions, the bundle profile, trusted host policy
+and per-attempt selection. Send a nonempty result as an explicit native selected
+list. If the intersection is empty, omit selection at registration and do not
+collect a native observation view or content for that attempt. This omission is
+only a valid registration default; Operator must not subsequently interpret it as
+permission to collect all feedback. It returns its own receipt with no entries
+and explicit withheld/not-requested categories. No new native selection mode is
+introduced.
+
+The [Operator mapping](../../operator_sandbox/schemas/FEEDBACK_CONTRACT.md#native-profile-and-effective-harness-policy)
+is normative for this adapter. Operator recomputes guest category states under
+its effective policy rather than forwarding native states. Native receipt access
+still validates the source session/profile; Operator separately checks its filtered
+entry map and effective policy on every harness read, including after restore.
+
 ## Collect a fixed observation view
 
 After `application.invoke` completes, send native `observation.read` with the

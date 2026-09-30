@@ -4,9 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"os/exec"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,7 +15,11 @@ import (
 )
 
 type Docker struct {
-	Binary string
+	Binary      string
+	Endpoint    string
+	DaemonID    string
+	SessionID   string
+	bindingPath string
 }
 
 type RunConfig struct {
@@ -51,7 +56,7 @@ func (d Docker) executable() string {
 }
 
 func (d Docker) Available(ctx context.Context) error {
-	command := exec.CommandContext(ctx, d.executable(), "version", "--format", "{{.Server.Version}}")
+	command := d.command(ctx, "version", "--format", "{{.Server.Version}}")
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("Docker is unavailable: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -62,7 +67,7 @@ func (d Docker) Build(ctx context.Context, contextDir, tag string) error {
 	if tag == "" || contextDir == "" {
 		return errors.New("Docker build context and tag are required")
 	}
-	command := exec.CommandContext(ctx, d.executable(), "build", "--pull=false", "--tag", tag, contextDir)
+	command := d.command(ctx, "build", "--pull=false", "--tag", tag, contextDir)
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("Docker build failed: %w\n%s", err, output)
 	}
@@ -70,7 +75,7 @@ func (d Docker) Build(ctx context.Context, contextDir, tag string) error {
 }
 
 func (d Docker) ImageID(ctx context.Context, image string) (string, error) {
-	command := exec.CommandContext(ctx, d.executable(), "image", "inspect", "--format", "{{.Id}}", image)
+	command := d.command(ctx, "image", "inspect", "--format", "{{.Id}}", image)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("inspect Docker image: %w: %s", err, strings.TrimSpace(string(output)))
@@ -80,19 +85,6 @@ func (d Docker) ImageID(ctx context.Context, image string) (string, error) {
 		return "", fmt.Errorf("Docker returned invalid image ID %q", value)
 	}
 	return value, nil
-}
-
-func (d Docker) Run(ctx context.Context, config RunConfig) (string, error) {
-	arguments, err := RunArguments(config)
-	if err != nil {
-		return "", err
-	}
-	command := exec.CommandContext(ctx, d.executable(), arguments...)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("start Docker container: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	return strings.TrimSpace(string(output)), nil
 }
 
 func RunArguments(config RunConfig) ([]string, error) {
@@ -175,11 +167,14 @@ func RunArguments(config RunConfig) ([]string, error) {
 }
 
 func (d Docker) Stop(ctx context.Context, id string, timeout time.Duration) error {
+	if _, err := d.inspectOwned(ctx, id); err != nil {
+		return err
+	}
 	seconds := int(timeout.Seconds())
 	if seconds < 1 {
 		seconds = 1
 	}
-	command := exec.CommandContext(ctx, d.executable(), "stop", "--time", strconv.Itoa(seconds), id)
+	command := d.command(ctx, "stop", "--time", strconv.Itoa(seconds), id)
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("stop Docker container: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -187,7 +182,17 @@ func (d Docker) Stop(ctx context.Context, id string, timeout time.Duration) erro
 }
 
 func (d Docker) Remove(ctx context.Context, id string) error {
-	command := exec.CommandContext(ctx, d.executable(), "rm", id)
+	item, err := d.inspectOwned(ctx, id)
+	if err != nil {
+		return err
+	}
+	if item.State.Running {
+		return errors.New("refusing to remove running container")
+	}
+	if err := d.recordExit(); err != nil {
+		return err
+	}
+	command := d.command(ctx, "rm", id)
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("remove Docker container: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -195,16 +200,12 @@ func (d Docker) Remove(ctx context.Context, id string) error {
 }
 
 func (d Docker) Running(ctx context.Context, id string) (bool, error) {
-	command := exec.CommandContext(ctx, d.executable(), "inspect", "--format", "{{.State.Running}}", id)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		return false, fmt.Errorf("inspect Docker container: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	return strings.TrimSpace(string(output)) == "true", nil
+	item, err := d.inspectOwned(ctx, id)
+	return item.State.Running, err
 }
 
 func (d Docker) Logs(ctx context.Context, id string) (string, error) {
-	command := exec.CommandContext(ctx, d.executable(), "logs", id)
+	command := d.command(ctx, "logs", id)
 	var output bytes.Buffer
 	command.Stdout, command.Stderr = &output, &output
 	err := command.Run()
@@ -229,28 +230,67 @@ func sortedKeys(values []string) []string {
 // InterceptorContainers returns live targets, including paused containers.
 // Stopped historical containers and their evidence are left untouched.
 func (d Docker) InterceptorContainers(ctx context.Context) ([]string, error) {
-	command := exec.CommandContext(ctx, d.executable(), "ps", "--filter", "name=^/interceptor-sess-", "--format", "{{.Names}}")
-	output, err := command.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("list Interceptor containers: %w: %s", err, output)
+	if err := d.verifyDaemon(ctx); err != nil {
+		return nil, err
 	}
-	return strings.Fields(string(output)), nil
+	seen := map[string]bool{}
+	// Labels survive renames; the second query catches older, unlabelled targets.
+	for _, filter := range []string{"label=" + SessionLabel, "name=^/interceptor-sess-"} {
+		output, err := d.command(ctx, "ps", "--no-trunc", "--filter", filter, "--format", "{{.ID}}").CombinedOutput()
+		if err != nil {
+			return nil, fmt.Errorf("list Interceptor containers: %w: %s", err, output)
+		}
+		for _, id := range strings.Fields(string(output)) {
+			seen[id] = true
+		}
+	}
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids, nil
 }
 func (d Docker) ContainerPresent(ctx context.Context, id string) (bool, error) {
+	if err := d.verifyDaemon(ctx); err != nil {
+		return false, err
+	}
 	if id == "" {
-		return false, errors.New("container identity is missing")
+		// Only a persisted, never-attempted launch may have no ID.
+		data, err := os.ReadFile(d.bindingPath)
+		var b Binding
+		if err != nil || json.Unmarshal(data, &b) != nil || b.CreateAttempted {
+			return false, errors.New("container identity unconfirmed")
+		}
+		return false, nil
 	}
-	command := exec.CommandContext(ctx, d.executable(), "ps", "--all", "--filter", "name=^/"+id+"$", "--format", "{{.Names}}")
-	output, err := command.CombinedOutput()
+	if !fullID(id) {
+		return false, errors.New("full Docker container ID required")
+	}
+	output, err := d.command(ctx, "ps", "--all", "--no-trunc", "--filter", "id="+id, "--format", "{{.ID}}").CombinedOutput()
 	if err != nil {
-		return false, fmt.Errorf("confirm container removal: %w: %s", err, output)
+		return false, fmt.Errorf("confirm container presence: %w: %s", err, output)
 	}
-	return strings.TrimSpace(string(output)) != "", nil
+	ids := strings.Fields(string(output))
+	if len(ids) == 0 {
+		if !d.exitRecorded() {
+			return false, errors.New("container absent without confirmed exit; termination unconfirmed")
+		}
+		return false, nil
+	}
+	if len(ids) != 1 || ids[0] != id {
+		return false, errors.New("Docker returned mismatched container ID")
+	}
+	_, err = d.inspectOwned(ctx, id)
+	return err == nil, err
 }
 
 // Kill does not wait for cooperative shutdown or a functioning supervisor.
 func (d Docker) Kill(ctx context.Context, id string) error {
-	command := exec.CommandContext(ctx, d.executable(), "kill", "--signal", "KILL", id)
+	if _, err := d.inspectOwned(ctx, id); err != nil {
+		return err
+	}
+	command := d.command(ctx, "kill", "--signal", "KILL", id)
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("kill Docker container: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -303,7 +343,7 @@ func (d Docker) EnsureRemoved(ctx context.Context, id string, immediate bool) er
 // WatchConnection holds a daemon event stream. Losing it is terminal even if
 // Docker later returns with a live-restored container. The caller never reconnects.
 func (d Docker) WatchConnection(ctx context.Context) error {
-	command := exec.CommandContext(ctx, d.executable(), "events", "--format", "{{.Action}}")
+	command := d.command(ctx, "events", "--format", "{{.Action}}")
 	command.WaitDelay = time.Second
 	stdout, err := command.StdoutPipe()
 	if err != nil {

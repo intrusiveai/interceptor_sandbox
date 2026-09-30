@@ -5,6 +5,7 @@ package main
 import (
 	"archive/tar"
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -12,10 +13,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/intrusive-ai/interceptor-sandbox/internal/adaptive"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/digest"
+	evidencepolicy "github.com/intrusive-ai/interceptor-sandbox/internal/evidence"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/localapi"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/session"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/snapshot"
@@ -117,18 +120,33 @@ func counter(root, id string, want int) {
 	must(json.Unmarshal(data, &count))
 	require(count.Count == want, fmt.Sprintf("%s counter=%d want=%d", id, count.Count, want))
 }
-func evidence(output, id string) {
+func evidence(output, id string, maximum int64) {
 	raw, _ := json.Marshal(map[string]string{"api_version": localapi.Version, "campaign_id": campaign, "session_id": id})
 	r, err := client.Post("http://127.0.0.1:8080/v1/evidence", "application/json", bytes.NewReader(raw))
 	must(err)
 	defer r.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(r.Body, localapi.MaxEvidenceBytes+1))
+	require(r.StatusCode == 200, fmt.Sprintf("evidence HTTP %d", r.StatusCode))
+	advertised, err := evidencepolicy.ParseLimit(r.Header.Get("X-Evidence-Max-Bytes"))
 	must(err)
-	require(r.StatusCode == 200, fmt.Sprintf("evidence HTTP %d: %s", r.StatusCode, data))
-	require(int64(len(data)) <= localapi.MaxEvidenceBytes, "archive exceeds bound")
-	require(r.Header.Get("X-Content-SHA256") == digest.Bytes(data), "archive checksum mismatch")
+	maximum = min(maximum, advertised)
+	require(r.ContentLength >= 0 && r.ContentLength <= maximum, "archive exceeds bound or length missing")
+	expected := r.Header.Get("X-Content-SHA256")
+	require(digest.Valid(expected), "archive checksum missing")
+	file, err := os.CreateTemp(output, ".evidence-download-*")
+	must(err)
+	defer func() { _ = file.Close(); _ = os.Remove(file.Name()) }()
+	hash := sha256.New()
+	size, err := io.CopyN(io.MultiWriter(file, hash), r.Body, r.ContentLength)
+	must(err)
+	var extra [1]byte
+	n, err := r.Body.Read(extra[:])
+	require(n == 0 && err == io.EOF, "archive length mismatch")
+	actual := fmt.Sprintf("sha256:%x", hash.Sum(nil))
+	require(expected == actual, "archive checksum mismatch")
+	_, err = file.Seek(0, io.SeekStart)
+	must(err)
 	seen := map[string]bool{}
-	reader := tar.NewReader(bytes.NewReader(data))
+	reader := tar.NewReader(file)
 	var bundle adaptive.EvidenceBundle
 	for {
 		h, err := reader.Next()
@@ -145,20 +163,29 @@ func evidence(output, id string) {
 	require(seen["execution.json"] && seen["state.jsonl"] && seen["events.jsonl"] && seen["manifest.json"], "missing protected evidence members")
 	require(bundle.SessionID == id && bundle.CampaignID == campaign, "evidence scope mismatch")
 	require(bundle.Completeness.State == "complete", fmt.Sprintf("partial evidence: %+v gaps=%v", bundle.Completeness, bundle.CoverageGaps))
-	must(os.WriteFile(filepath.Join(output, id+".tar"), data, 0600))
-	fmt.Printf("Evidence %s: %d bytes, %s, %s\n", id, len(data), bundle.Completeness.State, digest.Bytes(data))
+	must(file.Sync())
+	must(file.Close())
+	must(os.Rename(file.Name(), filepath.Join(output, id+".tar")))
+	fmt.Printf("Evidence %s: %d bytes, %s, %s\n", id, size, bundle.Completeness.State, actual)
 }
 func main() {
 	output := flag.String("output", "", "directory for evidence and result JSON")
+	maximumEvidence := flag.Int64("evidence-max-bytes", evidencepolicy.DefaultMaxBytes, "local evidence archive acceptance ceiling")
 	root := flag.String("data-root", "", "optional host data root to check reference application state rollback")
 	flag.Parse()
+	_, limitErr := evidencepolicy.ParseLimit(strconv.FormatInt(*maximumEvidence, 10))
+	must(limitErr)
 	require(*output != "", "--output is required")
 	must(os.MkdirAll(*output, 0700))
 	attach := localapi.AttachRequest{WorkerInstanceID: "smoke-worker", APIVersion: localapi.Version, CampaignID: campaign, AllowTargetStop: true}
 	var attached struct {
-		Binding localapi.Binding `json:"binding"`
+		Binding          localapi.Binding `json:"binding"`
+		EvidenceMaxBytes int64            `json:"evidence_max_bytes"`
 	}
 	must(json.Unmarshal(success(post("/v1/attach", attach)), &attached))
+	_, limitErr = evidencepolicy.ParseLimit(strconv.FormatInt(attached.EvidenceMaxBytes, 10))
+	must(limitErr)
+	limit := min(*maximumEvidence, attached.EvidenceMaxBytes)
 	first := attached.Binding
 	success(post("/v1/attach", attach))
 	other := attach
@@ -184,7 +211,8 @@ func main() {
 	restore := localapi.LifecycleRequest{WorkerInstanceID: "smoke-worker", RunRevision: first.RunRevision, APIVersion: localapi.Version, CampaignID: campaign, SessionID: first.SessionID, OperationID: "restore-once", Operation: "snapshot.restore", CheckpointID: checkpoint.ID}
 	original := post("/v1/lifecycle", restore)
 	var restored struct {
-		Binding localapi.Binding `json:"binding"`
+		Binding          localapi.Binding `json:"binding"`
+		EvidenceMaxBytes int64            `json:"evidence_max_bytes"`
 	}
 	must(json.Unmarshal(success(original), &restored))
 	next := restored.Binding
@@ -198,8 +226,8 @@ func main() {
 	counter(*root, next.SessionID, 2)
 	success(post("/v1/lifecycle", localapi.LifecycleRequest{WorkerInstanceID: "smoke-worker", RunRevision: next.RunRevision, APIVersion: localapi.Version, CampaignID: campaign, SessionID: next.SessionID, OperationID: "stop-final", Operation: "session.stop"}))
 	checkInventory()
-	evidence(*output, first.SessionID)
-	evidence(*output, next.SessionID)
+	evidence(*output, first.SessionID, limit)
+	evidence(*output, next.SessionID, limit)
 	result := map[string]any{"passed": true, "source_session_id": first.SessionID, "restored_session_id": next.SessionID, "checkpoint_id": checkpoint.ID, "run_revision": next.RunRevision, "checks": []string{"campaign binding", "idempotent attach", "native artifact/attempt/invoke/observation", "snapshot campaign/description", "inventory/inspect across restore and stop", "filesystem rollback 2 -> 1", "fresh session and revision", "idempotent restore", "stale-session rejection", "post-restore invoke", "confirmed target stop", "complete evidence for both sessions"}}
 	raw, err := json.MarshalIndent(result, "", "  ")
 	must(err)

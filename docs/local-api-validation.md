@@ -145,3 +145,81 @@ Remote transport, authentication, multiple simultaneous instances and automatic
 service recovery are deliberately outside the accepted MVP scope. Rebuild wrapper
 images when deploying the updated supervisor/builder; old images do not acquire
 these changes automatically.
+
+## Terminal execution status (2026-09-18)
+
+The host closes API execution when native metadata records an error, the target
+exits unexpectedly, or the model connector fails. The instance ledger and status
+response retain the first failure's session ID, reason and UTC observation time.
+
+Validation for this change:
+
+- Full Go tests and `go vet ./...` passed.
+- Race-checked host/runtime and API tests cover native limits, unexpected exits,
+  connector failures, clean planned stop, native error during planned stop,
+  incomplete stop finalization, and cleanup/ledger failures.
+- Restore tests cover rejected preflight racing with failure, replacement failure
+  before binding publication, and delayed callbacks from a previous target.
+- A blocked fault callback does not prevent the independent Docker kill. Failure
+  notification also bypasses the API mutation gate. Later successful cleanup does
+  not erase the original failure state.
+- On macOS 26.6.2 arm64 with local Docker Desktop, the reference application's
+  native `WALL_TIME_LIMIT` autonomously produced `phase: error`, `closed: true` and
+  the exact reason in `/v1/status` and the persisted ledger. Only status polling
+  followed attachment; no failed experiment request was needed to update status.
+  The API stayed available, spools were removed, and evidence export succeeded.
+- The real-Docker healthy restore/attempt/stop/export smoke test also passed;
+  planned completion retained `phase: stopped` with no failure object.
+
+These checks exercise Interceptor's host reporting path; they do not qualify an
+Operator launcher or constitute a native Linux integration run.
+
+## Snapshot caller byte allowance (2026-09-18)
+
+The typed `snapshot.create` request now carries optional
+`maximum_committed_bytes`. The supervisor checks it against current native
+remaining bytes under the snapshot lock and rejects oversized candidates before
+checkpoint commitment. Operator's campaign defaults and accounting rules are
+specified separately; this change does not implement Operator's future ledger.
+
+Validation for this change:
+
+- `go test ./...` and `go vet ./...` passed.
+- Race-enabled tests passed for `internal/sandboxd`, `internal/snapshot` and
+  `cmd/interceptor`.
+- Real gateway/supervisor tests over Unix sockets and file spool create snapshots
+  from a temporary filesystem with an independently paused child process. They
+  cover zero, exact boundary, caller/native allowances in both orders, omitted
+  allowance, and continued caller enforcement after simulated native-counter
+  rollback. Rejected candidates leave no checkpoint or snapshot counter charge.
+- Identical request replay returns the original checkpoint without a second
+  charge; changing only its allowance conflicts. CLI transport tests preserve
+  omission versus explicit zero and reject negative input before dispatch.
+- Parser/arithmetic tests cover null, invalid numeric types/ranges and saturating
+  native-limit arithmetic.
+
+These are host-side tests of the real handlers/transports; this change did not
+rerun Docker qualification or exercise an actual restore in its new quota test.
+Updated supervisor images must be rebuilt to expose and enforce the new field.
+
+## Explicit injection cleanup support (2026-09-18)
+
+Operator's new `engine.injection_delete` contract addresses a known attempt
+receipt/action in the current campaign target. Interceptor already permits
+campaign-scoped deletion of restored injections without the original arm record.
+Its handler now distinguishes confirmed absence (`404 not_found`) from journal
+failure (`500 injection_delete_failed`), enabling safe host normalization of
+already-absent cleanup.
+
+- Full `go test ./...` and `go vet ./...` passed.
+- Race-enabled `internal/sandboxd` and `internal/injection` tests passed.
+- The restored-state test verifies cross-campaign rejection, deletion under a
+  different worker/revision, and repeated deletion returning confirmed absence.
+- A real deletion-handler test with a closed journal verifies that storage failure
+  returns 500, retains the injection and does not advance the native revision.
+- Operator's 28 structural cleanup fixtures and all eight schema definitions
+  validate. These checks do not implement its pending handle-resolution client or
+  qualify a running Attack Harness cleanup tool. Shared semantic conformance remains a gate
+  before Operator/Attack Harness runtime integration.
+
+Rebuild supervisor images when deploying the deletion error distinction.

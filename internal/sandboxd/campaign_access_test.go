@@ -2,6 +2,8 @@ package sandboxd
 
 import (
 	"encoding/json"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -73,8 +75,36 @@ func TestRestoredInjectionCleanupUsesCampaignAccess(t *testing.T) {
 	if len(target.injections.ListPublic()) != 0 {
 		t.Fatal("injection survived cleanup")
 	}
+	if got := nativeCallAs(t, g, target, "delete-again", "injection.delete", injectionLookup{InjectionID: definition.ID}, nil, "campaign", "fifth-worker", 5); got.Status != 404 || !strings.Contains(string(got.Body), `"code":"not_found"`) {
+		t.Fatalf("missing injection must be distinguishable: %+v %s", got, got.Body)
+	}
 	record, ok := target.execution.Lookup("delete")
 	if !ok || record.Request.WorkerInstanceID != "fourth-worker" || record.Request.RunRevision != 4 {
 		t.Fatal("cleanup attribution lost")
+	}
+}
+
+// A write-ahead journal failure is not evidence that the injection is absent.
+// Exercise the real deletion handler directly so admission journaling cannot
+// intercept the injected storage failure before the deletion is reached.
+func TestInjectionDeleteJournalFailureIsNotAbsence(t *testing.T) {
+	s, _ := nativeOperationServer(t)
+	definition := injection.Definition{ID: "retained", Surface: "service_response", Mode: "simulation", Scope: "standing", Enabled: true, Selector: injection.Selector{Service: "c2", Path: "/collect", CallOrdinal: "first"}, Placement: injection.Placement{Operation: "replace"}, Payload: json.RawMessage(`"payload"`)}
+	if err := s.injections.Arm(definition, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	revision := s.operationRevision()
+	request := httptest.NewRequest("DELETE", "/v1/injections/retained", nil)
+	request.SetPathValue("id", "retained")
+	response := httptest.NewRecorder()
+	s.deleteInjectionHandler(response, request)
+	if response.Code != 500 || !strings.Contains(response.Body.String(), `"code":"injection_delete_failed"`) {
+		t.Fatalf("storage failure misclassified: %d %s", response.Code, response.Body)
+	}
+	if len(s.injections.ListPublic()) != 1 || s.operationRevision() != revision {
+		t.Fatal("failed deletion removed injection or advanced revision")
 	}
 }
