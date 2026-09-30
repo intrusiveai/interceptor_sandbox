@@ -60,3 +60,6 @@ need them when configuring or diagnosing the sandbox. Each guide introduces
 those terms in plain language before relying on them.
 
 - [Local Operator integration and lifecycle API](local-api.md) — current same-host MVP contract.
+
+- [Host authentication](cloud-authentication.md): shared model/store selectors, GitHub OIDC and required permissions.
+- [Host lifetime](host-lifetime.md): standard foreground execution and optional service templates.

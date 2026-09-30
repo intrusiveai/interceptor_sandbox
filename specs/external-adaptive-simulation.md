@@ -807,9 +807,9 @@ The initial backend union is:
 
 | `backend_kind` | Read operation and strict locator | Production bootstrap authentication |
 |---|---|---|
-| `aws-secrets-manager` | `GetSecretValue` for one exact secret ARN or name, region, and optional version ID or stage | EC2 instance profile, ECS task role, or EKS workload identity through an AWS SDK credential provider constrained by deployment policy |
-| `azure-key-vault` | `GetSecret` for one exact HTTPS vault origin, secret name, and optional version | Azure managed identity or workload identity with interactive and static-client-secret fallbacks disabled |
-| `gcp-secret-manager` | `AccessSecretVersion` for one exact project, secret, and numeric version or reviewed alias | Compute/GKE attached service account or Workload Identity Federation through constrained application-default credentials |
+| `aws-secrets-manager` | `GetSecretValue` for one exact secret ARN or name, region, and optional version ID or stage | Workload/instance/container role, explicit AWS named profile, or explicit AWS environment identity |
+| `azure-key-vault` | `GetSecret` for one exact HTTPS vault origin, secret name, and optional version | Explicit workload identity, managed identity, Azure CLI login or client-secret service principal |
+| `gcp-secret-manager` | `AccessSecretVersion` for one exact project, secret, and numeric version or reviewed alias | Workload Identity Federation, attached service account, or explicit local/service-account Google ADC |
 | `hashicorp-vault` | Read one exact KV v2 namespace, mount, path, version, and field from a fixed HTTPS origin | Vault Agent or Vault Proxy owns environment-appropriate auto-auth and renewal; Interceptor uses a protected token sink or fixed local authenticated proxy |
 
 Cloud stores use official SDK endpoint resolution for the configured cloud and
@@ -820,8 +820,8 @@ profiles never disable TLS validation.
 
 The resolver exposes read only. It cannot create, update, rotate, list, or
 delete secrets, and its bootstrap identity receives only per-secret read
-permissions. Cloud stores bootstrap from ambient instance or workload identity,
-not static access keys placed in the controller environment. Vault delegates
+permissions. Cloud stores MUST support the explicit bootstrap selectors in
+[host authentication](../docs/cloud-authentication.md), independently of model authentication. Vault delegates
 its many platform authentication methods to the separately administered Agent
 or Proxy rather than reimplementing them in Interceptor.
 
@@ -841,10 +841,10 @@ one immutable value. Disable credential-bearing core dumps, centrally redact
 errors and telemetry, and fail closed on store outage, authorization failure,
 disabled versions, malformed values, excess size, or TLS failure.
 
-The existing `--model-api-key-env` behavior may remain as an explicit local
-development compatibility source. It is disabled by default in production
-mode, emits a visible warning when enabled, and does not satisfy production
-conformance. Secret values are never accepted through a Blueprint, CLI
+Model keys SHOULD use a host secret store. Explicit `--provider-auth api-key-env`
+with a named `--model-api-key-env` MUST also be supported in production and
+foreground/service modes. The implicit environment compatibility path remains
+nonproduction-only. Secret values are never accepted through a Blueprint, CLI
 argument, session API, Operations request, or inline controller profile.
 
 Secret-store configuration and credential bindings are not target capabilities.
@@ -968,8 +968,9 @@ Do not put AEF client logic or attack-engine behavior in Interceptor.
 - Rotation is observed only at a defined resolution boundary; protected audit
   records identify the credential binding and opaque backend version without
   storing a locator, value, or unkeyed digest.
-- Production mode rejects secret values from environment variables, CLI
-  arguments, Blueprints, session APIs, and Operations messages.
+- Production mode MUST permit explicitly selected host environment credentials.
+  It MUST reject secret values in CLI arguments, Blueprints, session APIs and
+  Operations messages; environment key lookup MUST use `api-key-env`.
 
 ## 19. Non-goals
 
@@ -1041,3 +1042,13 @@ campaign enforcement stays in Operator and the continuing harness. Exact native
 operation retries use the existing durable operation ID/body and saved result.
 No Interceptor RPC, ownership check or native attempt version change is introduced
 for harness-local numbering or loop limits.
+
+
+### Execution and identity alignment
+
+Interceptor MUST default to foreground `run` and MAY use the same command under
+an explicitly installed, non-restarting systemd/LaunchAgent service. Both modes
+MUST use identical credentials and lifecycle semantics; a service has its own
+configured account/environment. The [shared host authentication contract](../docs/cloud-authentication.md)
+is authoritative for model and store selectors, portable credential files,
+GitHub OIDC bootstrap, required model/secret permissions and renewal limits.

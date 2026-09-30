@@ -232,14 +232,14 @@ func BuildCapabilityManifest(blueprint *environment.Blueprint, environmentDigest
 		m.Oracles = append(m.Oracles, oracle.Kind)
 	}
 	m.ModelProviders = []ModelProviderCapability{
-		{Kind: bridge.ProviderOpenAIChat, Codecs: []string{bridge.CodecOpenAIChat}, AuthenticationModes: []string{"api-key"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
-		{Kind: bridge.ProviderOpenAIResponses, Codecs: []string{bridge.CodecOpenAIResponses}, AuthenticationModes: []string{"api-key"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
-		{Kind: bridge.ProviderBedrockConverse, Codecs: []string{bridge.CodecBedrockConverse}, AuthenticationModes: []string{"workload-identity"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
-		{Kind: bridge.ProviderLiteLLM, Codecs: []string{bridge.CodecOpenAIChat, bridge.CodecOpenAIResponses}, AuthenticationModes: []string{"none", "api-key"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
-		{Kind: bridge.ProviderAnthropicMessages, Codecs: []string{bridge.CodecAnthropicMessages}, AuthenticationModes: []string{"api-key", "workload-token"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
-		{Kind: bridge.ProviderGeminiAPI, Codecs: []string{bridge.CodecGoogleGenerateContent}, AuthenticationModes: []string{"api-key"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
-		{Kind: bridge.ProviderVertexGemini, Codecs: []string{bridge.CodecGoogleGenerateContent}, AuthenticationModes: []string{"workload-identity"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
-		{Kind: bridge.ProviderAzureOpenAI, Codecs: []string{bridge.CodecOpenAIChat, bridge.CodecOpenAIResponses}, AuthenticationModes: []string{"api-key", "workload-identity"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
+		{Kind: bridge.ProviderOpenAIChat, Codecs: []string{bridge.CodecOpenAIChat}, AuthenticationModes: []string{"api-key", "api-key-env"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
+		{Kind: bridge.ProviderOpenAIResponses, Codecs: []string{bridge.CodecOpenAIResponses}, AuthenticationModes: []string{"api-key", "api-key-env"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
+		{Kind: bridge.ProviderBedrockConverse, Codecs: []string{bridge.CodecBedrockConverse}, AuthenticationModes: []string{"workload-identity", "aws-profile", "aws-environment"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
+		{Kind: bridge.ProviderLiteLLM, Codecs: []string{bridge.CodecOpenAIChat, bridge.CodecOpenAIResponses}, AuthenticationModes: []string{"none", "api-key", "api-key-env"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
+		{Kind: bridge.ProviderAnthropicMessages, Codecs: []string{bridge.CodecAnthropicMessages}, AuthenticationModes: []string{"api-key", "api-key-env", "workload-token"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
+		{Kind: bridge.ProviderGeminiAPI, Codecs: []string{bridge.CodecGoogleGenerateContent}, AuthenticationModes: []string{"api-key", "api-key-env"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
+		{Kind: bridge.ProviderVertexGemini, Codecs: []string{bridge.CodecGoogleGenerateContent}, AuthenticationModes: []string{"workload-identity", "google-adc", "api-key", "api-key-env"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
+		{Kind: bridge.ProviderAzureOpenAI, Codecs: []string{bridge.CodecOpenAIChat, bridge.CodecOpenAIResponses}, AuthenticationModes: []string{"api-key", "api-key-env", "workload-identity", "azure-cli", "azure-client-secret"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
 	}
 	sort.Strings(m.FeedbackProfiles)
 	sort.Slice(m.Operations, func(i, j int) bool { return m.Operations[i].ID < m.Operations[j].ID })

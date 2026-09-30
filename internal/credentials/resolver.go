@@ -62,7 +62,7 @@ func Load(path string) (Config, error) {
 func Validate(config Config) error {
 	profiles := map[string]SecretStoreProfile{}
 	for _, profile := range config.Profiles {
-		if profile.APIVersion != StoreProfileVersion || profile.Kind != "SecretStoreProfile" || !stableID.MatchString(profile.ID) {
+		if (profile.APIVersion != StoreProfileVersion && profile.APIVersion != "operator.dev/secret-store-profile/v1alpha1") || profile.Kind != "SecretStoreProfile" || !stableID.MatchString(profile.ID) {
 			return fmt.Errorf("secret-store profile %q has invalid identity or schema", profile.ID)
 		}
 		switch profile.BackendKind {
@@ -88,20 +88,29 @@ func Validate(config Config) error {
 		if profile.TimeoutSeconds < 1 || profile.TimeoutSeconds > 60 || profile.MaxValueBytes < 1 || profile.MaxValueBytes > 1<<20 || profile.MaxCacheTTLSeconds < 0 || profile.MaxCacheTTLSeconds > 3600 {
 			return fmt.Errorf("profile %q has an out-of-bounds timeout, value, or cache limit", profile.ID)
 		}
+		if profile.AWSProfile != "" && (profile.BackendKind != "aws-secrets-manager" || !ValidAWSProfile(profile.AWSProfile)) {
+			return errors.New("invalid AWS named profile selection")
+		}
+		if profile.BackendKind == "aws-secrets-manager" && ((profile.Authentication == "aws-profile" && profile.AWSProfile == "") || (profile.AWSProfile != "" && profile.Authentication != "" && profile.Authentication != "aws-profile")) {
+			return errors.New("conflicting AWS authentication selection")
+		}
+		if !ValidStoreAuthentication(profile.BackendKind, profile.Authentication) {
+			return errors.New("invalid secret-store authentication selection")
+		}
 		if profile.BackendKind == "aws-secrets-manager" && profile.Region == "" {
 			return fmt.Errorf("AWS profile %q requires region", profile.ID)
 		}
 		if profile.BackendKind == "azure-key-vault" && !strings.HasPrefix(profile.VaultURL, "https://") {
 			return fmt.Errorf("Azure profile %q requires an HTTPS vault_url", profile.ID)
 		}
-		if profile.BackendKind == "hashicorp-vault" && (!strings.HasPrefix(profile.VaultURL, "https://") || profile.VaultTokenFile == "") {
+		if profile.BackendKind == "hashicorp-vault" && (!strings.HasPrefix(profile.VaultURL, "https://") || (profile.VaultProxy && profile.VaultTokenFile != "" || !profile.VaultProxy && profile.VaultTokenFile == "")) {
 			return fmt.Errorf("Vault profile %q requires an HTTPS vault_url and token file", profile.ID)
 		}
 		profiles[profile.ID] = profile
 	}
 	seen := map[string]bool{}
 	for _, ref := range config.Credentials {
-		if ref.APIVersion != CredentialRefVersion || ref.Kind != "HostCredentialRef" || !stableID.MatchString(ref.CredentialID) {
+		if (ref.APIVersion != CredentialRefVersion && ref.APIVersion != "operator.dev/host-credential-ref/v1alpha1") || ref.Kind != "HostCredentialRef" || !stableID.MatchString(ref.CredentialID) {
 			return fmt.Errorf("credential %q has invalid identity or schema", ref.CredentialID)
 		}
 		if seen[ref.CredentialID] {

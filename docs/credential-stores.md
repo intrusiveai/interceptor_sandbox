@@ -82,8 +82,21 @@ dependent launch. Session/campaign purge preserves this installation-wide audit;
 Credential configuration and secret-store contents are preserved. See the accepted
 [file-management requirements](file-management.md) for purge details.
 
-`--model-api-key-env` remains a local-development
-compatibility sources. `--production` rejects them. Bedrock, Vertex Gemini, and Azure OpenAI can instead
+`--provider-auth api-key-env --model-api-key-env NAME` explicitly selects a host
+environment key in either production or development. The implicit compatibility
+path remains disabled with `--production`. Bedrock, Vertex Gemini, and Azure OpenAI can instead
 use direct workload identity; use `--provider-auth workload-identity` for
 Vertex or Azure. No secret-store profile or resolution event is included in a
 CapabilityManifest or EvidenceBundle.
+
+
+## Aligned host identities
+
+The [common authentication contract](cloud-authentication.md) defines the supported
+selectors and required permissions. Store profiles accept `authentication`, AWS
+profiles additionally accept `aws_profile`, and Vault supports `vault_proxy` or a
+private `vault_token_file` refreshed on uncached reads. Both Operator and Interceptor
+credential schema namespaces are accepted, so a single private configuration can
+be shared. Select `azure-cli` for `azure/login` OIDC, `aws-environment` for the AWS
+OIDC action's exported session, and `workload-identity`/`google-adc` for Google's
+external-account credentials file. A model API key never substitutes for store login.

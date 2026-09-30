@@ -10,14 +10,15 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/credentials"
 )
 
 type BedrockProviderConfig struct {
-	Region  string
-	Profile string
+	Authentication string
+	Region         string
+	Profile        string
 }
 
 type BedrockConverseAPI interface {
@@ -29,14 +30,7 @@ type bedrockConverseProvider struct{ client BedrockConverseAPI }
 // LoadBedrockConverseProvider delegates authentication to the AWS SDK default
 // configuration chain. No AWS credential is copied into the sandbox.
 func LoadBedrockConverseProvider(ctx context.Context, config BedrockProviderConfig) (ModelProvider, error) {
-	options := []func(*awsconfig.LoadOptions) error{}
-	if config.Region != "" {
-		options = append(options, awsconfig.WithRegion(config.Region))
-	}
-	if config.Profile != "" {
-		options = append(options, awsconfig.WithSharedConfigProfile(config.Profile))
-	}
-	loaded, err := awsconfig.LoadDefaultConfig(ctx, options...)
+	loaded, err := credentials.AWSIdentityConfig(ctx, config.Region, config.Profile, config.Authentication)
 	if err != nil {
 		return nil, fmt.Errorf("load AWS configuration: %w", err)
 	}

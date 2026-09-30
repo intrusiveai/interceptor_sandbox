@@ -243,7 +243,7 @@ func runCommand(arguments []string, stdout io.Writer) error {
 	awsRegion := flags.String("aws-region", "", "AWS Region override for bedrock-converse")
 	awsProfile := flags.String("aws-profile", "", "AWS shared configuration profile for bedrock-converse")
 	providerAPIVersion := flags.String("provider-api-version", "", "pinned provider API version (Anthropic only in this release)")
-	providerAuthMode := flags.String("provider-auth", "", "provider authentication mode: none, api-key, workload-token, or workload-identity")
+	providerAuthMode := flags.String("provider-auth", "", "provider authentication selector; see docs/cloud-authentication.md")
 	var allowedModels stringList
 	flags.Var(&allowedModels, "allow-model", "allowed model identifier (repeatable)")
 	if err := flags.Parse(arguments); err != nil {
@@ -261,16 +261,6 @@ func runCommand(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if *production && strings.TrimSpace(*awsProfile) != "" {
-		return errors.New("--aws-profile is a development credential source and is disabled in production mode")
-	}
-	apiKey, err := resolveProviderOptions(context.Background(), *providerType, *providerURL, *credentialEnvironment, *credentialConfig, *credentialID, *providerAuthMode, *production)
-	if err != nil {
-		return err
-	}
-	if *credentialID == "" && apiKey != "" {
-		fmt.Fprintln(stdout, "warning: using a development-only environment credential; use --production with a host credential ID or workload identity for production")
-	}
 	ctx, cancel := context.WithCancelCause(context.Background())
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
@@ -287,6 +277,18 @@ func runCommand(arguments []string, stdout io.Writer) error {
 		case <-ctx.Done():
 		}
 	}()
+	if *awsProfile != "" {
+		if *providerType != bridge.ProviderBedrockConverse || (*providerAuthMode != "" && *providerAuthMode != "aws-profile") {
+			return errors.New("AWS profile conflicts with provider authentication")
+		}
+		*providerAuthMode = "aws-profile"
+	} else if *providerAuthMode == "aws-profile" {
+		return errors.New("aws-profile requires --aws-profile")
+	}
+	apiKey, err := resolveProviderOptions(ctx, *providerType, *providerURL, *credentialEnvironment, *credentialConfig, *credentialID, *providerAuthMode, *production)
+	if err != nil {
+		return err
+	}
 	err = localapi.Run(ctx, hostrun.Config{
 		EnvironmentDirectory: *directory,
 		ProviderType:         *providerType, ProviderURL: *providerURL, ProviderAPIKey: apiKey,
@@ -307,7 +309,7 @@ func resolveProviderOptions(ctx context.Context, providerType, providerURL, cred
 	providerType = strings.ToLower(strings.TrimSpace(providerType))
 	switch providerType {
 	case bridge.ProviderBedrockConverse:
-		if providerURL != "" || credentialEnvironment != "" || credentialConfig != "" || credentialID != "" || authMode != "" && authMode != "workload-identity" {
+		if providerURL != "" || credentialEnvironment != "" || credentialConfig != "" || credentialID != "" || authMode != "" && authMode != "workload-identity" && authMode != "aws-profile" && authMode != "aws-environment" {
 			return "", errors.New("bedrock-converse uses the host AWS SDK identity and accepts no HTTP credential or endpoint options")
 		}
 		return "", nil
@@ -328,8 +330,15 @@ func resolveProviderOptions(ctx context.Context, providerType, providerURL, cred
 			authMode = "api-key"
 		}
 	}
-	apiKeyProvider := providerType == bridge.ProviderOpenAIChat || providerType == bridge.ProviderOpenAIResponses || providerType == bridge.ProviderLiteLLM || providerType == bridge.ProviderAnthropicMessages || providerType == bridge.ProviderGeminiAPI || providerType == bridge.ProviderAzureOpenAI
-	validAuth := apiKeyProvider && authMode == "api-key" || providerType == bridge.ProviderLiteLLM && authMode == "none" || providerType == bridge.ProviderAnthropicMessages && authMode == "workload-token" || (providerType == bridge.ProviderVertexGemini || providerType == bridge.ProviderAzureOpenAI) && authMode == "workload-identity"
+	if authMode == "secret-store" {
+		authMode = "api-key"
+		if credentialID == "" {
+			return "", errors.New("secret-store requires --model-credential-id")
+		}
+	}
+	apiKeyProvider := providerType == bridge.ProviderOpenAIChat || providerType == bridge.ProviderOpenAIResponses || providerType == bridge.ProviderLiteLLM || providerType == bridge.ProviderAnthropicMessages || providerType == bridge.ProviderGeminiAPI || providerType == bridge.ProviderAzureOpenAI || providerType == bridge.ProviderVertexGemini
+	validAuth := apiKeyProvider && (authMode == "api-key" || authMode == "api-key-env") || providerType == bridge.ProviderLiteLLM && authMode == "none" || providerType == bridge.ProviderAnthropicMessages && authMode == "workload-token" || (providerType == bridge.ProviderVertexGemini || providerType == bridge.ProviderAzureOpenAI) && authMode == "workload-identity"
+	validAuth = validAuth || providerType == bridge.ProviderVertexGemini && authMode == "google-adc" || providerType == bridge.ProviderAzureOpenAI && (authMode == "azure-cli" || authMode == "azure-client-secret")
 	if !validAuth {
 		return "", fmt.Errorf("authentication mode %q is invalid for provider %s", authMode, providerType)
 	}
@@ -339,11 +348,17 @@ func resolveProviderOptions(ctx context.Context, providerType, providerURL, cred
 		}
 		return "", nil
 	}
-	if authMode == "workload-identity" {
+	if authMode == "workload-identity" || authMode == "google-adc" || authMode == "azure-cli" || authMode == "azure-client-secret" {
 		if credentialConfig != "" || credentialID != "" || credentialEnvironment != "" {
 			return "", errors.New("workload identity may not be combined with a stored or environment credential")
 		}
 		return "", nil
+	}
+	if credentialEnvironment != "" && credentialID != "" {
+		return "", errors.New("choose a stored credential or environment variable, not both")
+	}
+	if authMode == "api-key-env" && (credentialEnvironment == "" || credentialID != "" || credentialConfig != "") {
+		return "", errors.New("api-key-env requires only --model-api-key-env")
 	}
 	if credentialID != "" {
 		if credentialConfig == "" {
@@ -354,17 +369,17 @@ func resolveProviderOptions(ctx context.Context, providerType, providerURL, cred
 	if credentialConfig != "" {
 		return "", errors.New("--credential-config requires --model-credential-id")
 	}
-	if production {
+	if production && authMode != "api-key-env" {
 		return "", errors.New("environment-based provider credentials are disabled in production mode; use --model-credential-id")
 	}
-	if credentialEnvironment == "" && (providerType == bridge.ProviderLiteLLM || providerType == bridge.ProviderVertexGemini) {
+	if credentialEnvironment == "" && providerType == bridge.ProviderLiteLLM {
 		return "", nil
 	}
 	if credentialEnvironment == "" {
 		switch providerType {
 		case bridge.ProviderAnthropicMessages:
 			credentialEnvironment = "ANTHROPIC_API_KEY"
-		case bridge.ProviderGeminiAPI:
+		case bridge.ProviderGeminiAPI, bridge.ProviderVertexGemini:
 			credentialEnvironment = "GEMINI_API_KEY"
 		case bridge.ProviderAzureOpenAI:
 			credentialEnvironment = "AZURE_OPENAI_API_KEY"
@@ -373,7 +388,7 @@ func resolveProviderOptions(ctx context.Context, providerType, providerURL, cred
 		}
 	}
 	apiKey := os.Getenv(credentialEnvironment)
-	if apiKey == "" {
+	if apiKey == "" || len(apiKey) > 1<<20 || strings.ContainsAny(apiKey, "\x00\r\n") {
 		return "", fmt.Errorf("provider credential environment variable %s is empty", credentialEnvironment)
 	}
 	return apiKey, nil

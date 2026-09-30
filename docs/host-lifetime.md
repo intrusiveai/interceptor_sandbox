@@ -1,6 +1,9 @@
 # Host lifetime and macOS sleep prevention
 
-`interceptor run` owns the target and its local API. On macOS it runs as the
+`interceptor run` MUST be the standard foreground execution path and owns the
+target and its local API. It MUST inherit its caller's authentication environment.
+Service-manager execution MUST remain optional; a service runs this same command
+with credentials configured for its service account. On macOS it runs as the
 logged-in Docker Desktop user and automatically starts:
 
 ```text
@@ -60,3 +63,22 @@ service, root helper or power-preference change is needed.
 Linux runs the existing foreground/service lifecycle without a caffeinate helper.
 The Docker interruption, signal, terminal closure and cleanup rules apply to both
 platforms. See [validation](host-lifetime-validation.md) for exercised behavior.
+
+## Optional Linux systemd service
+
+The [user-unit template](../examples/services/interceptor.service) MUST be installed
+only by explicit administrator action. Replace its absolute executable/environment
+paths and model selector, then use `systemctl --user daemon-reload` and
+`systemctl --user start interceptor.service`. Stop it with
+`systemctl --user stop interceptor.service`. Do not enable automatic startup or
+change `Restart=no`. Configure credentials in the service account separately;
+terminal exports MUST NOT be assumed to propagate to the manager.
+
+The [LaunchAgent template](../examples/services/ai.intrusive.interceptor.plist)
+likewise uses explicit bootstrap/kickstart and `KeepAlive=false`, `RunAtLoad=false`.
+After replacing paths and model, bootstrap it into `gui/<uid>` with `launchctl`,
+then explicitly kickstart `gui/<uid>/ai.intrusive.interceptor`. Bootout stops/removes
+that registration. Templates MUST NOT contain credentials or shell interpolation.
+The existing signal, target cleanup and evidence behavior applies in both modes.
+Foreground `run` remains the standard GitHub runner path; see
+[authentication setup](cloud-authentication.md).

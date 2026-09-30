@@ -1,0 +1,10 @@
+# Copy to ~/.config/systemd/user/interceptor.service and replace absolute paths/model.
+[Unit]
+Description=Interceptor Sandbox (explicit start only)
+[Service]
+Type=exec
+ExecStart=/absolute/bin/interceptor run --environment /absolute/environment --model-provider bedrock-converse --provider-auth aws-profile --aws-profile deployment --aws-region us-east-2 --allow-model MODEL
+Restart=no
+UMask=0077
+TimeoutStopSec=90s
+# Credentials/login caches must belong to this service account.

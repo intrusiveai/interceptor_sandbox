@@ -347,6 +347,7 @@
       ],
       "authentication_modes": [
         "api-key",
+        "api-key-env",
         "workload-token"
       ],
       "model_selection": "exact-host-allowlist",
@@ -367,7 +368,10 @@
       ],
       "authentication_modes": [
         "api-key",
-        "workload-identity"
+        "api-key-env",
+        "workload-identity",
+        "azure-cli",
+        "azure-client-secret"
       ],
       "model_selection": "exact-host-allowlist",
       "text": true,
@@ -385,7 +389,9 @@
         "aws_bedrock_converse"
       ],
       "authentication_modes": [
-        "workload-identity"
+        "workload-identity",
+        "aws-profile",
+        "aws-environment"
       ],
       "model_selection": "exact-host-allowlist",
       "text": true,
@@ -403,7 +409,8 @@
         "google_generate_content"
       ],
       "authentication_modes": [
-        "api-key"
+        "api-key",
+        "api-key-env"
       ],
       "model_selection": "exact-host-allowlist",
       "text": true,
@@ -423,7 +430,8 @@
       ],
       "authentication_modes": [
         "none",
-        "api-key"
+        "api-key",
+        "api-key-env"
       ],
       "model_selection": "exact-host-allowlist",
       "text": true,
@@ -441,7 +449,8 @@
         "openai_chat_completions"
       ],
       "authentication_modes": [
-        "api-key"
+        "api-key",
+        "api-key-env"
       ],
       "model_selection": "exact-host-allowlist",
       "text": true,
@@ -459,7 +468,8 @@
         "openai_responses"
       ],
       "authentication_modes": [
-        "api-key"
+        "api-key",
+        "api-key-env"
       ],
       "model_selection": "exact-host-allowlist",
       "text": true,
@@ -477,7 +487,10 @@
         "google_generate_content"
       ],
       "authentication_modes": [
-        "workload-identity"
+        "workload-identity",
+        "google-adc",
+        "api-key",
+        "api-key-env"
       ],
       "model_selection": "exact-host-allowlist",
       "text": true,
@@ -508,5 +521,5 @@
     "maximum_invocations": 200,
     "maximum_snapshots": 20
   },
-  "digest": "sha256:3d623d0b9e6efeff7ee442f68c4439d5c4ec586f0864ac31c1a7d2bb7cd88511"
+  "digest": "sha256:51375a862721724e8bdc58d2e2971910b876f1b59daaa61b6736b6e5b77e9b38"
 }

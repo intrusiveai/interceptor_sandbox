@@ -21,7 +21,7 @@ The MVP uses like-for-like routing. It does not translate between model APIs.
 | OpenAI Responses | `POST /v1/responses` | `openai-responses` | fixed `/v1/responses` endpoint |
 | Anthropic Messages | `POST /v1/messages` | `anthropic-messages` | fixed `/v1/messages` endpoint with pinned `anthropic-version` |
 | Gemini generateContent | `POST /v1beta/models/{model}:generateContent` | `gemini-api` | constructed fixed-origin Developer API route |
-| Gemini generateContent | `POST .../models/{model}:generateContent` | `vertex-gemini` | fixed project/location/publisher route with ADC |
+| Gemini generateContent | `POST .../models/{model}:generateContent` | `vertex-gemini` | fixed project/location/publisher route with ADC or API key |
 | OpenAI Chat or Responses | matching OpenAI route | `azure-openai` | fixed Azure resource `/openai/v1` route |
 | Amazon Bedrock Converse | `POST /model/{modelId}/converse` | `bedrock-converse` | AWS SDK for Go v2 `Converse` call |
 | OpenAI Chat Completions | `POST /v1/chat/completions` | `litellm` | LiteLLM `/v1/chat/completions` endpoint |
@@ -265,8 +265,8 @@ no Azure/OpenAI-to-other-provider translation occurs.
 ## Credential source
 
 For production, combine `--production`, `--model-credential-id`, and
-`--credential-config`, or select a supported workload-identity mode. Named
-environment variables remain a development-only compatibility source. See
+`--credential-config`, or select a supported workload-identity mode. Explicit `--provider-auth api-key-env --model-api-key-env NAME` is also supported.
+Implicit environment lookup remains a development compatibility source. See
 [Host credential stores](credential-stores.md).
 
 ## Evidence, injections, and snapshots
@@ -294,3 +294,14 @@ guide](https://developers.openai.com/api/docs/guides/migrate-to-responses),
 configuration](https://docs.aws.amazon.com/sdkref/latest/guide/feature-ss-endpoints.html),
 [AWS SDK for Go v2 configuration](https://docs.aws.amazon.com/sdk-for-go/v2/developer-guide/configure-gosdk.html),
 and [LiteLLM Responses API](https://docs.litellm.ai/docs/response_api).
+
+
+## Host authentication selectors
+
+Use [the aligned authentication matrix](cloud-authentication.md) for both components.
+`--provider-auth` accepts route-appropriate `api-key`, `secret-store`, `api-key-env`,
+`workload-identity`, `aws-profile`, `aws-environment`, `google-adc`, `azure-cli`,
+`azure-client-secret`, Anthropic `workload-token`, and LiteLLM `none`.
+Named AWS profiles are supported in production. Azure CLI login and Google's
+local ADC MUST be explicitly selected. Vertex API keys MUST use `X-Goog-Api-Key`;
+ADC uses OAuth bearer tokens and quota-project attribution.

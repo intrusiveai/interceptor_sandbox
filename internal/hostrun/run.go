@@ -21,8 +21,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
-	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
-	"golang.org/x/oauth2/google"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/credentials"
 
 	"github.com/intrusive-ai/interceptor-sandbox/internal/adaptive"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/appimage"
@@ -787,7 +786,7 @@ func modelProvider(ctx context.Context, config Config) (bridge.ModelProvider, er
 	case bridge.ProviderLiteLLM:
 		return bridge.NewLiteLLMProvider(httpConfig)
 	case bridge.ProviderBedrockConverse:
-		return bridge.LoadBedrockConverseProvider(ctx, bridge.BedrockProviderConfig{Region: config.AWSRegion, Profile: config.AWSProfile})
+		return bridge.LoadBedrockConverseProvider(ctx, bridge.BedrockProviderConfig{Region: config.AWSRegion, Profile: config.AWSProfile, Authentication: config.ProviderAuthMode})
 	case bridge.ProviderAnthropicMessages:
 		if config.ProviderAuthMode == "workload-token" {
 			httpConfig.CredentialHeader = "Authorization"
@@ -806,16 +805,15 @@ func modelProvider(ctx context.Context, config Config) (bridge.ModelProvider, er
 		return bridge.NewGeminiAPIProvider(httpConfig)
 	case bridge.ProviderVertexGemini:
 		if config.ProviderAPIKey == "" {
-			client, err := google.DefaultClient(ctx, "https://www.googleapis.com/auth/cloud-platform")
-			if err != nil {
-				return nil, fmt.Errorf("initialize Vertex workload identity: %w", err)
-			}
-			httpConfig.Client = client
+			httpConfig.Client = &http.Client{Transport: &googleBearerTransport{authentication: config.ProviderAuthMode, base: http.DefaultTransport}}
+		} else {
+			httpConfig.CredentialHeader = "X-Goog-Api-Key"
 		}
+
 		return bridge.NewVertexGeminiProvider(httpConfig)
 	case bridge.ProviderAzureOpenAI:
-		if config.ProviderAuthMode == "workload-identity" {
-			credential, err := azureWorkloadCredential()
+		if config.ProviderAuthMode == "workload-identity" || config.ProviderAuthMode == "azure-cli" || config.ProviderAuthMode == "azure-client-secret" {
+			credential, err := credentials.AzureIdentity(config.ProviderAuthMode)
 			if err != nil {
 				return nil, fmt.Errorf("initialize Azure workload identity: %w", err)
 			}
@@ -843,11 +841,33 @@ func (t *azureBearerTransport) RoundTrip(request *http.Request) (*http.Response,
 	clone.Header.Set("Authorization", "Bearer "+token.Token)
 	return t.base.RoundTrip(clone)
 }
-func azureWorkloadCredential() (azcore.TokenCredential, error) {
-	if credential, err := azidentity.NewWorkloadIdentityCredential(nil); err == nil {
-		return credential, nil
+
+// Resolve under each request context so a completed startup timeout cannot poison token refresh.
+type googleBearerTransport struct {
+	authentication string
+	base           http.RoundTripper
+}
+
+func (t *googleBearerTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	identity, err := credentials.GoogleIdentity(request.Context(), t.authentication)
+	if err != nil {
+		return nil, err
 	}
-	return azidentity.NewManagedIdentityCredential(nil)
+	quota, err := credentials.GoogleQuotaProject(identity)
+	if err != nil {
+		return nil, err
+	}
+	token, err := identity.TokenSource.Token()
+	if err != nil {
+		return nil, errors.New("Google token unavailable")
+	}
+	clone := request.Clone(request.Context())
+	clone.Header = request.Header.Clone()
+	clone.Header.Set("Authorization", "Bearer "+token.AccessToken)
+	if quota != "" {
+		clone.Header.Set("X-Goog-User-Project", quota)
+	}
+	return t.base.RoundTrip(clone)
 }
 
 func bindAdaptiveMetadata(metadata *session.Metadata, blueprint *environment.Blueprint, requested string) error {

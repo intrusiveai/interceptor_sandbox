@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>ai.intrusive.interceptor</string>
+<key>ProgramArguments</key><array>
+<string>/absolute/bin/interceptor</string><string>run</string>
+<string>--environment</string><string>/absolute/environment</string>
+<string>--model-provider</string><string>bedrock-converse</string>
+<string>--provider-auth</string><string>aws-profile</string>
+<string>--aws-profile</string><string>deployment</string>
+<string>--aws-region</string><string>us-east-2</string>
+<string>--allow-model</string><string>MODEL</string>
+</array>
+<key>RunAtLoad</key><false/><key>KeepAlive</key><false/>
+<key>Umask</key><integer>63</integer><key>ExitTimeOut</key><integer>90</integer>
+</dict></plist>

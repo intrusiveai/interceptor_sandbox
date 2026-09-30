@@ -55,9 +55,9 @@ frame bridge.
 
 The operator selects an exact model or deployment allowlist for every run or
 restore. HTTP endpoints and authentication are host configuration. Production
-credentials come from a supported host secret store or provider workload
-identity; named environment variables are development-only. Bedrock uses the
-host AWS SDK configuration and credential chain. No real provider credential
+credentials use explicit host secret-store, environment-key or cloud identity
+selectors defined in [host authentication](../../docs/cloud-authentication.md).
+Bedrock uses explicitly selected workload, named-profile or environment credentials. No real provider credential
 crosses the container boundary.
 
 Application SDKs may require an authentication value before they will send a

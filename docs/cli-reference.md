@@ -123,10 +123,10 @@ Provider options:
 - `--provider-base-url` fixes the HTTP provider or gateway origin and base
   path. It is required except for Bedrock and defaults from
   `INTERCEPTOR_PROVIDER_BASE_URL`.
-- Environment API keys are local-development compatibility. Production uses
-  `--model-credential-id` with `--credential-config`, or a supported workload
-  identity selected with `--provider-auth`. `--production` rejects environment
-  credentials.
+- Model keys SHOULD use `--model-credential-id` with `--credential-config`.
+  Explicit `--provider-auth api-key-env --model-api-key-env NAME` is supported
+  in all modes; `--production` rejects only implicit environment lookup. Cloud
+  identity selectors use the common authentication contract.
 - LiteLLM supports explicit `--provider-auth none`; otherwise it sends no
   authorization header unless a host credential source is selected.
 - Bedrock ignores API-key and base-URL options. `--aws-region` and
@@ -315,3 +315,7 @@ directly.
 execution, restore and cleanup. It releases the assertion while serving only retained
 evidence. Screen lock is supported; actual sleep, logout or Docker interruption ends
 execution. See [host lifetime and recovery](host-lifetime.md).
+
+Host provider/store authentication, foreground execution, explicit environment keys
+and GitHub OIDC MUST follow [the common auth contract](cloud-authentication.md).
+Optional services run the same `run` command; see [host lifetime](host-lifetime.md).
