@@ -305,3 +305,33 @@ Use [the aligned authentication matrix](cloud-authentication.md) for both compon
 Named AWS profiles are supported in production. Azure CLI login and Google's
 local ADC MUST be explicitly selected. Vertex API keys MUST use `X-Goog-Api-Key`;
 ADC uses OAuth bearer tokens and quota-project attribution.
+
+## Azure filtering evidence
+
+The `model_exchange` journal event MUST preserve Azure response annotations in
+`safety_status` without changing provider HTTP status, response bytes or returned
+tool calls. The target application remains responsible for handling provider
+filtering and deciding whether to execute its tools. These annotations MUST NOT
+be treated as a target-resistance verdict by themselves.
+
+- Chat: `safety_status.prompt_filter_results` MUST retain the native prompt array
+  when present. `safety_status.choices` MUST contain each annotated choice's
+  native `index` (when supplied) and `content_filter_results`, in response order.
+  Prompt annotations MUST be recorded even if no choices are returned.
+- Responses: when `content_filters` is present, `safety_status` MUST be an object
+  containing that native value and any nonnull `incomplete_details`. Without
+  `content_filters`, the existing `incomplete_details` projection MUST remain.
+- The summary MUST preserve safe, detected-only, filtered and blocked annotations,
+  including category details and Responses offsets. It MUST NOT infer an
+  unreported filter outcome or discard unfamiliar annotation fields.
+- `finish_status` MUST retain its existing first-choice finish reason (Chat) or
+  native status (Responses). Absent Chat annotations MUST remain null.
+- Provider errors MUST reach the application with their original status and body;
+  full provider responses MUST remain available through retained response blobs.
+  Error payloads that have no supported annotation location leave the summary
+  absent rather than being interpreted as a successful or safe response.
+
+Offline regression tests MUST cover native byte/status preservation, journal
+annotations, retained blob identity, filtered tool-call responses, multiple Chat
+choices, ordinary responses without Azure fields, and provider errors. These tests
+MUST NOT claim live Azure qualification.

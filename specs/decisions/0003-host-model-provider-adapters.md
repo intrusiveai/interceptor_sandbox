@@ -70,6 +70,10 @@ Injection matching, delivery confirmation, model extraction, token accounting,
 and evidence understand each native codec. Evidence records the final injected
 application request, the provider request, and the native response. Bedrock
 provider evidence is canonical SDK input/output JSON, not signed HTTP bytes.
+Azure filtering annotations MUST be retained in the journal safety summary as
+specified in [model-provider evidence](../../docs/model-providers.md#azure-filtering-evidence).
+This extraction MUST preserve native response forwarding and MUST NOT introduce
+proxy-side tool suppression or classify provider filtering as target resistance.
 
 ## Consequences
 

@@ -433,17 +433,57 @@ func modelOutcome(codec string, response []byte) (any, any) {
 		}
 		return finish, safety
 	case CodecOpenAIChat:
+		safety := chatSafetyAnnotations(value)
 		if choices, ok := value["choices"].([]any); ok && len(choices) > 0 {
 			if choice, ok := choices[0].(map[string]any); ok {
-				return choice["finish_reason"], nil
+				return choice["finish_reason"], safety
 			}
 		}
+		return nil, safety
 	case CodecOpenAIResponses:
+		if filters, present := value["content_filters"]; present {
+			safety := map[string]any{"content_filters": filters}
+			if details := value["incomplete_details"]; details != nil {
+				safety["incomplete_details"] = details
+			}
+			return value["status"], safety
+		}
 		return value["status"], value["incomplete_details"]
 	case CodecBedrockConverse:
 		return value["stopReason"], nil
 	}
 	return nil, nil
+}
+
+// chatSafetyAnnotations projects provider evidence only. It does not interpret
+// flags or decide whether the target application may execute a returned tool.
+func chatSafetyAnnotations(value map[string]any) any {
+	safety := map[string]any{}
+	if prompts, present := value["prompt_filter_results"]; present {
+		safety["prompt_filter_results"] = prompts
+	}
+	annotations := []any{}
+	choices, _ := value["choices"].([]any)
+	for _, item := range choices {
+		choice, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if filters, present := choice["content_filter_results"]; present {
+			annotation := map[string]any{"content_filter_results": filters}
+			if index, present := choice["index"]; present {
+				annotation["index"] = index
+			}
+			annotations = append(annotations, annotation)
+		}
+	}
+	if len(annotations) > 0 {
+		safety["choices"] = annotations
+	}
+	if len(safety) == 0 {
+		return nil
+	}
+	return safety
 }
 
 func modelCodec(method, requestPath string) (string, bool) {
