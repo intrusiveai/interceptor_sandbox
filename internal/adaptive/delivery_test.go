@@ -24,7 +24,7 @@ func TestDeliveryCapabilityVersionDigestBoundsAndIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.APIVersion != DeliveryCapabilityManifestVersion || first.DeliverySchemaProfile != delivery.SchemaProfile || first.Digest != second.Digest {
+	if first.APIVersion != CapabilityManifestVersion || first.DeliverySchemaProfile != delivery.SchemaProfile || first.Digest != second.Digest {
 		t.Fatal("wrong version or nondeterministic digest")
 	}
 	if first.Operations[0].MaximumInputBytes != 1024 || first.Operations[0].DeliveryStatus != "described" {

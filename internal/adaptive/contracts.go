@@ -6,12 +6,11 @@ import (
 )
 
 const (
-	OperationRequestVersion           = "interceptor.dev/operation-request/v1alpha2"
-	AttemptContextVersion             = "interceptor.dev/attempt-context/v1alpha1"
-	ObservationViewVersion            = "interceptor.dev/observation-view/v1alpha2"
-	CapabilityManifestVersion         = "interceptor.dev/capability-manifest/v1alpha1"
-	DeliveryCapabilityManifestVersion = "interceptor.dev/capability-manifest/v1alpha2"
-	EvidenceBundleVersion             = "interceptor.dev/evidence-bundle/v1alpha1"
+	OperationRequestVersion   = "interceptor.dev/operation-request/v1alpha2"
+	AttemptContextVersion     = "interceptor.dev/attempt-context/v1alpha1"
+	ObservationViewVersion    = "interceptor.dev/observation-view/v1alpha2"
+	CapabilityManifestVersion = "interceptor.dev/capability-manifest/v1alpha3"
+	EvidenceBundleVersion     = "interceptor.dev/evidence-bundle/v1alpha1"
 )
 
 type ArtifactDescriptor struct {

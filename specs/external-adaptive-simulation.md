@@ -197,9 +197,6 @@ the sealed Environment and Application digests. It includes:
 - managed services, native MCP servers/tools, identities, static/dynamic
   synthetic attacker services, and stateful fixtures by stable metadata ID;
 - observation kinds and oracle types;
-- native model-proxy codecs, host provider-adapter kinds, non-secret
-  authentication-mode classes, model/deployment constraints, and feature
-  flags;
 - snapshot/checkpoint support;
 - closed DNS policy/query ceilings and HTTP/HTTPS front-door/TLS trust
   capabilities, without private listener or certificate material;
@@ -742,10 +739,9 @@ Provider configuration and validation requirements are:
 - all adapters retain existing body, timeout, concurrency, session, and
   provider-error bounds.
 
-CapabilityManifest reports provider kinds, compatible codecs, authentication
-mode classes without credential identifiers, model-ID constraints, and feature
-flags for text, client functions, structured output, streaming, embeddings,
-multimodal content, provider-hosted tools, and provider-stored state.
+Provider routing, authentication and supported adapter catalogs MUST remain
+host configuration and documentation. The capability export MUST describe the
+target testing interface without a model-adapter catalog.
 
 Evidence records application codec, selected host adapter, exact model or
 deployment, pinned non-secret endpoint/API-version metadata, final injected
@@ -905,7 +901,7 @@ Do not put AEF client logic or attack-engine behavior in Interceptor.
 - Managed HTTP response injection, native MCP result injection, and typed
   event-match oracle.
 - Anthropic Messages, Gemini Developer API, Vertex Gemini, and Azure OpenAI
-  host adapters, native proxy codecs, capability declarations, and evidence.
+  host adapters, native proxy codecs, and evidence.
 - AWS Secrets Manager, Azure Key Vault, Google Cloud Secret Manager, and
   HashiCorp Vault KV v2 resolver adapters using production workload identity or
   Vault auto-auth integration.

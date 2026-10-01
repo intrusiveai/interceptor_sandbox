@@ -15,7 +15,7 @@
     "maximum_entries": 64
   },
   "delivery_schema_profile": "interceptor.delivery-schema/v1",
-  "api_version": "interceptor.dev/capability-manifest/v1alpha2",
+  "api_version": "interceptor.dev/capability-manifest/v1alpha3",
   "kind": "CapabilityManifest",
   "interceptor_release": "0.1.0-dev",
   "environment_digest": "sha256:f95dbb463a36de57ddf5baf5447634431506ee2ae0e024e0f5f0bb2c528b2ea0",
@@ -339,170 +339,6 @@
     }
   ],
   "oracle_types": null,
-  "model_providers": [
-    {
-      "kind": "anthropic-messages",
-      "codecs": [
-        "anthropic_messages"
-      ],
-      "authentication_modes": [
-        "api-key",
-        "api-key-env",
-        "workload-token"
-      ],
-      "model_selection": "exact-host-allowlist",
-      "text": true,
-      "client_functions": true,
-      "structured_output": true,
-      "streaming": false,
-      "embeddings": false,
-      "multimodal": false,
-      "provider_hosted_tools": false,
-      "provider_stored_state": false
-    },
-    {
-      "kind": "azure-openai",
-      "codecs": [
-        "openai_chat_completions",
-        "openai_responses"
-      ],
-      "authentication_modes": [
-        "api-key",
-        "api-key-env",
-        "workload-identity",
-        "azure-cli",
-        "azure-client-secret"
-      ],
-      "model_selection": "exact-host-allowlist",
-      "text": true,
-      "client_functions": true,
-      "structured_output": true,
-      "streaming": false,
-      "embeddings": false,
-      "multimodal": false,
-      "provider_hosted_tools": false,
-      "provider_stored_state": false
-    },
-    {
-      "kind": "bedrock-converse",
-      "codecs": [
-        "aws_bedrock_converse"
-      ],
-      "authentication_modes": [
-        "workload-identity",
-        "aws-profile",
-        "aws-environment"
-      ],
-      "model_selection": "exact-host-allowlist",
-      "text": true,
-      "client_functions": true,
-      "structured_output": true,
-      "streaming": false,
-      "embeddings": false,
-      "multimodal": false,
-      "provider_hosted_tools": false,
-      "provider_stored_state": false
-    },
-    {
-      "kind": "gemini-api",
-      "codecs": [
-        "google_generate_content"
-      ],
-      "authentication_modes": [
-        "api-key",
-        "api-key-env"
-      ],
-      "model_selection": "exact-host-allowlist",
-      "text": true,
-      "client_functions": true,
-      "structured_output": true,
-      "streaming": false,
-      "embeddings": false,
-      "multimodal": false,
-      "provider_hosted_tools": false,
-      "provider_stored_state": false
-    },
-    {
-      "kind": "litellm",
-      "codecs": [
-        "openai_chat_completions",
-        "openai_responses"
-      ],
-      "authentication_modes": [
-        "none",
-        "api-key",
-        "api-key-env"
-      ],
-      "model_selection": "exact-host-allowlist",
-      "text": true,
-      "client_functions": true,
-      "structured_output": true,
-      "streaming": false,
-      "embeddings": false,
-      "multimodal": false,
-      "provider_hosted_tools": false,
-      "provider_stored_state": false
-    },
-    {
-      "kind": "openai-chat",
-      "codecs": [
-        "openai_chat_completions"
-      ],
-      "authentication_modes": [
-        "api-key",
-        "api-key-env"
-      ],
-      "model_selection": "exact-host-allowlist",
-      "text": true,
-      "client_functions": true,
-      "structured_output": true,
-      "streaming": false,
-      "embeddings": false,
-      "multimodal": false,
-      "provider_hosted_tools": false,
-      "provider_stored_state": false
-    },
-    {
-      "kind": "openai-responses",
-      "codecs": [
-        "openai_responses"
-      ],
-      "authentication_modes": [
-        "api-key",
-        "api-key-env"
-      ],
-      "model_selection": "exact-host-allowlist",
-      "text": true,
-      "client_functions": true,
-      "structured_output": true,
-      "streaming": false,
-      "embeddings": false,
-      "multimodal": false,
-      "provider_hosted_tools": false,
-      "provider_stored_state": false
-    },
-    {
-      "kind": "vertex-gemini",
-      "codecs": [
-        "google_generate_content"
-      ],
-      "authentication_modes": [
-        "workload-identity",
-        "google-adc",
-        "api-key",
-        "api-key-env"
-      ],
-      "model_selection": "exact-host-allowlist",
-      "text": true,
-      "client_functions": true,
-      "structured_output": true,
-      "streaming": false,
-      "embeddings": false,
-      "multimodal": false,
-      "provider_hosted_tools": false,
-      "provider_stored_state": false
-    }
-  ],
   "network": {
     "dns": {
       "enabled": false,
@@ -521,5 +357,5 @@
     "maximum_invocations": 200,
     "maximum_snapshots": 20
   },
-  "digest": "sha256:51375a862721724e8bdc58d2e2971910b876f1b59daaa61b6736b6e5b77e9b38"
+  "digest": "sha256:d948076ee132b1f34d6ffb4e22059c664e1f1a985cf64ade37822a29fc0c4de1"
 }

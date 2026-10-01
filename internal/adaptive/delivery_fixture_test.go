@@ -66,7 +66,7 @@ func TestDeliveryExampleNativeFixtureAndVerification(t *testing.T) {
 	if len(offline.Services) != 1 || len(offline.Services[0].Endpoints) != 2 {
 		t.Fatal("missing tool context")
 	}
-	for _, private := range []string{"Customer-provided benign record", "Benign private fixture note", "tickets.sandbox.local", "assets/tools.yaml"} {
+	for _, private := range []string{`"model_providers"`, `"authentication_modes"`, "Customer-provided benign record", "Benign private fixture note", "tickets.sandbox.local", "assets/tools.yaml"} {
 		if bytes.Contains(actual, []byte(private)) {
 			t.Fatalf("leaked protected data: %q", private)
 		}

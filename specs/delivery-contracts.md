@@ -9,8 +9,9 @@ as Operator project them rather than defining a competing native format.
 Blueprints using application `delivery` / `delivery_asset`, or service
 `export_contracts` / `implementation`, MUST select
 `api_version: interceptor.dev/v1alpha2`. Existing v1alpha1 Blueprints remain
-supported and retain the v1alpha1 capability representation and digest recipe.
-A v1alpha2 Blueprint produces `interceptor.dev/capability-manifest/v1alpha2`
+supported and MUST produce capability-manifest/v1alpha3 without delivery metadata.
+Both Blueprint versions MUST use the same typed-JSON native digest recipe.
+A v1alpha2 Blueprint produces `interceptor.dev/capability-manifest/v1alpha3`
 with `delivery_schema_profile: interceptor.delivery-schema/v1`. Other adaptive
 resources keep their existing versions. Unknown Blueprint fields/versions fail.
 

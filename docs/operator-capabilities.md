@@ -1,7 +1,8 @@
 # Operator public capability projection
 
-Interceptor exports its native CapabilityManifest through `interceptor capabilities
---environment <directory>` and the existing native capabilities API. Operator owns
+Interceptor exports its native `interceptor.dev/capability-manifest/v1alpha3`
+CapabilityManifest through `interceptor capabilities --environment <directory>`
+and the existing native capabilities API. Operator owns
 its public TargetCapabilityManifest and ScenarioBundle; the two exports have
 distinct schemas and digest recipes.
 
@@ -26,3 +27,14 @@ uses the native `capability-delivery.json` golden export. Existing
 verified delivery example produces it. Operator's fixture runner verifies the
 public projection and a bundle referencing actual operations, actions and evidence.
 These tests qualify serialization/contract mapping, not running Operator or Attack Harness.
+
+The export MUST contain only the specified target/environment testing capabilities
+and their provenance. Model-adapter catalogs, authentication methods and upstream
+provider configuration MUST NOT be fields in this contract. Provider/authentication
+catalog changes MUST NOT contribute fields or values to the manifest or its digest;
+release and environment identity changes remain ordinary source provenance.
+Both Blueprint versions MUST produce capability-manifest/v1alpha3; delivery-aware
+Blueprints additionally set `delivery_schema_profile`. Missing delivery contracts
+remain explicit and MUST NOT be invented. Operator and Interceptor MUST be updated
+together; administrators MUST re-export saved capabilities and native companions.
+Existing retained evidence MUST NOT be rewritten to claim the new schema.

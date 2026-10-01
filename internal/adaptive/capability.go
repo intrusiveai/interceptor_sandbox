@@ -5,7 +5,6 @@ import (
 	"errors"
 	"sort"
 
-	"github.com/intrusive-ai/interceptor-sandbox/internal/bridge"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/buildinfo"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/delivery"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/digest"
@@ -37,7 +36,6 @@ type CapabilityManifest struct {
 	Services              []ServiceCapability       `json:"services"`
 	FileNamespaces        []FileNamespaceCapability `json:"file_namespaces,omitempty"`
 	Oracles               []string                  `json:"oracle_types"`
-	ModelProviders        []ModelProviderCapability `json:"model_providers"`
 	Network               NetworkCapability         `json:"network"`
 	SnapshotCapable       bool                      `json:"snapshot_capable"`
 	Limits                CapabilityLimits          `json:"limits"`
@@ -85,20 +83,6 @@ type FileNamespaceCapability struct {
 	MaxFiles     int    `json:"max_files,omitempty"`
 	MaxFileBytes int64  `json:"max_file_bytes,omitempty"`
 }
-type ModelProviderCapability struct {
-	Kind                string   `json:"kind"`
-	Codecs              []string `json:"codecs"`
-	AuthenticationModes []string `json:"authentication_modes"`
-	ModelSelection      string   `json:"model_selection"`
-	Text                bool     `json:"text"`
-	ClientFunctions     bool     `json:"client_functions"`
-	StructuredOutput    bool     `json:"structured_output"`
-	Streaming           bool     `json:"streaming"`
-	Embeddings          bool     `json:"embeddings"`
-	Multimodal          bool     `json:"multimodal"`
-	ProviderHostedTools bool     `json:"provider_hosted_tools"`
-	ProviderStoredState bool     `json:"provider_stored_state"`
-}
 type NetworkCapability struct {
 	DNS   DNSCapability `json:"dns"`
 	HTTP  bool          `json:"http_frontdoor"`
@@ -127,7 +111,6 @@ type CapabilityLimits struct {
 func BuildCapabilityManifest(blueprint *environment.Blueprint, environmentDigest, applicationDigest string) (CapabilityManifest, error) {
 	m := CapabilityManifest{Feedback: FeedbackCapability{ViewVersion: ObservationViewVersion, SelectionModes: []string{"all-permitted", "selected"}, Kinds: append([]string(nil), FeedbackKinds...), MaximumChunkBytes: MaxFeedbackChunk, MaximumEntries: MaxFeedbackEntries}, APIVersion: CapabilityManifestVersion, Kind: "CapabilityManifest", InterceptorRelease: buildinfo.Version, EnvironmentDigest: environmentDigest, ApplicationDigest: applicationDigest, Target: TargetCapability{Name: blueprint.Metadata.Name, Version: blueprint.Metadata.Version, Interface: blueprint.Application.Interface.Adapter}, FeedbackProfiles: append([]string(nil), blueprint.Adaptive.FeedbackProfiles...), InjectionSurfaces: []string{"model_tool_result"}, SnapshotCapable: blueprint.Application.Persistence.SnapshotCapable, Limits: CapabilityLimits{MaximumAttempts: blueprint.Adaptive.MaxAttempts, MaximumArtifacts: blueprint.Adaptive.MaxArtifacts, MaximumArtifactBytes: blueprint.Limits.MaxBlobBytes, MaximumInvocations: blueprint.Limits.MaxTurns, MaximumSnapshots: blueprint.Limits.MaxSnapshots}}
 	if blueprint.APIVersion == environment.DeliveryAPIVersion {
-		m.APIVersion = DeliveryCapabilityManifestVersion
 		m.DeliverySchemaProfile = delivery.SchemaProfile
 	}
 	m.Network = NetworkCapability{
@@ -231,16 +214,7 @@ func BuildCapabilityManifest(blueprint *environment.Blueprint, environmentDigest
 	for _, oracle := range blueprint.Oracles {
 		m.Oracles = append(m.Oracles, oracle.Kind)
 	}
-	m.ModelProviders = []ModelProviderCapability{
-		{Kind: bridge.ProviderOpenAIChat, Codecs: []string{bridge.CodecOpenAIChat}, AuthenticationModes: []string{"api-key", "api-key-env"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
-		{Kind: bridge.ProviderOpenAIResponses, Codecs: []string{bridge.CodecOpenAIResponses}, AuthenticationModes: []string{"api-key", "api-key-env"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
-		{Kind: bridge.ProviderBedrockConverse, Codecs: []string{bridge.CodecBedrockConverse}, AuthenticationModes: []string{"workload-identity", "aws-profile", "aws-environment"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
-		{Kind: bridge.ProviderLiteLLM, Codecs: []string{bridge.CodecOpenAIChat, bridge.CodecOpenAIResponses}, AuthenticationModes: []string{"none", "api-key", "api-key-env"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
-		{Kind: bridge.ProviderAnthropicMessages, Codecs: []string{bridge.CodecAnthropicMessages}, AuthenticationModes: []string{"api-key", "api-key-env", "workload-token"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
-		{Kind: bridge.ProviderGeminiAPI, Codecs: []string{bridge.CodecGoogleGenerateContent}, AuthenticationModes: []string{"api-key", "api-key-env"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
-		{Kind: bridge.ProviderVertexGemini, Codecs: []string{bridge.CodecGoogleGenerateContent}, AuthenticationModes: []string{"workload-identity", "google-adc", "api-key", "api-key-env"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
-		{Kind: bridge.ProviderAzureOpenAI, Codecs: []string{bridge.CodecOpenAIChat, bridge.CodecOpenAIResponses}, AuthenticationModes: []string{"api-key", "api-key-env", "workload-identity", "azure-cli", "azure-client-secret"}, ModelSelection: "exact-host-allowlist", Text: true, ClientFunctions: true, StructuredOutput: true},
-	}
+
 	sort.Strings(m.FeedbackProfiles)
 	sort.Slice(m.Operations, func(i, j int) bool { return m.Operations[i].ID < m.Operations[j].ID })
 	for operation := range allowedGatewayOperations {
@@ -254,7 +228,6 @@ func BuildCapabilityManifest(blueprint *environment.Blueprint, environmentDigest
 	m.InjectionProfiles = injectionProfiles(m.InjectionSurfaces)
 	sort.Strings(m.Oracles)
 	m.Oracles = unique(m.Oracles)
-	sort.Slice(m.ModelProviders, func(i, j int) bool { return m.ModelProviders[i].Kind < m.ModelProviders[j].Kind })
 	encoded, err := json.Marshal(m)
 	if err != nil {
 		return CapabilityManifest{}, err

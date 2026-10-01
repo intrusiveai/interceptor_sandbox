@@ -275,9 +275,9 @@ AEF integration is conformant when:
   supporting facts;
 - a changed manifest, payload artifact, attempt graph, or EvidenceBundle digest
   causes deterministic rejection or explicit quarantine; and
-- capability ingestion preserves the declared native model-provider kind,
-  codec, authentication class, allowed-model constraints, and feature flags
-  without ingesting credentials or provider account identifiers;
+- capability ingestion MUST preserve target operations, injection surfaces,
+  feedback and limits without depending on upstream model-provider or
+  authentication configuration;
 - AEF never receives or requires Interceptor secret-store backend, locator,
   version, account, project, vault, authentication, or resolution metadata.
 
