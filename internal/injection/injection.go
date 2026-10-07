@@ -709,6 +709,21 @@ func (m *Manager) ObservableFidelityIDs(turnID string) []string {
 	return result
 }
 
+// ObservableResponseIDs returns only successfully applied ingress injections.
+// Consumed once injections remain candidates: application consumption precedes
+// provider delivery. Fired/consumed state is already journaled and replayable.
+func (m *Manager) ObservableResponseIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := []string{}
+	for _, item := range m.orderedItems() {
+		if (item.definition.Surface == "service_response" || item.definition.Surface == "mcp_tool_result") && item.evaluation.Fired && item.evaluation.DeliveryObservable {
+			result = append(result, item.definition.ID)
+		}
+	}
+	return result
+}
+
 func (m *Manager) CompleteFidelityTurn(turnID string, confirmed []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

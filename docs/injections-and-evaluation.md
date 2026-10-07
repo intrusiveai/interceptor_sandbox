@@ -367,6 +367,14 @@ final request being sent to the model provider. Merely preparing an injection or
 changing an environment record does not prove that the agent actually read and
 used that content.
 
+For managed HTTP and native MCP response injections, only a successfully applied
+rewrite is a delivery candidate. The candidate is captured before the model request
+is forwarded and confirmed against the host adapter's final request bytes. A
+consumed `once` injection remains eligible for that later confirmation, including
+after snapshot restore. Unmatched selectors, failed placement, content omitted by
+the application, or failed forwarding do not establish delivery. The same rule
+applies to a Blueprint-enabled dynamic attacker response.
+
 ## Coverage gaps
 
 If the application makes a request that no simulated service rule understands,

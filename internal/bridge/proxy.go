@@ -83,6 +83,12 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 			return
 		}
 	}
+	// Freeze already-applied response candidates before forwarding. A response
+	// rewritten while this model request is in flight cannot qualify this request.
+	responseCandidates := []string{}
+	if p.injections != nil {
+		responseCandidates = p.injections.ObservableResponseIDs()
+	}
 	requestRef := p.store(request.Context(), rewritten)
 	started := time.Now()
 	p.connectorMu.Lock()
@@ -108,6 +114,7 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 	}
 	if p.injections != nil {
 		candidates := append(append([]string(nil), ids...), p.injections.ObservableFidelityIDs(turnID)...)
+		candidates = append(candidates, responseCandidates...)
 		confirmed, confirmErr := p.injections.ConfirmDelivery(result.FinalRequest, candidates)
 		if confirmErr != nil {
 			p.record("injection_state_error", turnID, requestRef, map[string]any{"error": confirmErr.Error()})

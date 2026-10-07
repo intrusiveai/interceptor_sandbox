@@ -1605,6 +1605,14 @@ is present in the native Chat, Responses, or Converse request accepted by the
 host adapter. Codec tests prove that the content remains linked to the selected
 tool call in that protocol.
 
+For managed `service_response` and `mcp_tool_result` simulation, the inference proxy
+MUST include successfully applied response injections as delivery candidates before
+forwarding a model request. Candidates MUST use the existing journaled placement
+state, including consumed `once` injections, so restore preserves eligibility.
+The host adapter's final request MUST contain the injection content before delivery
+is confirmed. Arming, selector matching, response rewriting alone, or a failed
+forward MUST NOT establish provider delivery.
+
 For fidelity mode, planting is not delivery. The inference proxy registers the
 injection's canonical content fingerprint and confirms delivery only when the
 post-formatting model request contains an allowed normalized representation.
