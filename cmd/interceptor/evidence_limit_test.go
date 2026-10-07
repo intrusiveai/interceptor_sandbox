@@ -50,6 +50,25 @@ func TestExportCapacityCleanupAndAdministrativeRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Seed files without any event or journal delta referencing them, as happens
+	// for unchanged files materialized from the initial sealed environment.
+	initial := filepath.Join(root, "initial")
+	if err := os.Mkdir(initial, 0750); err != nil {
+		t.Fatal(err)
+	}
+	initialFiles := map[string][]byte{"unchanged.txt": []byte("unchanged seed file"), "empty.txt": {}}
+	for name, content := range initialFiles {
+		if err := os.WriteFile(filepath.Join(initial, name), content, 0640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest, err := snapshot.Scan(t.Context(), []snapshot.Root{{ContainerPath: "/state/app", HostPath: initial}}, store, 2<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.WriteManifest(paths.FileManifest, manifest); err != nil {
+		t.Fatal(err)
+	}
 	registry, err := adaptive.OpenArtifactRegistry(filepath.Join(paths.Root, "artifacts.json"), store, 2<<20)
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +113,11 @@ func TestExportCapacityCleanupAndAdministrativeRetry(t *testing.T) {
 	}
 	defer file.Close()
 	archive := tar.NewReader(file)
-	found := false
+	expectedBlobs := map[string][]byte{descriptor.Digest: content}
+	for _, raw := range initialFiles {
+		expectedBlobs[digest.Bytes(raw)] = raw
+	}
+	found := map[string]bool{}
 	for {
 		header, err := archive.Next()
 		if err == io.EOF {
@@ -105,14 +128,16 @@ func TestExportCapacityCleanupAndAdministrativeRetry(t *testing.T) {
 		}
 		if strings.HasPrefix(header.Name, "blobs/") {
 			raw, err := io.ReadAll(archive)
-			if err != nil || !bytes.Equal(raw, content) {
+			blob := "sha256:" + strings.TrimPrefix(header.Name, "blobs/sha256/")
+			expected, exists := expectedBlobs[blob]
+			if err != nil || !exists || !bytes.Equal(raw, expected) || found[blob] {
 				t.Fatal("blob bytes changed", err)
 			}
-			found = true
+			found[blob] = true
 		}
 	}
-	if !found {
-		t.Fatal("missing registered blob")
+	if len(found) != len(expectedBlobs) {
+		t.Fatal("missing registered or initial-manifest blob", found)
 	}
 	info, _ := file.Stat()
 	// Full archive size includes tar padding/trailer; equality succeeds, one byte less fails.

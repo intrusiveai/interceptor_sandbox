@@ -703,7 +703,8 @@ func exportEvidence(ctx context.Context, dataRoot string, metadata session.Metad
 			return fmt.Errorf("checkpoint %s has inconsistent references", checkpoint.ID)
 		}
 	}
-	if _, err := snapshot.LoadManifest(paths.FileManifest); err != nil {
+	fileManifest, err := snapshot.LoadManifest(paths.FileManifest)
+	if err != nil {
 		return err
 	}
 	lock, _, err := environment.Verify(metadata.EnvironmentPath)
@@ -742,6 +743,13 @@ func exportEvidence(ctx context.Context, dataRoot string, metadata session.Metad
 		return err
 	}
 	references := map[string]struct{}{}
+	// Initial files may never change, so neither events nor journal deltas
+	// necessarily reference their bytes. The exported manifest still does.
+	for _, entry := range fileManifest.Entries {
+		if entry.Type == "file" {
+			references[entry.Blob] = struct{}{}
+		}
+	}
 	for _, event := range events {
 		eventReferences, err := recording.References(event)
 		if err != nil {
