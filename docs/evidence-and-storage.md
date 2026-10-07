@@ -179,7 +179,14 @@ The tar archive contains:
 - `state.jsonl`;
 - `file-manifest.json`;
 - checkpoint manifests; and
-- all blobs referenced by the included events and journal.
+- all blobs referenced by the included events, state journal, file manifest, and
+  registered artifacts.
+
+File-manifest references include unchanged files from the initial Environment,
+including empty files. Their contents are retained even when no later event or
+state change references them; exporting only changed files would leave the archive
+incomplete. The same behavior applies to CLI and local API exports, within their
+configured archive-size limits.
 
 Application stdout/stderr and transient bridge artifacts are not included.
 Export first verifies the core chains and bindings. The archive is not encrypted

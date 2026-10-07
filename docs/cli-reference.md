@@ -300,7 +300,10 @@ interceptor logs export <session-id> --output <tar-path> [--evidence-max-bytes <
 ```
 
 Exports a verified, portable tar archive. The session must be `stopped` or
-`error`. Existing destination-file replacement follows the host filesystem's
+`error`. It includes file contents referenced by the file manifest even when they
+were seeded by the initial Environment and never changed, including empty files.
+See [archive contents](evidence-and-storage.md#export).
+Existing destination-file replacement follows the host filesystem's
 rename behavior, so choose the output path deliberately.
 
 ## Internal commands
