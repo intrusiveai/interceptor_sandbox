@@ -57,6 +57,15 @@ interceptor environment inspect <directory> [--json]
 Checks that the directory still matches the version that was sealed. JSON
 output includes the lock record, parsed Blueprint, and warnings.
 
+## Credential checks
+
+`interceptor credentials check` requires `--live`, `--credential-config FILE`,
+`--credential-id ID`, `--probe-id ID`, and `--output FILE`. Optional
+`--timeout-seconds` defaults to 30. It performs a fresh read through
+the production resolver, records new private JSONL evidence and prints a sanitized
+JSON result. It makes no model call. See [credential checks](credential-stores.md#direct-secret-retrieval-check).
+
+
 ## Wrapper image commands
 
 ```sh

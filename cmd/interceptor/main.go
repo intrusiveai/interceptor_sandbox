@@ -72,6 +72,8 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return nil
 	case "environment":
 		return environmentCommand(arguments[1:], stdout)
+	case "credentials":
+		return credentialsCheckCommand(arguments[1:], stdout, resolveStoredCredential)
 	case "app":
 		return appCommand(arguments[1:], stdout)
 	case "run":
@@ -395,11 +397,15 @@ func resolveProviderOptions(ctx context.Context, providerType, providerURL, cred
 }
 
 func resolveStoredCredential(ctx context.Context, credentialConfig, credentialID string) (string, error) {
+	return resolveStoredCredentialWithFactories(ctx, credentialConfig, credentialID, nil)
+}
+
+func resolveStoredCredentialWithFactories(ctx context.Context, credentialConfig, credentialID string, factories map[string]credentials.BackendFactory) (string, error) {
 	config, err := credentials.Load(credentialConfig)
 	if err != nil {
 		return "", err
 	}
-	resolver, err := credentials.New(config, nil)
+	resolver, err := credentials.New(config, factories)
 	if err != nil {
 		return "", err
 	}
@@ -1251,6 +1257,7 @@ func usage(writer io.Writer) {
 
 Commands:
   environment init|validate|seal|inspect
+  credentials check --live --credential-config FILE --credential-id ID --probe-id ID --output FILE
   app build|verify
   run --environment <directory> --model-provider <type> --allow-model <model> [provider options]
   capabilities --environment <directory>

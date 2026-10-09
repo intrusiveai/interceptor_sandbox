@@ -90,6 +90,30 @@ Vertex or Azure. No secret-store profile or resolution event is included in a
 CapabilityManifest or EvidenceBundle.
 
 
+## Direct secret-retrieval check
+
+Use a fresh product process to check the configured store without making a model
+call or launching a sandbox:
+
+```sh
+interceptor credentials check --live \
+  --credential-config /private/credentials.json --credential-id target-openai-key \
+  --probe-id secret-read-01 --output /private/new-evidence.jsonl \
+  --timeout-seconds 30
+```
+
+The command uses the same production resolver and private resolution audit as normal
+model access. It durably records intent before resolution and a structured result
+afterward. Every invocation has a fresh resolver; existing evidence files are rejected.
+JSON stdout and evidence contain only the probe/credential IDs, timestamps, outcome
+and a fresh-resolution flag, never values, hashes, locators or remote error details.
+Failures return nonzero. A generic resolution failure does not prove permission
+denial, and successful retrieval does not establish model access or the exact AWS
+identity mechanism. A separate model request is required to test model access.
+The deadline is 1–600 seconds; `--live` is mandatory. Use nonproduction resources
+and resource-scoped authentication as in ordinary product execution.
+
+
 ## Aligned host identities
 
 The [common authentication contract](cloud-authentication.md) defines the supported
