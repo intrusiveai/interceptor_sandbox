@@ -94,9 +94,9 @@ jobs:
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       startsWith(github.ref, 'refs/heads/candidate-v') && !github.event.deleted
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 50
     permissions:
-      actions: read
+      actions: write
       contents: write
     concurrency:
       group: interceptor-release-v${{ needs.context.outputs.version }}
@@ -115,6 +115,7 @@ jobs:
             gh run download "$GITHUB_RUN_ID" --name "release-candidate-$index" --dir dist/candidates
           done
       - name: Publish rolling prerelease
+        id: publication
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
           CANDIDATE_BRANCH: ${{ needs.context.outputs.branch }}
@@ -124,6 +125,16 @@ jobs:
           --directory dist/candidates
           --branch "$CANDIDATE_BRANCH"
           --source "$CANDIDATE_SOURCE"
+      - name: Publish candidate catalog and wait for service verification
+        if: steps.publication.outputs.published == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: v${{ needs.context.outputs.version }}
+          RELEASE_SOURCE: ${{ needs.context.outputs.source }}
+        run: >-
+          python3 scripts/publish_release.py catalog-sync
+          --tag "$RELEASE_TAG"
+          --source "$RELEASE_SOURCE"
 
   promote:
     needs: context
@@ -134,8 +145,9 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       startsWith(github.event.pull_request.head.ref, 'candidate-v')
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 40
     permissions:
+      actions: write
       contents: write
       pull-requests: read
     concurrency:
@@ -150,3 +162,12 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
           RELEASE_PR: ${{ needs.context.outputs.pr }}
         run: python3 scripts/publish_release.py promote --pr "$RELEASE_PR"
+      - name: Publish stable catalog and wait for service verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: v${{ needs.context.outputs.version }}
+          RELEASE_SOURCE: ${{ needs.context.outputs.source }}
+        run: >-
+          python3 scripts/publish_release.py catalog-sync
+          --tag "$RELEASE_TAG"
+          --source "$RELEASE_SOURCE"

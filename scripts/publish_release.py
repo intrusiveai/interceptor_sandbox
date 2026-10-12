@@ -10,10 +10,13 @@ import re
 import subprocess
 import tarfile
 import tempfile
+import time
+import uuid
 
 PLATFORMS = {"linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"}
 VERSION = r"(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})"
 MARKER = "<!-- interceptor-candidate-release/v1 -->"
+CATALOG_ASSET = "release-index-entry.json"
 
 
 def candidate_version(branch):
@@ -65,9 +68,15 @@ class GitHub:
             raise RuntimeError("GitHub request failed: " + method + " " + path)
         return json.loads(result.stdout) if result.stdout.strip() else None
 
-    def upload(self, tag, files):
+    def upload(self, tag, files, replace=False):
         subprocess.run(["gh", "release", "upload", tag, *map(str, files),
-                        "--repo", self.repository], check=True)
+                        "--repo", self.repository] + (["--clobber"] if replace else []), check=True)
+
+    def download_catalog(self, tag):
+        with tempfile.TemporaryDirectory(prefix="interceptor-catalog-") as directory:
+            subprocess.run(["gh", "release", "download", tag, "--repo", self.repository,
+                            "--pattern", CATALOG_ASSET, "--dir", directory], check=True)
+            return json.loads((Path(directory) / CATALOG_ASSET).read_text())
 
     def release(self, tag):
         return self.api("releases/tags/" + tag, missing=True)
@@ -126,12 +135,94 @@ def expected_assets():
 
 
 def verify_uploaded(github, release, digests):
-    assets = github.assets(release)
+    # Catalog metadata can change from rc to release without changing the binaries.
+    assets = [asset for asset in github.assets(release) if asset["name"] != CATALOG_ASSET]
     if len(assets) != len(digests) or {asset["name"] for asset in assets} != set(digests):
         raise ValueError("release asset inventory is incomplete")
     for asset in assets:
         if asset["state"] != "uploaded" or asset.get("digest") != digests[asset["name"]]:
             raise ValueError("uploaded release asset digest differs")
+
+
+def catalog_entry(github, tag, source):
+    if github.repository != "intrusiveai/interceptor_sandbox":
+        raise ValueError("catalog publication is restricted to Interceptor's repository")
+    version = candidate_version("candidate-" + tag)
+    release = github.release(tag)
+    body = (release or {}).get("body") or ""
+    if not release or release["draft"] or not body.startswith(MARKER + "\n"):
+        raise ValueError("catalog requires a complete managed GitHub release")
+    record = json.loads(body.removeprefix(MARKER + "\n"))
+    if (record["version"] != version or record["source_commit"] != source
+            or github.api("commits/" + tag)["sha"] != source):
+        raise ValueError("catalog source/tag differs from the published candidate")
+    if set(record["assets"]) != expected_assets():
+        raise ValueError("catalog requires all release assets")
+    verify_uploaded(github, release, record["assets"])
+    if not release["prerelease"]:
+        number = record.get("promotion_pr")
+        if type(number) is not int or number < 1:
+            raise ValueError("stable catalog requires verified candidate PR promotion; rerun promotion")
+        pr = github.api("pulls/" + str(number))
+        if pr["head"]["ref"] != "candidate-" + tag or pr["head"]["sha"] != source:
+            raise ValueError("stable catalog promotion PR differs from the release")
+        promote(github, number)
+    assets = {asset["name"]: asset for asset in github.assets(release)}
+    artifacts = []
+    for platform in sorted(PLATFORMS):
+        name = platform.replace("/", "-") + ".tar.gz"
+        asset = assets[name]
+        url = f"https://github.com/{github.repository}/releases/download/{tag}/{name}"
+        if asset.get("browser_download_url") != url:
+            raise ValueError("catalog download URL differs from the product release")
+        artifacts.append({"platform": platform, "filename": name,
+                          "url": asset["browser_download_url"],
+                          "sha256": asset["digest"].removeprefix("sha256:")})
+    return {"version": tag, "latest": True,
+            "tags": ["rc" if release["prerelease"] else "release"],
+            "artifacts": artifacts}
+
+
+def catalog_context(github, tag, source):
+    expected = catalog_entry(github, tag, source)
+    if github.download_catalog(tag) != expected:
+        raise ValueError("catalog asset is stale or differs from the actual release")
+    return expected
+
+
+def sync_catalog(github, tag, source, timeout=1800):
+    entry = catalog_entry(github, tag, source)
+    with tempfile.TemporaryDirectory(prefix="interceptor-catalog-") as directory:
+        path = Path(directory) / CATALOG_ASSET
+        path.write_text(json.dumps(entry, sort_keys=True, indent=2) + "\n")
+        github.upload(tag, [path], replace=True)
+    catalog_context(github, tag, source)
+
+    request = "interceptor-catalog-" + uuid.uuid4().hex
+    workflow = "actions/workflows/publish-catalog.yml"
+    github.api(workflow + "/dispatches", "POST",
+               {"ref": tag, "inputs": {"request_id": request}})
+    deadline = time.monotonic() + timeout
+    run = None
+    while time.monotonic() < deadline:
+        if run is None:
+            runs = github.api(workflow + "/runs?event=workflow_dispatch&head_sha="
+                              + source + "&per_page=100")["workflow_runs"]
+            matches = [item for item in runs
+                       if item["display_title"] == request and item["head_sha"] == source]
+            if len(matches) > 1:
+                raise RuntimeError("ambiguous catalog workflow dispatch")
+            run = matches[0] if matches else None
+        else:
+            run = github.api(f"actions/runs/{run['id']}")
+        if run and run["status"] == "completed":
+            if run["conclusion"] != "success":
+                raise RuntimeError("catalog publication failed: " + run["html_url"])
+            return run["html_url"]
+        time.sleep(10)
+    if run:
+        github.api(f"actions/runs/{run['id']}/cancel", "POST")
+    raise RuntimeError("catalog publication timed out; inspect the dispatched run before retrying")
 
 
 def publish(github, branch, source, inventory, files):
@@ -202,19 +293,26 @@ def promote(github, number):
     if candidate_tree != merged_tree:
         raise ValueError("main merge changed the candidate tree; merge main into the candidate and rebuild before release")
     verify_uploaded(github, release, record["assets"])
+    promoted_record = dict(record, promotion_pr=number)
+    body = MARKER + "\n" + json.dumps(promoted_record, sort_keys=True)
     if not release["prerelease"]:
+        if record != promoted_record:
+            github.api(f"releases/{release['id']}", "PATCH", {"body": body})
         return "already-stable"
-    github.api(f"releases/{release['id']}", "PATCH", {"prerelease": False, "make_latest": "legacy"})
+    github.api(f"releases/{release['id']}", "PATCH",
+               {"prerelease": False, "make_latest": "legacy", "body": body})
     return "promoted-existing-assets"
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("operation", choices=("context", "publish", "promote"))
+    parser.add_argument("operation", choices=("context", "publish", "promote",
+                                              "catalog-sync", "catalog-context"))
     parser.add_argument("--directory", type=Path)
     parser.add_argument("--branch")
     parser.add_argument("--source")
     parser.add_argument("--pr", type=int)
+    parser.add_argument("--tag")
     args = parser.parse_args()
     if args.operation == "context":
         result = event_context(json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text()),
@@ -227,7 +325,16 @@ def main():
                 output.write(f"{key}={value}\n")
         return
     github = GitHub(os.environ["GITHUB_REPOSITORY"])
-    if args.operation == "promote":
+    if args.operation in ("catalog-sync", "catalog-context"):
+        if not args.tag or not args.source:
+            parser.error("catalog operations require --tag and --source")
+        if args.operation == "catalog-context":
+            result = catalog_context(github, args.tag, args.source)
+            with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                output.write("json=" + json.dumps(result, separators=(",", ":")) + "\n")
+        else:
+            result = sync_catalog(github, args.tag, args.source)
+    elif args.operation == "promote":
         if not args.pr or args.pr < 1:
             parser.error("--pr is required")
         result = promote(github, args.pr)
@@ -237,6 +344,9 @@ def main():
         with tempfile.TemporaryDirectory(prefix="interceptor-publish-") as temporary:
             inventory, files = assemble(args.directory.resolve(), Path(temporary) / "assets")
             result = publish(github, args.branch, args.source, inventory, files)
+        if os.environ.get("GITHUB_OUTPUT"):
+            with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                output.write("published=" + str(result == "prerelease-published").lower() + "\n")
     print(json.dumps({"status": result}))
 
 
