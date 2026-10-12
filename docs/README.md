@@ -35,6 +35,7 @@ Reference and operational guides:
 - [Docker identity and recovery](docker-identity.md)
 - [Security and trust model](security.md)
 - [Troubleshooting](troubleshooting.md)
+- [Candidate releases](candidate-releases.md)
 
 ## Vocabulary
 

@@ -6,6 +6,7 @@ build:
 
 test:
 	go test ./...
+	python3 -m unittest discover -s scripts/tests
 
 fmt:
 	gofmt -w $$(find cmd examples internal -name '*.go' -type f)

@@ -39,7 +39,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/statejournal"
 )
 
-const version = buildinfo.Version
+var version = buildinfo.Version
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {

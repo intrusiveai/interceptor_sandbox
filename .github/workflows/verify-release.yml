@@ -1,0 +1,152 @@
+name: verify-release-candidates
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+  push:
+    branches: [main, "candidate-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  context:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.release.outputs.mode }}
+      version: ${{ steps.release.outputs.version }}
+      branch: ${{ steps.release.outputs.branch }}
+      source: ${{ steps.release.outputs.source }}
+      pr: ${{ steps.release.outputs.pr }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - id: release
+        run: python3 scripts/publish_release.py context
+
+  verify:
+    needs: context
+    if: needs.context.outputs.mode == 'verify' || needs.context.outputs.mode == 'publish'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: "1.26.5"
+          cache: true
+      - name: Verify Interceptor
+        run: |
+          make test
+          go vet ./...
+
+  candidates:
+    needs: [context, verify]
+    # main verifies merged code; it never rebuilds the promoted release.
+    if: github.ref != 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: "1.26.5"
+          cache: true
+      - name: Build twice and compare release archive
+        env:
+          RELEASE_VERSION: ${{ needs.context.outputs.version }}
+          TARGET_PLATFORM: ${{ matrix.platform }}
+        run: |
+          python3 scripts/build_release.py --version "$RELEASE_VERSION" --platform "$TARGET_PLATFORM" --output dist/first
+          python3 scripts/build_release.py --version "$RELEASE_VERSION" --platform "$TARGET_PLATFORM" --output dist/second
+          diff -r dist/first dist/second
+      - name: Exercise native release binary
+        if: matrix.platform == 'linux/amd64'
+        env:
+          RELEASE_VERSION: ${{ needs.context.outputs.version }}
+        run: |
+          mkdir dist/installed
+          tar -C dist/installed -xzf dist/first/linux-amd64.tar.gz
+          test "$(dist/installed/interceptor version)" = "$RELEASE_VERSION"
+      - name: Retain release candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-candidate-${{ strategy.job-index }}
+          path: dist/first/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: [context, candidates]
+    if: >-
+      needs.context.outputs.mode == 'publish' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      startsWith(github.ref, 'refs/heads/candidate-v') && !github.event.deleted
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    concurrency:
+      group: interceptor-release-v${{ needs.context.outputs.version }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Download this run's four verified candidates
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir -p dist/candidates
+          for index in 0 1 2 3; do
+            gh run download "$GITHUB_RUN_ID" --name "release-candidate-$index" --dir dist/candidates
+          done
+      - name: Publish rolling prerelease
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          CANDIDATE_BRANCH: ${{ needs.context.outputs.branch }}
+          CANDIDATE_SOURCE: ${{ needs.context.outputs.source }}
+        run: >-
+          python3 scripts/publish_release.py publish
+          --directory dist/candidates
+          --branch "$CANDIDATE_BRANCH"
+          --source "$CANDIDATE_SOURCE"
+
+  promote:
+    needs: context
+    if: >-
+      needs.context.outputs.mode == 'promote' && github.event_name == 'pull_request' &&
+      github.event.action == 'closed' && github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.event.pull_request.head.ref, 'candidate-v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: read
+    concurrency:
+      group: interceptor-release-v${{ needs.context.outputs.version }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Promote the merged candidate's existing artifacts
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          RELEASE_PR: ${{ needs.context.outputs.pr }}
+        run: python3 scripts/publish_release.py promote --pr "$RELEASE_PR"
