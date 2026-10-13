@@ -47,32 +47,149 @@ stable entries retain the exact artifact identities and use `tags: ["release"]`.
 
 ## One-time repository setup
 
-The workflow normally uses the job-scoped `GITHUB_TOKEN`. GitHub can require
-workflow permission when a candidate changes workflow files relative to the
-default branch. In that case, configure `RELEASE_TOKEN` as a repository secret
-with Contents read/write and Workflows write; it must also be able to read pull
-requests for promotion.
+Complete these steps with administrator access to
+[`intrusiveai/interceptor_sandbox`](https://github.com/intrusiveai/interceptor_sandbox).
+All repository settings below belong to this repository unless stated otherwise.
+The releases service must already be deployed; step 5 explains where to obtain
+its configuration values.
 
-Rolling pre-releases require GitHub release immutability to be disabled and rules
-that allow the publisher to create and update `v*` candidate tags. Protect
-`candidate-v*`, `v*`, and release workflow changes from unauthorized updates.
-Both `.github/workflows/publish-catalog.yml` and its helper must exist on the
-default branch and the selected release tag.
+### 1. Make the release workflows available on GitHub
 
-Configure the `production` environment in `intrusiveai/interceptor_sandbox` with:
+1. Merge or push the release-workflow commits to the GitHub default branch,
+   `main`.
+2. In GitHub's **Code** tab, select `main` and confirm that
+   `.github/workflows/verify-release.yml`,
+   `.github/workflows/publish-catalog.yml`, and `scripts/publish_release.py` exist.
+3. Create candidate branches from a commit containing those files. The catalog
+   caller must exist on both the default branch and the candidate's eventual
+   `v*` tag for GitHub to dispatch it.
 
-| Variable | Purpose |
-| --- | --- |
-| `AWS_REGION` | Region of the existing releases service. |
-| `CONTENT_BUCKET` | Existing releases content bucket. |
-| `CLOUDFRONT_DISTRIBUTION_ID` | Existing releases distribution. |
-| `CATALOG_PUBLISHER_ROLE_ARN` | Interceptor's catalog-only role from the releases service. |
+### 2. Allow the workflow's actions
 
-The environment must permit protected `v*` tags and retain its configured
-reviewers. The tagged caller invokes the reusable publisher at reviewed commit
-`ba4049627fa4a6602c5ea63efab6fb74c8643a61`. Only that reusable workflow receives
-OIDC permission. No AWS access-key secret, cross-repository write token, site
-deployment, or per-release infrastructure change is required.
+1. Open **Settings → Actions → General** and ensure Actions is enabled.
+2. If the repository or organization restricts allowed actions, allow the pinned
+   `actions/checkout`, `actions/setup-go`, and `actions/upload-artifact` actions,
+   plus `intrusiveai-engineering/releases/.github/workflows/publish-catalog.yml`.
+   The reusable publisher also uses `aws-actions/configure-aws-credentials`.
+3. Save any changes. If an organization policy locks these settings, have the
+   organization owner update the allowlist.
+
+GitHub creates `GITHUB_TOKEN` for each job automatically. **Do not create a secret
+named `GITHUB_TOKEN`.** The checked-in workflows request Contents and Actions
+write access only for the publishing jobs; the repository's default workflow
+permission can remain read-only. The catalog caller uses the reviewed publisher
+at `ba4049627fa4a6602c5ea63efab6fb74c8643a61`, which must be accessible from this
+repository.
+
+### 3. Decide whether to add `RELEASE_TOKEN`
+
+Start with the automatic `GITHUB_TOKEN` if candidate workflow files are already
+on `main` and your tag rules permit it. No token creation is needed in that case.
+Add `RELEASE_TOKEN` if a candidate will include workflow changes not yet on
+`main`, GitHub rejects its tag write for missing workflow permission, or the tag
+rules in step 4 require a permitted maintainer identity.
+
+To add the optional token:
+
+1. In your personal GitHub account, open **Settings → Developer settings →
+   Personal access tokens → Fine-grained tokens → Generate new token**.
+2. Name it `interceptor-release`, choose an expiration, and select **intrusiveai**
+   as the resource owner. Under **Repository access**, choose **Only select
+   repositories**, then select **interceptor_sandbox**.
+3. Under **Repository permissions**, grant **Contents: Read and write**,
+   **Workflows: Read and write**, and **Pull requests: Read-only**. Leave other
+   permissions at their defaults. The token owner must have write access to the
+   repository and any required tag-rule bypass.
+4. Generate and copy the token. If organization approval is required, have an
+   organization owner approve it before using it.
+5. Return to the repository's **Settings → Secrets and variables → Actions →
+   Secrets → New repository secret**. Name the secret exactly `RELEASE_TOKEN`,
+   paste the token as its value, and click **Add secret**. Use a repository
+   secret, since the GitHub release jobs do not run inside an environment.
+6. Renew the token and update this secret before it expires. The workflow selects
+   it automatically when present; no YAML edit is needed. Catalog dispatch still
+   uses the automatic `GITHUB_TOKEN`, so this optional token needs no Actions
+   permission.
+
+See GitHub's [token creation instructions](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token).
+
+### 4. Permit rolling candidate tags and release assets
+
+1. Open **Settings → General → Releases**. Leave **Enable release immutability**
+   unchecked; disable it if enabled. If enforced by the organization, ask the
+   organization owner to exempt this repository before publishing candidates.
+   Rolling candidates replace assets and move their `v*` tag on each update.
+2. Open **Settings → Rules → Rulesets** and inspect the rules targeting `v*` tags.
+   The publishing identity must be allowed to create and update these tags,
+   including moving an existing tag to the next candidate commit.
+3. If those rules restrict creation, updates, or force pushes, configure their
+   **Bypass list** for the publishing identity. For a personal `RELEASE_TOKEN`,
+   add an authorized maintainer team or role containing its owner and select
+   **Always allow**. Token permissions alone do not bypass a ruleset. Keep the
+   restrictions for other users; do not assume the automatic token can bypass them.
+4. Review branch rules for `main` and `candidate-v*` so that only trusted
+   maintainers can approve release-workflow changes or push candidate code.
+   Preserve direct candidate pushes if you intend to use that supported path.
+
+GitHub describes these controls in [ruleset setup](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository).
+
+### 5. Create the `production` environment and add service values
+
+1. Obtain the deployed service values from the releases-service administrator.
+   If you administer its initialized production Terraform checkout, run these
+   read-only commands from the `intrusiveai-engineering/releases` checkout:
+
+   ```sh
+   terraform -chdir=infra/service output -raw content_bucket_name
+   terraform -chdir=infra/service output -raw cloudfront_distribution_id
+   terraform -chdir=infra/service output -json catalog_publisher_role_arns
+   ```
+
+   Take the role ARN from the map's `interceptor_sandbox` entry. Read the bucket
+   region from the deployed production configuration's `aws_region` value. If the
+   role is missing, the service administrator must complete the service's
+   [catalog publisher setup](https://github.com/intrusiveai-engineering/releases/blob/ba4049627fa4a6602c5ea63efab6fb74c8643a61/docs/deployment.md#enabling-direct-catalog-publication-on-an-existing-deployment).
+   Do not substitute Operator's or Attack Harness's role.
+2. In **interceptor_sandbox → Settings → Environments**, open `production`, or
+   click **New environment**, enter exactly `production`, and click
+   **Configure environment**.
+3. Under **Deployment branches and tags**, choose **Selected branches and tags**.
+   Click **Add deployment branch or tag rule**, select **Tag**, enter `v*`, and
+   add the rule. This is a tag rule, not a `candidate-v*` branch rule.
+4. Retain existing required reviewers. If your release policy requires approval,
+   add its maintainers under **Required reviewers** and save. An eligible reviewer
+   must approve each waiting catalog run within its 30-minute publication timeout.
+5. Under **Environment variables**, click **Add variable** for each row below,
+   enter the exact name and deployed value, and save it. These are variables,
+   not secrets.
+
+   | Variable | Value to enter |
+   | --- | --- |
+   | `AWS_REGION` | Deployed content bucket's region. |
+   | `CONTENT_BUCKET` | `content_bucket_name` output. |
+   | `CLOUDFRONT_DISTRIBUTION_ID` | `cloudfront_distribution_id` output. |
+   | `CATALOG_PUBLISHER_ROLE_ARN` | `interceptor_sandbox` value from `catalog_publisher_role_arns`. |
+
+Only the reusable publisher obtains temporary AWS credentials through GitHub
+OIDC. Do not add AWS access keys. The environment belongs to
+`intrusiveai/interceptor_sandbox`, not `intrusiveai-engineering/releases`.
+See GitHub's [environment setup instructions](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments).
+
+### 6. Confirm setup with the first candidate
+
+1. Push the intended `candidate-v<version>` branch and open **Actions →
+   verify-release-candidates**. Wait for verification and builds to finish and
+   for the publish job to dispatch the catalog run.
+2. Open the resulting **publish Interceptor release catalog** run. If it is
+   waiting for environment approval, use **Review deployments**, select
+   `production`, and approve it after reviewing the candidate.
+3. Confirm both runs finish successfully. Under **Releases**, verify that
+   `v<version>` is marked **Pre-release** and includes all four platform archives
+   and `release-index-entry.json`.
+4. Open the [public Interceptor catalog](https://releases.intrusive.ai/docs/releases/interceptor_sandbox.json)
+   and confirm the version has `tags: ["rc"]` with the same archive URLs and
+   digests. It should remain hidden from the stable download listing. A dispatch
+   acknowledgement alone does not confirm successful setup.
 
 ## Catalog publication and recovery
 
