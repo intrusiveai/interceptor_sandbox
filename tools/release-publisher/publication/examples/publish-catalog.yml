@@ -1,0 +1,60 @@
+# Copy into the PRODUCT repository as .github/workflows/publish-catalog.yml.
+name: publish release catalog
+on:
+  workflow_dispatch:
+    inputs:
+      entry_json:
+        description: One entry generated from published artifacts (rc or qualified release)
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        shell: bash
+        working-directory: tools/release-publisher
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      CONTENT_BUCKET: ${{ vars.CONTENT_BUCKET }}
+      CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}
+      GOWORK: 'off'
+      GOPROXY: 'off'
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tools/release-publisher/go.mod
+          cache-dependency-path: tools/release-publisher/go.mod
+      - name: Validate catalog entry before assuming AWS role
+        env:
+          ENTRY_JSON: ${{ inputs.entry_json }}
+          PRODUCT: ${{ github.event.repository.name }}
+          PRODUCT_REPOSITORY: ${{ github.repository }}
+        run: |
+          case "$PRODUCT_REPOSITORY" in
+            intrusiveai/operator_sandbox|intrusiveai/interceptor_sandbox|intrusiveai/attack_harness) ;;
+            *) echo 'unexpected product repository' >&2; exit 1 ;;
+          esac
+          printf '%s\n' "$ENTRY_JSON" > "$RUNNER_TEMP/catalog-entry.json"
+          go run ./cmd/catalog-publisher catalog merge --product "$PRODUCT" \
+            --entry "$RUNNER_TEMP/catalog-entry.json" --output "$RUNNER_TEMP/validated-catalog.json"
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.CATALOG_PUBLISHER_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          audience: sts.amazonaws.com
+      - name: Publish and verify public delivery
+        env:
+          PRODUCT: ${{ github.event.repository.name }}
+        run: bash scripts/publish-catalog.sh "$RUNNER_TEMP/catalog-entry.json" "$PRODUCT"

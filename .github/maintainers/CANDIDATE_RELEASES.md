@@ -9,16 +9,21 @@ Push to `candidate-v1.2.3`, including by merging another branch into it, to run
 the repository tests and reproducibly build Linux and macOS archives for AMD64
 and ARM64. A successful run publishes or replaces the GitHub **Pre-release**
 named **Interceptor Sandbox 1.2.3** at tag `v1.2.3`. It then publishes that
-candidate's `rc` catalog entry through the releases service and waits for the
-service's public-delivery verification to pass.
+candidate's `rc` catalog entry directly to the releases bucket using this
+repository's local publisher, and waits for public-delivery verification to pass.
+No workflow, checkout, site build, or deployment in the private releases repository
+is involved.
 
-Wait for the candidate workflow to finish before opening a pull request from
+Wait for the candidate workflow to finish and complete QA against those exact
+downloaded artifacts before opening a pull request from
 `candidate-v1.2.3` to `main`. Bring `main` into the candidate first so that the
 merge does not change its file tree. Merging the same-repository pull request
 promotes the existing GitHub release without rebuilding or moving its tag. It
 also republishes the same artifact identities with the catalog label `release`,
 which makes the version eligible for the public website listing. The reviewed
-candidate merge is Interceptor's production-promotion gate.
+candidate merge is Interceptor's production-promotion gate: reviewers must confirm
+QA of the current candidate, not merely passing build checks. Any candidate
+rebuild requires qualification of the replacement bytes before promotion.
 
 The executable version is `1.2.3`; pre-release is a GitHub release status rather
 than a version suffix. The tag remains on the candidate source commit. Merge,
@@ -50,8 +55,8 @@ stable entries retain the exact artifact identities and use `tags: ["release"]`.
 Complete these steps with administrator access to
 [`intrusiveai/interceptor_sandbox`](https://github.com/intrusiveai/interceptor_sandbox).
 All repository settings below belong to this repository unless stated otherwise.
-The releases service must already be deployed; step 5 explains where to obtain
-its configuration values.
+The releases service must already be deployed. Step 5 configures its existing
+role and environment; step 6 configures the required GitHub identity format.
 
 ### 1. Make the release workflows available on GitHub
 
@@ -59,27 +64,31 @@ its configuration values.
    `main`.
 2. In GitHub's **Code** tab, select `main` and confirm that
    `.github/workflows/verify-release.yml`,
-   `.github/workflows/publish-catalog.yml`, and `scripts/publish_release.py` exist.
+   `.github/workflows/publish-catalog.yml`, `scripts/publish_release.py`, and the
+   complete `tools/release-publisher` directory exist.
 3. Create candidate branches from a commit containing those files. The catalog
-   caller must exist on both the default branch and the candidate's eventual
-   `v*` tag for GitHub to dispatch it.
+   workflow and local publisher must exist on both the default branch and the
+   candidate's eventual `v*` tag for GitHub to dispatch it.
 
 ### 2. Allow the workflow's actions
 
 1. Open **Settings → Actions → General** and ensure Actions is enabled.
 2. If the repository or organization restricts allowed actions, allow the pinned
-   `actions/checkout`, `actions/setup-go`, and `actions/upload-artifact` actions,
-   plus `intrusiveai-engineering/releases/.github/workflows/publish-catalog.yml`.
-   The reusable publisher also uses `aws-actions/configure-aws-credentials`.
+   `actions/checkout`, `actions/setup-go`, and `actions/upload-artifact` actions
+   (or enable **Allow actions created by GitHub**). Also allow
+   `aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd`.
+   Use the exact pins in both workflow files if your policy permits individual
+   SHAs rather than GitHub-owned actions generally. Remove the obsolete
+   `intrusiveai-engineering/releases/.github/workflows/publish-catalog.yml` exception;
+   this repository no longer calls it or needs access to that private repository.
 3. Save any changes. If an organization policy locks these settings, have the
    organization owner update the allowlist.
 
 GitHub creates `GITHUB_TOKEN` for each job automatically. **Do not create a secret
 named `GITHUB_TOKEN`.** The checked-in workflows request Contents and Actions
 write access only for the publishing jobs; the repository's default workflow
-permission can remain read-only. The catalog caller uses the reviewed publisher
-at `ba4049627fa4a6602c5ea63efab6fb74c8643a61`, which must be accessible from this
-repository.
+permission can remain read-only. The catalog job requests Contents and Pull
+requests read access plus `id-token: write` for temporary AWS credentials.
 
 ### 3. Decide whether to add `RELEASE_TOKEN`
 
@@ -135,7 +144,14 @@ GitHub describes these controls in [ruleset setup](https://docs.github.com/en/re
 
 ### 5. Create the `production` environment and add service values
 
-1. Obtain the deployed service values from the releases-service administrator.
+1. Ask the releases-service administrator to confirm that the existing Interceptor
+   role's trust policy has been migrated to the product-local workflow and custom
+   subject described in step 6. It must accept only this repository's numeric
+   identity, the `production` environment, `v*` tags, the exact
+   `.github/workflows/publish-catalog.yml` reference, and audience
+   `sts.amazonaws.com`. Keep its existing catalog-only permissions and role ARN.
+   This is a one-time IAM migration, not a routine release or site deployment.
+   Obtain the deployed service values from that administrator.
    If you administer its initialized production Terraform checkout, run these
    read-only commands from the `intrusiveai-engineering/releases` checkout:
 
@@ -147,15 +163,17 @@ GitHub describes these controls in [ruleset setup](https://docs.github.com/en/re
 
    Take the role ARN from the map's `interceptor_sandbox` entry. Read the bucket
    region from the deployed production configuration's `aws_region` value. If the
-   role is missing, the service administrator must complete the service's
-   [catalog publisher setup](https://github.com/intrusiveai-engineering/releases/blob/ba4049627fa4a6602c5ea63efab6fb74c8643a61/docs/deployment.md#enabling-direct-catalog-publication-on-an-existing-deployment).
+   role is missing or still trusts a centralized reusable workflow, the service
+   administrator must complete the product-local publisher migration first.
    Do not substitute Operator's or Attack Harness's role.
 2. In **interceptor_sandbox → Settings → Environments**, open `production`, or
    click **New environment**, enter exactly `production`, and click
    **Configure environment**.
 3. Under **Deployment branches and tags**, choose **Selected branches and tags**.
    Click **Add deployment branch or tag rule**, select **Tag**, enter `v*`, and
-   add the rule. This is a tag rule, not a `candidate-v*` branch rule.
+   add the rule. This is a tag rule, not a `candidate-v*` branch rule. Remove any
+   branch rules (including `main`) or other tag patterns from this environment
+   after checking for other consumers; it should permit only protected `v*` tags.
 4. Retain existing required reviewers. If your release policy requires approval,
    add its maintainers under **Required reviewers** and save. An eligible reviewer
    must approve each waiting catalog run within its 30-minute publication timeout.
@@ -165,17 +183,66 @@ GitHub describes these controls in [ruleset setup](https://docs.github.com/en/re
 
    | Variable | Value to enter |
    | --- | --- |
-   | `AWS_REGION` | Deployed content bucket's region. |
-   | `CONTENT_BUCKET` | `content_bucket_name` output. |
-   | `CLOUDFRONT_DISTRIBUTION_ID` | `cloudfront_distribution_id` output. |
-   | `CATALOG_PUBLISHER_ROLE_ARN` | `interceptor_sandbox` value from `catalog_publisher_role_arns`. |
+   | `AWS_REGION` | `us-west-2` |
+   | `CONTENT_BUCKET` | `intrusiveai-releases` |
+   | `CLOUDFRONT_DISTRIBUTION_ID` | `E1ET1MODBEJLY6` |
+   | `CATALOG_PUBLISHER_ROLE_ARN` | `arn:aws:iam::389547485478:role/releases-interceptor_sandbox-catalog-publisher` |
 
-Only the reusable publisher obtains temporary AWS credentials through GitHub
-OIDC. Do not add AWS access keys. The environment belongs to
+   These are the reviewed production values; confirm them against the deployed
+   service before saving. Do not add a record-publisher role or AWS access keys.
+
+Only the local catalog job obtains temporary AWS credentials through GitHub
+OIDC. The environment belongs to
 `intrusiveai/interceptor_sandbox`, not `intrusiveai-engineering/releases`.
 See GitHub's [environment setup instructions](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments).
 
-### 6. Confirm setup with the first candidate
+### 6. Set the repository's custom OIDC subject
+
+OIDC lets GitHub obtain temporary AWS credentials. AWS checks a subject string
+identifying the repository, environment, tag, and workflow file. The default
+GitHub subject does not satisfy the new trust policy.
+
+1. Inventory workflows requesting `id-token: write` and coordinate any other
+   cloud roles before changing the subject. In this checkout, run:
+
+   ```sh
+   rg -n 'id-token:|environment:' .github/workflows
+   ```
+
+   This setting affects **every OIDC job in this repository**, not just releases.
+   All such jobs must declare an environment for the new subject to be issued.
+2. Sign in to `gh` with repository administrator access. Run this read-only
+   command and retain its output with your configuration change record:
+
+   ```sh
+   gh api repos/intrusiveai/interceptor_sandbox/actions/oidc/customization/sub
+   ```
+
+3. After the administrator confirms the IAM migration in step 5, run:
+
+   ```sh
+   gh api --method PUT \
+     repos/intrusiveai/interceptor_sandbox/actions/oidc/customization/sub \
+     --input - <<'JSON'
+   {"use_default":false,"include_claim_keys":["repository_id","repository_owner_id","environment","ref","workflow_ref"]}
+   JSON
+   ```
+
+   Keep the exact key order. Use `workflow_ref`, not `job_workflow_ref`: the
+   publisher is an ordinary job, not a reusable workflow.
+4. Repeat the GET command from step 2 and confirm `use_default` is `false` and
+   the five keys appear in the specified order. For tag `v0.0.1`, the subject
+   expected by the role is:
+
+   ```text
+   repository_id:1384022338:repository_owner_id:296295422:environment:production:ref:refs/tags/v0.0.1:workflow_ref:intrusiveai/interceptor_sandbox/.github/workflows/publish-catalog.yml@refs/tags/v0.0.1
+   ```
+
+The subject binds the workflow file and ref, not its contents. Protect release
+tags and review publisher/workflow changes before approving production jobs.
+See GitHub's [repository OIDC configuration API](https://docs.github.com/en/rest/actions/oidc#set-the-customization-template-for-an-oidc-subject-claim-for-a-repository).
+
+### 7. Confirm setup with the first candidate
 
 1. Push the intended `candidate-v<version>` branch and open **Actions →
    verify-release-candidates**. Wait for verification and builds to finish and
@@ -190,21 +257,39 @@ See GitHub's [environment setup instructions](https://docs.github.com/en/actions
    and confirm the version has `tags: ["rc"]` with the same archive URLs and
    digests. It should remain hidden from the stable download listing. A dispatch
    acknowledgement alone does not confirm successful setup.
+5. Complete QA of the candidate, record the evidence on its reviewed pull
+   request, then merge it into `main`. Approve the stable catalog job if prompted.
+   Confirm the GitHub release is no longer a pre-release, its archives and tag
+   are unchanged, and its catalog entry now has `tags: ["release"]`. Reload the
+   [downloads website](https://releases.intrusive.ai/): the stable version should
+   appear without a site build or deployment. Confirm prior catalog history is
+   retained. A repeat publication of the same stable entry must be idempotent.
+
+For an existing rolling candidate such as `candidate-v0.0.1`, first bring the
+updated `main` into the candidate and let its normal candidate build publish the
+new commit. Rerunning an old run executes the old workflow code. Do not manually
+move an immutable or stable tag to install the publisher. The updated workflow
+and bundle must be in the tagged source before a catalog retry can use them.
 
 ## Catalog publication and recovery
 
 The parent release workflow uploads `release-index-entry.json`, dispatches
 `.github/workflows/publish-catalog.yml` at the published `v*` tag, correlates the
-resulting run, and waits for success. The tagged caller independently rechecks
-the source, release state, artifact inventory, URLs, and digests before invoking
-the releases service. A dispatch acknowledgement, skipped run, failed run, or
-timeout does not count as publication.
+resulting run, and waits for success. This dispatch stays in **this repository**;
+it runs at the release tag to satisfy the AWS trust policy. The tagged job
+independently rechecks the source, release state, artifact inventory, URLs, and
+digests and validates the catalog entry before acquiring AWS credentials. It
+then merges the entry using the committed local publisher. A dispatch
+acknowledgement, skipped run, failed run, or timeout does not count as publication.
 
 The public `/docs/releases/interceptor_sandbox.json` catalog retains candidates
 and history. Candidates are readable but hidden from the website; only the first
 two entries labeled exactly `release` are displayed. The publisher merges one
 entry and refuses to demote or replace the artifacts of a final version. Never
-upload a locally reconstructed full catalog.
+upload a locally reconstructed full catalog. The publisher uses conditional S3
+writes with bounded retries so a concurrent publication does not overwrite
+another writer's changes. It checks stored bytes and headers, invalidates only
+the catalog path, and verifies the public response.
 
 If GitHub publication succeeds but catalog publication fails, inspect the linked
 catalog run and correct that failure without rebuilding stable artifacts. Rerun
@@ -235,5 +320,35 @@ run is cancelled on timeout. Confirm timed-out runs have stopped before retrying
 
 Run `make test` locally to exercise rolling release replacement, failure recovery,
 catalog derivation, candidate-to-stable metadata continuity, and promotion against
-a simulated GitHub service. Local tests do not publish or configure GitHub, AWS,
-the releases service, or the public website.
+a simulated GitHub service. It also runs the local publisher's race tests, vet,
+and publication tests using simulated S3 and local HTTP delivery. The integration
+test carries Interceptor's generated four-platform entry through candidate
+replacement, promotion, and retry with that actual publisher. Local tests do not
+publish or configure GitHub, AWS, the releases service, or the public website.
+
+## Updating the local publisher
+
+`tools/release-publisher` is the complete catalog-only export from reviewed
+releases commit `c651c5fa47346f1ca02abe33791667f838b59e03`.
+`publisher-source.json` records the source revision and each file's SHA-256.
+The private module name is only a local Go import namespace; publication runs
+with `GOWORK=off`, `GOPROXY=off`, and `GOTOOLCHAIN=local` and fetches no private code.
+The export includes its upstream reference documentation and workflow example;
+this file remains the repository-specific maintainer guide. Neither is included
+in the standard public documentation or release archives.
+
+1. Obtain a complete catalog-only export for `interceptor_sandbox` from an
+   authorized releases maintainer at an explicitly reviewed commit. The
+   maintainer runs `scripts/export-publisher.py --revision <full-commit-sha>
+   --product interceptor_sandbox --output <new-directory>` in that checkout.
+   Never use a `--working-tree` export for a product release.
+2. Review the full diff, including removed files, and replace the old bundle
+   with the complete new export and its provenance manifest. Do not edit vendor
+   files in place or install only the shell script. Adapt the workflow example
+   while retaining Interceptor's actual-release and promotion checks.
+3. Run `make test`. Go 1.26.5, Bash, jq, curl, and Python 3 are required locally;
+   publication additionally needs AWS CLI v2 with conditional `put-object`.
+4. Review and commit the bundle, workflow, and any updated setup instructions.
+   Deliver them to both `main` and the next candidate before its tag is built.
+   Confirm live OIDC and public delivery using step 7; local tests alone cannot
+   establish deployment readiness.

@@ -1,7 +1,9 @@
 """Exercise candidate and stable release catalog publication."""
 
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import unittest
 from unittest.mock import patch
@@ -161,6 +163,20 @@ class CatalogTest(unittest.TestCase):
         self.github.assets = altered
         with self.assertRaisesRegex(ValueError, "URL"):
             release.catalog_entry(self.github, "v1.2.3", FIRST)
+
+    def test_dispatch_errors_include_github_diagnostic_without_token(self):
+        result = subprocess.CompletedProcess([], 1, stdout="", stderr=(
+            "gh: Workflow does not have workflow_dispatch trigger (HTTP 422) secret-token"
+        ))
+        with patch.object(release.subprocess, "run", return_value=result), patch.dict(
+            os.environ, GH_TOKEN="secret-token"
+        ):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 422") as error:
+                release.GitHub("intrusiveai/interceptor_sandbox").api(
+                    "actions/workflows/publish-catalog.yml/dispatches", "POST", {}
+                )
+        self.assertNotIn("secret-token", str(error.exception))
+        self.assertIn("workflow_dispatch", str(error.exception))
 
 
 if __name__ == "__main__":

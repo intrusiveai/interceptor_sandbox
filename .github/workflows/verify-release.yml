@@ -125,7 +125,7 @@ jobs:
           --directory dist/candidates
           --branch "$CANDIDATE_BRANCH"
           --source "$CANDIDATE_SOURCE"
-      - name: Publish candidate catalog and wait for service verification
+      - name: Publish candidate catalog and verify public delivery
         if: steps.publication.outputs.published == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -162,7 +162,7 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
           RELEASE_PR: ${{ needs.context.outputs.pr }}
         run: python3 scripts/publish_release.py promote --pr "$RELEASE_PR"
-      - name: Publish stable catalog and wait for service verification
+      - name: Publish stable catalog and verify public delivery
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: v${{ needs.context.outputs.version }}

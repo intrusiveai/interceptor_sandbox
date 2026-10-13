@@ -1,0 +1,19 @@
+{
+  "product": "interceptor_sandbox",
+  "source_repository": "intrusiveai-engineering/releases",
+  "source_revision": "c651c5fa47346f1ca02abe33791667f838b59e03",
+  "working_tree": false,
+  "sha256": {
+    "cmd/catalog-publisher/main.go": "6615634b623aacc0fe6e7727eb5127fd277f93f653f14258b41d24049316053a",
+    "go.mod": "84f574162ff04d9baf2d2deb95678ac6497fcfa8892aab60d77ea6073f2b78f4",
+    "internal/catalog/merge.go": "0fc823571f841149e256bb078d55255a32796f1b32bac6b765b8432ed0706062",
+    "internal/catalog/merge_test.go": "e3f91fee949fdfe53334068d960eacdfd3946ff9c19fbe3d84cd76ebe18bd06b",
+    "internal/catalog/model.go": "ff1df9f66d885d556fd35c4d1847f6fb29d10c5c4a880708eec84a6eb3f49d28",
+    "internal/catalogcli/run.go": "d270766779ce1a47361967db2ed0b5626aae4bcb8549eb8ba6625e9d0f06cb26",
+    "publication/README.md": "68caededbb62207fdc3d2df54a581b3bd3cabf16aa6ae7cc9956efa6ffa9a7f4",
+    "publication/examples/publish-catalog.yml": "1972deba6dc0866874b6f29c1951765274baa82f563bfe0fcdc91771e8dbed33",
+    "scripts/publish-catalog.sh": "1bc836caacef1622b9c64e72d584f86e3b588f5ffb37a71601e6f791c7198976",
+    "scripts/tests/fake_s3.py": "53c68942819c28490bd2b102b9c0d5fe9be350fc625518427c62c8e90a5a69be",
+    "scripts/tests/test_catalog.py": "5f42b9d502257382d2f8a15f0fddaf84009f255cabd1c3f074a7c2c21a2857f6"
+  }
+}

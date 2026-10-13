@@ -65,7 +65,12 @@ class GitHub:
         if result.returncode:
             if missing and "(HTTP 404)" in result.stderr:
                 return None
-            raise RuntimeError("GitHub request failed: " + method + " " + path)
+            detail = result.stderr.strip()
+            for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+                token = os.environ.get(name)
+                if token:
+                    detail = detail.replace(token, "[redacted]")
+            raise RuntimeError("GitHub request failed: " + method + " " + path + ": " + detail)
         return json.loads(result.stdout) if result.stdout.strip() else None
 
     def upload(self, tag, files, replace=False):
