@@ -143,14 +143,17 @@ class CandidateWorkflowTest(unittest.TestCase):
                 "toolchain": builder.TOOLCHAIN,
                 "cgo_enabled": False,
             }
-            builder.archive(
-                candidates / (platform.replace("/", "-") + ".tar.gz"),
-                (
-                    ("interceptor", executable, 0o755),
+            files = [("interceptor", executable, 0o755)]
+            if platform.startswith("darwin/"):
+                metadata["linux_companion"] = {"filename": "interceptor-linux",
+                    "platform": platform.replace("darwin/", "linux/"),
+                    "sha256": hashlib.sha256(executable).hexdigest()}
+                files.append(("interceptor-linux", executable, 0o755))
+            files.extend((
                     ("release.json", (json.dumps(metadata) + "\n").encode(), 0o644),
                     ("LICENSE", b"license", 0o644),
-                ),
-            )
+            ))
+            builder.archive(candidates / (platform.replace("/", "-") + ".tar.gz"), files)
         inventory, files = release.assemble(candidates, self.root / "assembled")
         self.assertEqual(inventory["version"], "1.2.3")
         self.assertEqual(inventory["source_commit"], FIRST)

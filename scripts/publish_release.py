@@ -98,14 +98,34 @@ def checksum(path):
 def read_archive(path):
     with tarfile.open(path, "r:gz") as archive:
         members = archive.getmembers()
-        if [member.name for member in members] != ["interceptor", "release.json", "LICENSE"]:
-            raise ValueError("release archive has an unexpected file inventory")
         if any(not member.isfile() for member in members):
             raise ValueError("release archive contains a non-file member")
-        executable = archive.extractfile("interceptor").read()
+        if sum(member.name == "release.json" for member in members) != 1:
+            raise ValueError("release archive requires one release.json")
         metadata = json.load(archive.extractfile("release.json"))
-    if metadata.get("binary_sha256") != hashlib.sha256(executable).hexdigest():
-        raise ValueError("release archive binary digest differs")
+        platform = metadata.get("platform")
+        if platform not in PLATFORMS or path.name != platform.replace("/", "-") + ".tar.gz":
+            raise ValueError("release archive platform/filename differs")
+        names = ["interceptor", "release.json", "LICENSE"]
+        if platform.startswith("darwin/"):
+            names.insert(1, "interceptor-linux")
+        elif "linux_companion" in metadata:
+            raise ValueError("Linux releases must not declare a companion")
+        if [member.name for member in members] != names:
+            raise ValueError("release archive has an unexpected file inventory")
+        executable = archive.extractfile("interceptor").read()
+        if metadata.get("binary_sha256") != hashlib.sha256(executable).hexdigest():
+            raise ValueError("release archive binary digest differs")
+        if archive.getmember("interceptor").mode != 0o755:
+            raise ValueError("release CLI must be executable")
+        if platform.startswith("darwin/"):
+            companion = archive.extractfile("interceptor-linux").read()
+            expected = {"filename": "interceptor-linux", "platform": platform.replace("darwin/", "linux/"),
+                        "sha256": hashlib.sha256(companion).hexdigest()}
+            if metadata.get("linux_companion") != expected:
+                raise ValueError("release Linux companion metadata/digest differs")
+            if archive.getmember("interceptor-linux").mode != 0o755:
+                raise ValueError("release Linux companion must be executable")
     return metadata
 
 
@@ -312,13 +332,23 @@ def promote(github, number):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("operation", choices=("context", "publish", "promote",
-                                              "catalog-sync", "catalog-context"))
+                                              "catalog-sync", "catalog-context", "verify-archive"))
     parser.add_argument("--directory", type=Path)
     parser.add_argument("--branch")
     parser.add_argument("--source")
     parser.add_argument("--pr", type=int)
     parser.add_argument("--tag")
+    parser.add_argument("--archive", type=Path)
+    parser.add_argument("--version")
     args = parser.parse_args()
+    if args.operation == "verify-archive":
+        if not all((args.archive, args.source, args.version)):
+            parser.error("verify-archive requires --archive, --source and --version")
+        metadata = read_archive(args.archive)
+        if metadata.get("source_commit") != args.source or metadata.get("version") != args.version:
+            raise ValueError("archive source/version differs from the requested build")
+        print(json.dumps(metadata, sort_keys=True))
+        return
     if args.operation == "context":
         result = event_context(json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text()),
                                os.environ["GITHUB_EVENT_NAME"], os.environ["GITHUB_REF"],

@@ -71,6 +71,9 @@ jobs:
           python3 scripts/build_release.py --version "$RELEASE_VERSION" --platform "$TARGET_PLATFORM" --output dist/first
           python3 scripts/build_release.py --version "$RELEASE_VERSION" --platform "$TARGET_PLATFORM" --output dist/second
           diff -r dist/first dist/second
+          python3 scripts/publish_release.py verify-archive \
+            --archive "dist/first/${TARGET_PLATFORM/\//-}.tar.gz" \
+            --version "$RELEASE_VERSION" --source "$GITHUB_SHA"
       - name: Exercise native release binary
         if: matrix.platform == 'linux/amd64'
         env:
@@ -87,8 +90,77 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  publish:
+  packaged-runtime:
     needs: [context, candidates]
+    # Exercise the uploaded archives on native Linux architectures. In particular,
+    # Darwin's companion must match the Linux archive from the same revision.
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            linux_artifact: 0
+            darwin_artifact: 2
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            linux_artifact: 1
+            darwin_artifact: 3
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: "1.26.5"
+          cache: true
+      - name: Download and inspect this run's actual archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          LINUX_ARTIFACT: ${{ matrix.linux_artifact }}
+          DARWIN_ARTIFACT: ${{ matrix.darwin_artifact }}
+          ARCH: ${{ matrix.arch }}
+          RELEASE_VERSION: ${{ needs.context.outputs.version }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" --name "release-candidate-$LINUX_ARTIFACT" --dir dist/archives
+          gh run download "$GITHUB_RUN_ID" --name "release-candidate-$DARWIN_ARTIFACT" --dir dist/archives
+          for os in linux darwin; do
+            python3 scripts/publish_release.py verify-archive \
+              --archive "dist/archives/$os-$ARCH.tar.gz" \
+              --version "$RELEASE_VERSION" --source "$GITHUB_SHA"
+            mkdir -p "dist/$os"
+            tar -C "dist/$os" -xzf "dist/archives/$os-$ARCH.tar.gz"
+          done
+          cmp dist/linux/interceptor dist/darwin/interceptor-linux
+          test "$(dist/linux/interceptor version)" = "$RELEASE_VERSION"
+          test "$(dist/darwin/interceptor-linux version)" = "$RELEASE_VERSION"
+      - name: Qualify the downloaded native Linux archive without Go
+        env:
+          ARCH: ${{ matrix.arch }}
+          RELEASE_VERSION: ${{ needs.context.outputs.version }}
+        run: |
+          docker pull busybox:1.37.0
+          go build -o "$RUNNER_TEMP/local-api-smoke" ./examples/local-api-smoke
+          python3 scripts/qualify_release.py --archive "dist/archives/linux-$ARCH.tar.gz" \
+            --version "$RELEASE_VERSION" --source "$GITHUB_SHA" \
+            --image busybox:1.37.0 --client "$RUNNER_TEMP/local-api-smoke" --output dist/qualification
+      - name: Retain archive qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-qualification-linux-${{ matrix.arch }}
+          path: dist/qualification/
+          if-no-files-found: warn
+          retention-days: 14
+
+  publish:
+    needs: [context, candidates, packaged-runtime]
     if: >-
       needs.context.outputs.mode == 'publish' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
