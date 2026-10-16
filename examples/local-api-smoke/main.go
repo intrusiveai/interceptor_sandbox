@@ -170,6 +170,7 @@ func evidence(output, id string, maximum int64) {
 }
 func main() {
 	output := flag.String("output", "", "directory for evidence and result JSON")
+	commandOnly := flag.Bool("command-only", false, "qualify a minimal command target's echo operation without snapshots or model calls")
 	maximumEvidence := flag.Int64("evidence-max-bytes", evidencepolicy.DefaultMaxBytes, "local evidence archive acceptance ceiling")
 	root := flag.String("data-root", "", "optional host data root to check reference application state rollback")
 	flag.Parse()
@@ -187,6 +188,10 @@ func main() {
 	must(limitErr)
 	limit := min(*maximumEvidence, attached.EvidenceMaxBytes)
 	first := attached.Binding
+	if *commandOnly {
+		qualifyCommand(first, *output, limit)
+		return
+	}
 	success(post("/v1/attach", attach))
 	other := attach
 	other.CampaignID = "another-campaign"
@@ -232,5 +237,40 @@ func main() {
 	raw, err := json.MarshalIndent(result, "", "  ")
 	must(err)
 	must(os.WriteFile(filepath.Join(*output, "result.json"), raw, 0600))
+	fmt.Println(string(raw))
+}
+
+// qualifyCommand reuses the native operation, attempt, feedback and evidence
+// checks for a release-archive smoke test with /bin/cat as the application.
+func qualifyCommand(binding localapi.Binding, output string, limit int64) {
+	a := attempt(binding)
+	message := []byte("interceptor packaged companion qualification\n")
+	body := map[string]any{"operation": "echo", "input": message, "media_type": "text/plain", "attempt_id": a.AttemptID, "payload_digest": a.Payload.Digest}
+	raw := success(operation(binding, "application.invoke", body, &a))
+	var turn struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	must(json.Unmarshal(raw, &turn))
+	require(turn.Status == "complete", string(raw))
+	var view adaptive.ObservationView
+	must(json.Unmarshal(success(operation(binding, "observation.read", adaptive.ObservationRequest{TurnID: turn.ID}, &a)), &view))
+	found := false
+	for _, entry := range view.Entries {
+		if entry.Kind != "target_output" || entry.Availability != "available" {
+			continue
+		}
+		var chunk adaptive.FeedbackChunk
+		must(json.Unmarshal(success(operation(binding, "observation.content.read", adaptive.FeedbackReadRequest{ReceiptID: view.ReceiptID, EntryID: entry.ID, MaxBytes: adaptive.MaxFeedbackChunk}, &a)), &chunk))
+		if bytes.Equal(chunk.Content, message) {
+			found = true
+		}
+	}
+	require(found, "feedback did not contain the exact command output")
+	success(post("/v1/lifecycle", localapi.LifecycleRequest{WorkerInstanceID: binding.WorkerInstanceID, RunRevision: binding.RunRevision, APIVersion: localapi.Version, CampaignID: campaign, SessionID: binding.SessionID, OperationID: "stop-command", Operation: "session.stop"}))
+	evidence(output, binding.SessionID, limit)
+	raw, err := json.MarshalIndent(map[string]any{"passed": true, "session_id": binding.SessionID, "target_output": string(message), "checks": []string{"native command invocation", "exact target output", "confirmed target stop", "complete verified evidence"}}, "", "  ")
+	must(err)
+	must(os.WriteFile(filepath.Join(output, "result.json"), raw, 0600))
 	fmt.Println(string(raw))
 }

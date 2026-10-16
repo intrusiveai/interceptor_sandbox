@@ -37,9 +37,12 @@ routes. See [application integration](docs/application-integration.md) and
 
 ## Getting started
 
-You need **Go 1.26.5**, a running local Docker installation, and an application
-image matching your Docker host's architecture. Use Docker Engine on Linux or
-Docker Desktop on macOS.
+You need a running local Docker installation and an application image matching
+your CLI and Docker host's architecture. Use Docker Engine on Linux or Docker
+Desktop on macOS. Extracted releases need **neither Go nor an Interceptor source
+checkout**, including for wrapper builds on macOS. Keep the complete archive
+together: the macOS CLI uses its adjacent `interceptor-linux` and `release.json`.
+See [release installation](docs/getting-started.md#install-a-release).
 
 Interceptor is an MVP. The [local integration validation](docs/local-api-validation.md)
 and [host-lifetime validation](docs/host-lifetime-validation.md) describe the tested
@@ -47,7 +50,8 @@ configurations and remaining qualification limits.
 
 ### 1. Build the CLI
 
-From this repository:
+For source development and the Go-based reference walkthrough below, install
+**Go 1.26.5** and run from this repository:
 
 ```sh
 make build

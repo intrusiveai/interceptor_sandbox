@@ -42,6 +42,14 @@ The managed release contains these immutable release files:
 - `SHA256SUMS`
 
 Each platform archive contains `interceptor`, `release.json`, and `LICENSE`.
+macOS archives additionally contain `interceptor-linux`, built for the same CPU
+from the same source revision and release version. `release.json` covers its
+filename, Linux platform and SHA-256 as `linux_companion`. Do not split this layout
+when distributing or installing macOS releases. Reproducibility comparisons and
+whole-archive asset digests include both executables. CI downloads its own archives,
+checks the complete inventory/digests, compares each companion to the matching
+Linux release executable, and runs native Linux wrapper qualification before
+candidate publication. Promotion retains those exact complete archives.
 `candidate.json` binds the archives to their source commit. Promotion verifies
 the exact asset names and GitHub-reported SHA-256 digests.
 
@@ -325,6 +333,39 @@ and publication tests using simulated S3 and local HTTP delivery. The integratio
 test carries Interceptor's generated four-platform entry through candidate
 replacement, promotion, and retry with that actual publisher. Local tests do not
 publish or configure GitHub, AWS, the releases service, or the public website.
+
+## Nonpublishing release-archive qualification
+
+Use a working branch whose name does **not** start with `candidate-v`. Push only
+that working branch, then dispatch `verify-release.yml` with `--ref <working-branch>`.
+The workflow must already exist on `main`, but the run uses the selected branch's
+workflow and source. Such a dispatch selects verification mode; publication is
+also explicitly restricted to candidate branch pushes/dispatches. Do not dispatch
+on a candidate branch for a nonpublishing test. A PR into the candidate can also
+run verification without publication.
+
+Download `release-candidate-3` from that run for macOS ARM64 (`-2` for AMD64).
+Inspect its version and source using `scripts/publish_release.py verify-archive`.
+On a native macOS host with matching Docker architecture and a local Linux image
+containing `/bin/cat`, run:
+
+```sh
+go build -o /tmp/interceptor-release-smoke ./examples/local-api-smoke
+python3 scripts/qualify_release.py --archive /absolute/path/darwin-arm64.tar.gz \
+  --version 0.1.0 --source <workflow-head-sha> \
+  --image busybox:1.37.0 --client /tmp/interceptor-release-smoke \
+  --output /tmp/interceptor-release-qualification
+```
+
+Pull the test image beforehand if necessary. Go is used only to prepare the
+existing qualification client, not by the extracted release. The output directory must not exist.
+The script uses the documented command interface, extracts into a fresh temporary
+directory outside the checkout, runs with only Docker on the CLI's `PATH`, builds
+and verifies a wrapper, invokes the target, checks evidence, and compares the
+actual in-container binary with the packaged executable. It cleans up its isolated
+sessions and uniquely named Docker resources and retains result/evidence files.
+It does not publish a release. Retain the CI run URL, archive SHA-256, result and
+evidence; distinguish native macOS testing from the Linux CI qualification.
 
 ## Updating the local publisher
 

@@ -58,7 +58,8 @@ def build(root, output, version, platform):
     with tempfile.TemporaryDirectory(prefix="interceptor-release-") as temporary:
         binary = Path(temporary) / "interceptor"
         flags = " ".join(["-s", "-w", "-buildid=", "-X",
-                          "github.com/intrusive-ai/interceptor-sandbox/internal/buildinfo.Version=" + version])
+                          "github.com/intrusive-ai/interceptor-sandbox/internal/buildinfo.Version=" + version,
+                          "-X", "github.com/intrusive-ai/interceptor-sandbox/internal/buildinfo.SourceCommit=" + commit])
         run(["go", "build", "-mod=readonly", "-trimpath", "-buildvcs=false", "-ldflags", flags,
              "-o", str(binary), "./cmd/interceptor"], root, env)
         executable = binary.read_bytes()
@@ -70,13 +71,25 @@ def build(root, output, version, platform):
             "toolchain": TOOLCHAIN,
             "cgo_enabled": False,
         }
+        files = [("interceptor", executable, 0o755)]
+        if goos == "darwin":
+            companion = Path(temporary) / "interceptor-linux"
+            run(["go", "build", "-mod=readonly", "-trimpath", "-buildvcs=false", "-ldflags", flags,
+                 "-o", str(companion), "./cmd/interceptor"], root, dict(env, GOOS="linux"))
+            companion_bytes = companion.read_bytes()
+            metadata["linux_companion"] = {
+                "filename": "interceptor-linux",
+                "platform": "linux/" + goarch,
+                "sha256": hashlib.sha256(companion_bytes).hexdigest(),
+            }
+            files.append(("interceptor-linux", companion_bytes, 0o755))
         release_json = (json.dumps(metadata, sort_keys=True, indent=2) + "\n").encode()
         license_text = (root / "LICENSE").read_bytes()
-        archive(output / (platform.replace("/", "-") + ".tar.gz"), (
-            ("interceptor", executable, 0o755),
+        files.extend((
             ("release.json", release_json, 0o644),
             ("LICENSE", license_text, 0o644),
         ))
+        archive(output / (platform.replace("/", "-") + ".tar.gz"), files)
     print(json.dumps({"status": "built-not-qualified", **metadata}, sort_keys=True))
 
 
