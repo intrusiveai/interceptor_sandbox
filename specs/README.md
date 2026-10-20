@@ -51,8 +51,8 @@ the local MVP contract. Section 13 specifies campaign-based access, worker/revis
 attribution, terminal execution closure and campaign reporting. The native
 implementation and localhost API are covered by the current
 [validation record](../docs/local-api-validation.md).
-`interceptor-improvements.md` records the cross-project
-priorities and AEF consumption rules without redefining these schemas.
+`interceptor-improvements.md` describes the cross-project integration
+capabilities and AEF consumption rules without redefining these schemas.
 
 ## Change discipline
 

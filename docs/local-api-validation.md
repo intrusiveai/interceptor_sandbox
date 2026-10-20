@@ -1,10 +1,5 @@
 # Local integration validation — 2026-09-15
 
-Steps 1–3 of the local MVP integration are complete: aligned contracts,
-Interceptor implementation, and an actual container lifecycle test. Operator
-runtime implementation has not started. The next checkpoint is the agreed gap
-review before Operator implementation.
-
 ## Verified behavior
 
 The reference application ran in a network-disabled Docker container on Docker
@@ -99,8 +94,8 @@ CLI create/list/inspect round trips over private Unix transport, campaign-wide
 pagination and earlier-session inspection, repeated baseline restore, reads after
 stop without restart, campaign/source separation, corrupt/missing inventory,
 limits and canceled reads. The service restore tests use a fake target runtime;
-retained-file tests use actual checkpoint storage. These do not qualify Operator's
-future live-harness restore implementation.
+retained-file tests use actual checkpoint storage. These tests do not exercise
+Operator's live-harness restore path.
 
 Full `go test ./...`, `go vet ./...`, and race tests for localapi, sandboxd and
 snapshot passed; the subsequently added CLI test passed separately. The smoke
@@ -126,7 +121,8 @@ regenerated for the advertised feedback contract and content-read operation.
 The smoke client now selects the exact invocation and reads a feedback chunk.
 Docker smoke was not rerun; earlier image/runtime qualification remains historical.
 Shared Operator schemas were parsed and their references checked through the
-offline catalog; generated SDK/schema semantic conformance remains pending.
+offline catalog. These checks did not verify generated SDK/schema semantic
+conformance.
 
 ## Reproducibility and limits
 
@@ -140,7 +136,7 @@ clean commit or released production source pin.
 
 This qualifies the reference workload over Docker Desktop file spool. It does
 not qualify every target/provider, the native Linux Unix-socket deployment, or
-Operator's future container launcher, sensors, accounting, journals and client.
+Operator's container launcher, sensors, accounting, journals and client.
 Remote transport, authentication, multiple simultaneous instances and automatic
 service recovery are deliberately outside the accepted MVP scope. Rebuild wrapper
 images when deploying the updated supervisor/builder; old images do not acquire
@@ -180,7 +176,7 @@ The typed `snapshot.create` request now carries optional
 `maximum_committed_bytes`. The supervisor checks it against current native
 remaining bytes under the snapshot lock and rejects oversized candidates before
 checkpoint commitment. Operator's campaign defaults and accounting rules are
-specified separately; this change does not implement Operator's future ledger.
+specified separately.
 
 Validation for this change:
 
@@ -218,8 +214,7 @@ already-absent cleanup.
 - A real deletion-handler test with a closed journal verifies that storage failure
   returns 500, retains the injection and does not advance the native revision.
 - Operator's 28 structural cleanup fixtures and all eight schema definitions
-  validate. These checks do not implement its pending handle-resolution client or
-  qualify a running Attack Harness cleanup tool. Shared semantic conformance remains a gate
-  before Operator/Attack Harness runtime integration.
+  validate. These checks do not exercise Operator's handle-resolution client or
+  a running Attack Harness cleanup tool, or verify shared semantic conformance.
 
 Rebuild supervisor images when deploying the deletion error distinction.

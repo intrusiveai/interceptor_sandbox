@@ -402,8 +402,8 @@ There is no gateway replacement protocol or automatic process restart in this
 MVP. Host-service loss is terminal; a saved `running` record has an unknown outcome
 and is audit data, not an instruction to resume. Operator stops its harness and
 reports uncertainty. Later administrator cleanup/export may finish reporting.
-Remote deployment, multiple instances, auth, supervision and restart recovery are
-deferred requirements, not missing local-MVP transport components.
+Remote deployment, multiple simultaneous instances, integration authentication
+and automatic service recovery are outside the local-MVP scope.
 
 ## Compatibility
 
@@ -441,13 +441,12 @@ for both sessions. It is a qualification client, not Operator implementation.
 See [the recorded Docker validation](local-api-validation.md) for tested source
 bytes, runtime scope and evidence results.
 
-## Fixed live feedback update
+## Live feedback
 
 See [live feedback](feedback.md) for observation selection, immutable native
 receipt/entry reads, profile boundaries, availability/completeness and retained
 source-session reads. Rebuild the host and supervisor together; capabilities
-advertise the new view version and bounded content-read operation. Operator
-and harness runtime support remains a separate implementation deliverable.
+advertise the view version and bounded content-read operation.
 
 ## macOS host lifetime
 
