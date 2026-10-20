@@ -42,6 +42,8 @@ your CLI and Docker host's architecture. Use Docker Engine on Linux or Docker
 Desktop on macOS. Extracted releases need **neither Go nor an Interceptor source
 checkout**, including for wrapper builds on macOS. Keep the complete archive
 together: the macOS CLI uses its adjacent `interceptor-linux` and `release.json`.
+Archives use `interceptor_sandbox-<os>_<arch>.tar.gz` and extract into one
+`interceptor_sandbox/` directory; add that directory to `PATH`.
 See [release installation](docs/getting-started.md#install-a-release).
 
 Interceptor is an MVP. The [local integration validation](docs/local-api-validation.md)

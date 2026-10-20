@@ -11,16 +11,20 @@
 
 Download the archive for your OS and CPU from the project's GitHub Releases.
 Verify its SHA-256 against the release's `SHA256SUMS`, then extract the **entire**
-archive into a dedicated directory. For example, on Apple Silicon:
+archive into a dedicated directory. Archives are named
+`interceptor_sandbox-<os>_<arch>.tar.gz`, where `<os>` is `darwin` or `linux`
+and `<arch>` is `arm64` or `amd64`. Each extracts into a single
+`interceptor_sandbox/` directory, without an OS, architecture, or version suffix.
+For example, for v0.1.1 on Apple Silicon:
 
 ```sh
-mkdir -p "$HOME/.local/lib/interceptor/0.1.0"
-tar -xzf darwin-arm64.tar.gz -C "$HOME/.local/lib/interceptor/0.1.0"
-export PATH="$HOME/.local/lib/interceptor/0.1.0:$PATH"
+mkdir -p "$HOME/.local/lib/interceptor/0.1.1"
+tar -xzf interceptor_sandbox-darwin_arm64.tar.gz -C "$HOME/.local/lib/interceptor/0.1.1"
+export PATH="$HOME/.local/lib/interceptor/0.1.1/interceptor_sandbox:$PATH"
 interceptor version
 ```
 
-A macOS archive contains `interceptor` (the native CLI), `interceptor-linux`
+A macOS archive's `interceptor_sandbox/` directory contains `interceptor` (the native CLI), `interceptor-linux`
 (the container supervisor), `release.json`, and `LICENSE`. Keep these files
 together; do not copy just the CLI into another directory. A symlink to the CLI
 is supported. Discovery is relative to the real executable, not the current
@@ -31,6 +35,12 @@ Darwin ARM64 packages Linux ARM64; Darwin AMD64 packages Linux AMD64. Your Docke
 daemon and target image must use that same architecture. Cross-architecture
 container execution is not supported by this workflow. Linux archives retain
 the single-executable layout and copy their running CLI into wrappers.
+
+Extract each version/platform into a separate parent directory to avoid mixing
+files from different archives. Release URLs identify the version; the archive
+filename and its top-level directory do not. The older v0.1.0 archives retain
+their original `<os>-<arch>.tar.gz` names and extract files directly into the
+destination directory; those published artifacts are unchanged.
 
 Released macOS installations need no source checkout or Go toolchain to run
 `environment validate`, `environment seal`, `app build`, `app verify`, or `run`.

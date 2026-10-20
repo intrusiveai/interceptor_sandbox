@@ -72,7 +72,7 @@ jobs:
           python3 scripts/build_release.py --version "$RELEASE_VERSION" --platform "$TARGET_PLATFORM" --output dist/second
           diff -r dist/first dist/second
           python3 scripts/publish_release.py verify-archive \
-            --archive "dist/first/${TARGET_PLATFORM/\//-}.tar.gz" \
+            --archive "dist/first/interceptor_sandbox-${TARGET_PLATFORM/\//_}.tar.gz" \
             --version "$RELEASE_VERSION" --source "$GITHUB_SHA"
       - name: Exercise native release binary
         if: matrix.platform == 'linux/amd64'
@@ -80,8 +80,8 @@ jobs:
           RELEASE_VERSION: ${{ needs.context.outputs.version }}
         run: |
           mkdir dist/installed
-          tar -C dist/installed -xzf dist/first/linux-amd64.tar.gz
-          test "$(dist/installed/interceptor version)" = "$RELEASE_VERSION"
+          tar -C dist/installed -xzf dist/first/interceptor_sandbox-linux_amd64.tar.gz
+          test "$(dist/installed/interceptor_sandbox/interceptor version)" = "$RELEASE_VERSION"
       - name: Retain release candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -132,14 +132,14 @@ jobs:
           gh run download "$GITHUB_RUN_ID" --name "release-candidate-$DARWIN_ARTIFACT" --dir dist/archives
           for os in linux darwin; do
             python3 scripts/publish_release.py verify-archive \
-              --archive "dist/archives/$os-$ARCH.tar.gz" \
+              --archive "dist/archives/interceptor_sandbox-${os}_${ARCH}.tar.gz" \
               --version "$RELEASE_VERSION" --source "$GITHUB_SHA"
             mkdir -p "dist/$os"
-            tar -C "dist/$os" -xzf "dist/archives/$os-$ARCH.tar.gz"
+            tar -C "dist/$os" -xzf "dist/archives/interceptor_sandbox-${os}_${ARCH}.tar.gz"
           done
-          cmp dist/linux/interceptor dist/darwin/interceptor-linux
-          test "$(dist/linux/interceptor version)" = "$RELEASE_VERSION"
-          test "$(dist/darwin/interceptor-linux version)" = "$RELEASE_VERSION"
+          cmp dist/linux/interceptor_sandbox/interceptor dist/darwin/interceptor_sandbox/interceptor-linux
+          test "$(dist/linux/interceptor_sandbox/interceptor version)" = "$RELEASE_VERSION"
+          test "$(dist/darwin/interceptor_sandbox/interceptor-linux version)" = "$RELEASE_VERSION"
       - name: Qualify the downloaded native Linux archive without Go
         env:
           ARCH: ${{ matrix.arch }}
@@ -147,7 +147,7 @@ jobs:
         run: |
           docker pull busybox:1.37.0
           go build -o "$RUNNER_TEMP/local-api-smoke" ./examples/local-api-smoke
-          python3 scripts/qualify_release.py --archive "dist/archives/linux-$ARCH.tar.gz" \
+          python3 scripts/qualify_release.py --archive "dist/archives/interceptor_sandbox-linux_${ARCH}.tar.gz" \
             --version "$RELEASE_VERSION" --source "$GITHUB_SHA" \
             --image busybox:1.37.0 --client "$RUNNER_TEMP/local-api-smoke" --output dist/qualification
       - name: Retain archive qualification evidence

@@ -14,8 +14,15 @@ import tarfile
 import tempfile
 
 TOOLCHAIN = "go1.26.5"
+ARCHIVE_ROOT = "interceptor_sandbox"
 PLATFORMS = ("linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64")
 VERSION = r"(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})"
+
+
+def archive_name(platform):
+    if platform not in PLATFORMS:
+        raise ValueError("unsupported release platform")
+    return ARCHIVE_ROOT + "-" + platform.replace("/", "_") + ".tar.gz"
 
 
 def run(args, root, env=None):
@@ -89,7 +96,8 @@ def build(root, output, version, platform):
             ("release.json", release_json, 0o644),
             ("LICENSE", license_text, 0o644),
         ))
-        archive(output / (platform.replace("/", "-") + ".tar.gz"), files)
+        archive(output / archive_name(platform),
+                [(ARCHIVE_ROOT + "/" + name, content, mode) for name, content, mode in files])
     print(json.dumps({"status": "built-not-qualified", **metadata}, sort_keys=True))
 
 

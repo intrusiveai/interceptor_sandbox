@@ -78,6 +78,11 @@ class CatalogTest(unittest.TestCase):
             release.PLATFORMS,
         )
         for artifact in candidate["artifacts"]:
+            self.assertEqual(artifact["filename"],
+                             "interceptor_sandbox-" + artifact["platform"].replace("/", "_") + ".tar.gz")
+            self.assertEqual(artifact["url"],
+                             "https://github.com/intrusiveai/interceptor_sandbox/releases/download/v1.2.3/"
+                             + artifact["filename"])
             self.assertEqual(
                 artifact["sha256"],
                 release.hashlib.sha256(release_files[artifact["filename"]]).hexdigest(),
@@ -156,7 +161,7 @@ class CatalogTest(unittest.TestCase):
         def altered(item):
             assets = original(item)
             for asset in assets:
-                if asset["name"] == "darwin-amd64.tar.gz":
+                if asset["name"] == "interceptor_sandbox-darwin_amd64.tar.gz":
                     asset["browser_download_url"] = "https://example.invalid/archive.tar.gz"
             return assets
 

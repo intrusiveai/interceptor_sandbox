@@ -34,14 +34,18 @@ to that commit. Direct pushes to `main` verify code but never promote a release.
 
 The managed release contains these immutable release files:
 
-- `linux-amd64.tar.gz`
-- `linux-arm64.tar.gz`
-- `darwin-amd64.tar.gz`
-- `darwin-arm64.tar.gz`
+- `interceptor_sandbox-linux_amd64.tar.gz`
+- `interceptor_sandbox-linux_arm64.tar.gz`
+- `interceptor_sandbox-darwin_amd64.tar.gz`
+- `interceptor_sandbox-darwin_arm64.tar.gz`
 - `candidate.json`
 - `SHA256SUMS`
 
-Each platform archive contains `interceptor`, `release.json`, and `LICENSE`.
+Each platform archive has one top-level directory, `interceptor_sandbox/`,
+containing `interceptor`, `release.json`, and `LICENSE`. Neither the archive root
+nor the filename includes the release version; the GitHub release tag and
+`release.json` identify it. Extract different platforms/versions into separate
+parent directories.
 macOS archives additionally contain `interceptor-linux`, built for the same CPU
 from the same source revision and release version. `release.json` covers its
 filename, Linux platform and SHA-256 as `linux_companion`. Do not split this layout
@@ -52,6 +56,11 @@ Linux release executable, and runs native Linux wrapper qualification before
 candidate publication. Promotion retains those exact complete archives.
 `candidate.json` binds the archives to their source commit. Promotion verifies
 the exact asset names and GitHub-reported SHA-256 digests.
+
+This naming/layout applies starting with v0.1.1. The stable v0.1.0 release retains
+its original `<os>-<arch>.tar.gz` assets and flat archive layout. Do not rename,
+repack, or replace those published files. New candidates use the new inventory;
+their checksums, catalog URLs, and promotion checks use the same filenames.
 
 `release-index-entry.json` is mutable publication metadata outside that immutable
 set. The workflow derives it from the actual four GitHub archive assets, including
@@ -351,8 +360,8 @@ containing `/bin/cat`, run:
 
 ```sh
 go build -o /tmp/interceptor-release-smoke ./examples/local-api-smoke
-python3 scripts/qualify_release.py --archive /absolute/path/darwin-arm64.tar.gz \
-  --version 0.1.0 --source <workflow-head-sha> \
+python3 scripts/qualify_release.py --archive /absolute/path/interceptor_sandbox-darwin_arm64.tar.gz \
+  --version 0.1.1 --source <workflow-head-sha> \
   --image busybox:1.37.0 --client /tmp/interceptor-release-smoke \
   --output /tmp/interceptor-release-qualification
 ```
