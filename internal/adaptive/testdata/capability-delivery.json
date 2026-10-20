@@ -17,7 +17,7 @@
   "delivery_schema_profile": "interceptor.delivery-schema/v1",
   "api_version": "interceptor.dev/capability-manifest/v1alpha3",
   "kind": "CapabilityManifest",
-  "interceptor_release": "0.1.0-dev",
+  "interceptor_release": "0.1.1-dev",
   "environment_digest": "sha256:f95dbb463a36de57ddf5baf5447634431506ee2ae0e024e0f5f0bb2c528b2ea0",
   "application_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "target": {
@@ -357,5 +357,5 @@
     "maximum_invocations": 200,
     "maximum_snapshots": 20
   },
-  "digest": "sha256:d948076ee132b1f34d6ffb4e22059c664e1f1a985cf64ade37822a29fc0c4de1"
+  "digest": "sha256:9af0051432087927ded05da1531c534d314990bfeed6a091a6c79c694c9c3782"
 }
