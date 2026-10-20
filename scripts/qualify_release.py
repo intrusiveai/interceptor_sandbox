@@ -21,6 +21,7 @@ import time
 import uuid
 
 from publish_release import read_archive
+from build_release import ARCHIVE_ROOT
 
 
 def qualify(archive, version, source, base_image, output, client):
@@ -45,6 +46,7 @@ def qualify(archive, version, source, base_image, output, client):
         for directory in (install, outside, bin_dir): directory.mkdir()
         with tarfile.open(archive) as bundle:
             bundle.extractall(install, filter="data")  # read_archive checked the exact regular-file inventory.
+        install = install / ARCHIVE_ROOT
         (bin_dir / "docker").symlink_to(Path(docker).resolve())
         env = dict(os.environ, PATH=str(bin_dir), INTERCEPTOR_DATA_DIR=str(work / "data"))
         if shutil.which("go", path=env["PATH"]) is not None:

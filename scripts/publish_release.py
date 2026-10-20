@@ -13,6 +13,8 @@ import tempfile
 import time
 import uuid
 
+from build_release import ARCHIVE_ROOT, archive_name
+
 PLATFORMS = {"linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"}
 VERSION = r"(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})"
 MARKER = "<!-- interceptor-candidate-release/v1 -->"
@@ -26,7 +28,7 @@ def candidate_version(branch):
 
 
 def event_context(event, name, ref, sha, repository):
-    result = {"mode": "verify", "version": "0.1.0", "source": sha,
+    result = {"mode": "verify", "version": "0.1.1", "source": sha,
               "branch": ref.removeprefix("refs/heads/"), "pr": ""}
     if name == "pull_request":
         pr = event["pull_request"]
@@ -100,38 +102,39 @@ def read_archive(path):
         members = archive.getmembers()
         if any(not member.isfile() for member in members):
             raise ValueError("release archive contains a non-file member")
-        if sum(member.name == "release.json" for member in members) != 1:
+        prefix = ARCHIVE_ROOT + "/"
+        if sum(member.name == prefix + "release.json" for member in members) != 1:
             raise ValueError("release archive requires one release.json")
-        metadata = json.load(archive.extractfile("release.json"))
+        metadata = json.load(archive.extractfile(prefix + "release.json"))
         platform = metadata.get("platform")
-        if platform not in PLATFORMS or path.name != platform.replace("/", "-") + ".tar.gz":
+        if platform not in PLATFORMS or path.name != archive_name(platform):
             raise ValueError("release archive platform/filename differs")
         names = ["interceptor", "release.json", "LICENSE"]
         if platform.startswith("darwin/"):
             names.insert(1, "interceptor-linux")
         elif "linux_companion" in metadata:
             raise ValueError("Linux releases must not declare a companion")
-        if [member.name for member in members] != names:
+        if [member.name for member in members] != [prefix + name for name in names]:
             raise ValueError("release archive has an unexpected file inventory")
-        executable = archive.extractfile("interceptor").read()
+        executable = archive.extractfile(prefix + "interceptor").read()
         if metadata.get("binary_sha256") != hashlib.sha256(executable).hexdigest():
             raise ValueError("release archive binary digest differs")
-        if archive.getmember("interceptor").mode != 0o755:
+        if archive.getmember(prefix + "interceptor").mode != 0o755:
             raise ValueError("release CLI must be executable")
         if platform.startswith("darwin/"):
-            companion = archive.extractfile("interceptor-linux").read()
+            companion = archive.extractfile(prefix + "interceptor-linux").read()
             expected = {"filename": "interceptor-linux", "platform": platform.replace("darwin/", "linux/"),
                         "sha256": hashlib.sha256(companion).hexdigest()}
             if metadata.get("linux_companion") != expected:
                 raise ValueError("release Linux companion metadata/digest differs")
-            if archive.getmember("interceptor-linux").mode != 0o755:
+            if archive.getmember(prefix + "interceptor-linux").mode != 0o755:
                 raise ValueError("release Linux companion must be executable")
     return metadata
 
 
 def assemble(directory, output):
     archives = sorted(directory.glob("*.tar.gz"))
-    expected = {platform.replace("/", "-") + ".tar.gz" for platform in PLATFORMS}
+    expected = {archive_name(platform) for platform in PLATFORMS}
     if {path.name for path in archives} != expected:
         raise ValueError("four distinct platform archives are required")
     metadata = [read_archive(path) for path in archives]
@@ -156,7 +159,7 @@ def assemble(directory, output):
 
 
 def expected_assets():
-    return {platform.replace("/", "-") + ".tar.gz" for platform in PLATFORMS} | {"candidate.json", "SHA256SUMS"}
+    return {archive_name(platform) for platform in PLATFORMS} | {"candidate.json", "SHA256SUMS"}
 
 
 def verify_uploaded(github, release, digests):
@@ -195,7 +198,7 @@ def catalog_entry(github, tag, source):
     assets = {asset["name"]: asset for asset in github.assets(release)}
     artifacts = []
     for platform in sorted(PLATFORMS):
-        name = platform.replace("/", "-") + ".tar.gz"
+        name = archive_name(platform)
         asset = assets[name]
         url = f"https://github.com/{github.repository}/releases/download/{tag}/{name}"
         if asset.get("browser_download_url") != url:

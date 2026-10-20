@@ -153,11 +153,27 @@ class CandidateWorkflowTest(unittest.TestCase):
                     ("release.json", (json.dumps(metadata) + "\n").encode(), 0o644),
                     ("LICENSE", b"license", 0o644),
             ))
-            builder.archive(candidates / (platform.replace("/", "-") + ".tar.gz"), files)
+            builder.archive(candidates / builder.archive_name(platform),
+                            [("interceptor_sandbox/" + name, data, mode) for name, data, mode in files])
         inventory, files = release.assemble(candidates, self.root / "assembled")
         self.assertEqual(inventory["version"], "1.2.3")
         self.assertEqual(inventory["source_commit"], FIRST)
         self.assertEqual({path.name for path in files}, release.expected_assets())
+        self.assertEqual(set(inventory["archives"]), {
+            "interceptor_sandbox-linux_amd64.tar.gz", "interceptor_sandbox-linux_arm64.tar.gz",
+            "interceptor_sandbox-darwin_amd64.tar.gz", "interceptor_sandbox-darwin_arm64.tar.gz",
+        })
+        sums = (self.root / "assembled" / "SHA256SUMS").read_text()
+        for path in files:
+            if path.name == "SHA256SUMS":
+                continue
+            self.assertIn(f"{release.checksum(path)[7:]}  {path.name}\n", sums)
+        before = {path.name: path.read_bytes() for path in files}
+        self.assertEqual(release.publish(self.github, BRANCH, FIRST, inventory, files), "prerelease-published")
+        self.github.pr = pull(FIRST)
+        self.assertEqual(release.promote(self.github, 42), "promoted-existing-assets")
+        self.assertEqual(self.github.uploaded, before)
+        self.assertEqual(self.github.tag, FIRST)
 
     def test_push_replace_merge_promotes_exact_same_bytes_and_tag(self):
         self.assertEqual(self.publish(), "prerelease-published")
@@ -219,9 +235,9 @@ class CandidateWorkflowTest(unittest.TestCase):
         for change in ("changed", "missing", "extra"):
             self.github.uploaded = dict(original)
             if change == "changed":
-                self.github.uploaded["linux-amd64.tar.gz"] = b"unexpected bytes"
+                self.github.uploaded["interceptor_sandbox-linux_amd64.tar.gz"] = b"unexpected bytes"
             elif change == "missing":
-                self.github.uploaded.pop("linux-amd64.tar.gz")
+                self.github.uploaded.pop("interceptor_sandbox-linux_amd64.tar.gz")
             else:
                 self.github.uploaded["unexpected.exe"] = b"extra"
             with self.assertRaises(ValueError):
