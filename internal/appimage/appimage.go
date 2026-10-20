@@ -175,22 +175,23 @@ func Verify(ctx context.Context, lock Lock, environmentLock *environment.Lock, d
 }
 
 func buildLinuxBinary(ctx context.Context, destination string) error {
-	if runtime.GOOS == "linux" {
-		current, err := os.Executable()
-		if err == nil {
-			data, readErr := os.ReadFile(current)
-			if readErr == nil {
-				return os.WriteFile(destination, data, 0o555)
-			}
-		}
+	current, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate running interceptor: %w", err)
 	}
+	if runtime.GOOS == "linux" || !strings.HasSuffix(buildinfo.Version, "-dev") || buildinfo.SourceCommit != "" {
+		return copyLinuxBinary(current, destination, runtime.GOOS, runtime.GOARCH, buildinfo.Version, buildinfo.SourceCommit)
+	}
+	// Source builds only. Released CLIs never search for a checkout or invoke Go.
 	root, err := moduleRoot()
 	if err != nil {
 		return err
 	}
-	command := exec.CommandContext(ctx, "go", "build", "-trimpath", "-o", destination, "./cmd/interceptor")
+	command := exec.CommandContext(ctx, "go", "build", "-trimpath", "-ldflags",
+		"-X github.com/intrusive-ai/interceptor-sandbox/internal/buildinfo.Version="+buildinfo.Version,
+		"-o", destination, "./cmd/interceptor")
 	command.Dir = root
-	command.Env = append(os.Environ(), "GOOS=linux", "CGO_ENABLED=0")
+	command.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+runtime.GOARCH, "CGO_ENABLED=0")
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("build Linux interceptor binary: %w\n%s", err, output)
 	}
@@ -209,7 +210,7 @@ func moduleRoot() (string, error) {
 		}
 		parent := filepath.Dir(directory)
 		if parent == directory {
-			return "", errors.New("cannot locate interceptor Go module; use a Linux release binary")
+			return "", errors.New("development build requires an interceptor source checkout and Go; use the complete release archive for source-free wrapper builds")
 		}
 		directory = parent
 	}

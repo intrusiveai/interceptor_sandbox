@@ -1,12 +1,9 @@
 # AEF Requirements for Interceptor Adaptive Simulation
 
-Status: integration requirements; revised AD-010 implemented in source; deployment qualification required
-Date: 2026-09-14
-
 ## 1. Purpose and ownership
 
 This document records the Interceptor capabilities that AEF and Operator depend
-on, their integration priority, and the AEF-side consumption rules.
+on and the AEF-side consumption rules.
 
 The normative producer-neutral interface is owned by Interceptor Sandbox in
 `specs/external-adaptive-simulation.md`. Interceptor remains independently
@@ -35,31 +32,24 @@ or restored session, and relays their unchanged verified digests in
 This design gives AEF full post-run truth without giving AEF live Interceptor
 authority or exposing protected evidence to Operator's guest attack harness.
 
-## 3. Enhancement classification
+## 3. Integration capabilities
 
-| ID | Enhancement | Classification | Components connected or benefited |
-|---|---|---|---|
-| INT-AEF-AD-001 | Producer-neutral attempt context and ancestry | required | Operator engine, Operator Runtime, Interceptor evidence, AEF correlation, third-party harnesses |
-| INT-AEF-AD-002 | Feedback profiles and observation view | required | Operator engine, Interceptor policy, AEF assessment validity, third-party harnesses |
-| INT-AEF-AD-003 | Machine-readable capability manifest | required | Interceptor, AEF planner, Operator compatibility checks, external planners |
-| INT-AEF-AD-004 | Attempt-indexed evidence export | required | Interceptor finalizer, Operator final submission, AEF assessment |
-| INT-AEF-AD-005 | Canonical payload artifact identity | required | Payload producer, Operator records, Interceptor delivery/evidence, AEF joins |
-| INT-AEF-AD-006 | Managed HTTP response injection | ideal | Interceptor simulation fidelity, Operator scenario coverage, AEF reporting |
-| INT-AEF-AD-007 | Native MCP result injection | ideal | Interceptor MCP fidelity, Operator scenario coverage, AEF reporting |
-| INT-AEF-AD-008 | Checkpoint fork convenience | marginal | Operator branching efficiency and Interceptor session management |
-| INT-AEF-AD-009 | Typed event-match oracle | ideal | Interceptor evaluation and AEF deterministic assessment |
-| INT-AEF-AD-010 | operations harness interface | required | Operator guest, trusted Operator Runtime, Interceptor production boundary |
-| INT-AEF-AD-011 | Extended native model-provider adapters | ideal | Interceptor target applications, Operator model relay parity, AEF compatibility reporting, third-party harnesses |
-| INT-AEF-AD-012 | Host secret-store credential resolution | required | Interceptor host controller, model-provider adapters, model-provider authentication |
-| INT-AEF-AD-013 | Closed DNS and locally trusted service TLS | required | Target application, simulated HTTP/MCP/identity/attacker services, Operator compatibility checks, AEF coverage analysis |
+| ID | Capability | Components connected or benefited |
+|---|---|---|
+| INT-AEF-AD-001 | Producer-neutral attempt context and ancestry | Operator engine, Operator Runtime, Interceptor evidence, AEF correlation, third-party harnesses |
+| INT-AEF-AD-002 | Feedback profiles and observation view | Operator engine, Interceptor policy, AEF assessment validity, third-party harnesses |
+| INT-AEF-AD-003 | Machine-readable capability manifest | Interceptor, AEF planner, Operator compatibility checks, external planners |
+| INT-AEF-AD-004 | Attempt-indexed evidence export | Interceptor finalizer, Operator final submission, AEF assessment |
+| INT-AEF-AD-005 | Canonical payload artifact identity | Payload producer, Operator records, Interceptor delivery/evidence, AEF joins |
+| INT-AEF-AD-006 | Managed HTTP response injection | Interceptor simulation fidelity, Operator scenario coverage, AEF reporting |
+| INT-AEF-AD-007 | Native MCP result injection | Interceptor MCP fidelity, Operator scenario coverage, AEF reporting |
+| INT-AEF-AD-009 | Typed event-match oracle | Interceptor evaluation and AEF deterministic assessment |
+| INT-AEF-AD-010 | Operations harness interface | Operator guest, trusted Operator Runtime, Interceptor production boundary |
+| INT-AEF-AD-011 | Native model-provider adapters | Interceptor target applications, Operator model relay parity, AEF compatibility reporting, third-party harnesses |
+| INT-AEF-AD-012 | Host secret-store credential resolution | Interceptor host controller, model-provider adapters, model-provider authentication |
+| INT-AEF-AD-013 | Closed DNS and locally trusted service TLS | Target application, simulated HTTP/MCP/identity/attacker services, Operator compatibility checks, AEF coverage analysis |
 
-Implementation status: AD-001 through AD-007 and AD-009 through AD-013 are
-implemented by the current extension. AD-010 campaign access and reporting are
-implemented by the native operation and local API layers. AD-008 remains
-deliberately deferred:
-the existing snapshot-create plus trusted fresh-session restore operations
-already provide safe branching, and an atomic fork API would add privileged
-surface without a demonstrated reliability or performance need.
+Use snapshot creation followed by trusted fresh-session restore for branching.
 
 ## 4. AEF consumption requirements
 
@@ -166,22 +156,22 @@ campaign accounting and per-revision native session bindings. Interceptor keeps
 its journals, attribution and evidence. See [the local contract](../docs/local-api.md)
 and native Section 13 for details and executable qualification.
 
-## 5. Implementation conclusions for AD-006, AD-007, AD-011, AD-012, and AD-013
+## 5. Injection, provider and network behavior
 
-- **INT-AEF-AD-006 is supported.** Managed successful HTTP responses can be
+- **INT-AEF-AD-006:** Managed successful HTTP responses can be
   rewritten at the service-ingress boundary with attempt and payload
   attribution.
-- **INT-AEF-AD-007 is supported.** Native successful MCP tool results can be
+- **INT-AEF-AD-007:** Native successful MCP tool results can be
   rewritten after execution and before application consumption, separately
   from model-message rewriting.
-- **INT-AEF-AD-011 is supported.** Anthropic Messages, Gemini Developer API,
+- **INT-AEF-AD-011:** Anthropic Messages, Gemini Developer API,
   Vertex Gemini, and Azure OpenAI Chat/Responses join OpenAI, Bedrock, and
   LiteLLM under the defined non-streaming text and client-function subset.
-- **INT-AEF-AD-012 is supported.** The shared host resolver supports model
+- **INT-AEF-AD-012:** The shared host resolver supports model
   provider credentials in AWS Secrets
   Manager, Azure Key Vault, Google Cloud Secret Manager, and HashiCorp Vault KV
   v2, while direct cloud workload identity remains available where appropriate.
-- **INT-AEF-AD-013 is supported.** An optional bounded loopback DNS resolver
+- **INT-AEF-AD-013:** An optional bounded loopback DNS resolver
   authoritatively resolves declared service names without upstream forwarding.
   Shared exact-host HTTP and TLS 1.2+ front doors route to the managed handlers.
   Wrapper build generates a SAN-constrained sandbox certificate and supports
@@ -189,8 +179,7 @@ and native Section 13 for details and executable qualification.
   signing key or server private key in the application image.
 
 AD-012 is required for a conformant production controller deployment but not
-for a local standalone development run. AD-008 remains intentionally deferred
-until external composition measurements justify additional fork machinery.
+for a local standalone development run.
 
 ## 5.1 Dynamic injection completeness
 
@@ -256,10 +245,7 @@ The minimum end-to-end product slice requires:
 
 Production controller deployment additionally requires AD-012; its secret-store
 configuration remains host-only and is neither an AEF planning input nor an
-Interceptor target capability. AD-006, AD-007, AD-009, and AD-011 follow as
-fidelity and evaluation improvements.
-AD-008 is implemented only if external composition of existing snapshot
-operations proves inadequate.
+Interceptor target capability.
 
 ## 7. AEF-side conformance
 
@@ -289,9 +275,9 @@ AEF integration is conformant when:
 - Treating AEF scenario prose as Interceptor authorization.
 - Requiring Operator Sandbox for local or third-party Interceptor use.
 
-## Live feedback alignment (2026-09-16)
+## Live feedback
 
-The native feedback contract now implements default all-permitted selection within
+The native feedback contract provides default all-permitted selection within
 immutable profiles, fixed exact-invocation receipts, 256 KiB content reads and
 retained reads after restore/stop. Category availability, action delivery facts,
 event-attributed oracle outcomes and truncation prevent empty/partial evidence

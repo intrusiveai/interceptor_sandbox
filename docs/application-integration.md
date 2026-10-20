@@ -17,6 +17,17 @@ sealed, `interceptor app build` creates a second image—the wrapper image—by:
    applying the selected trust mode; and
 4. making Interceptor the wrapper image's entrypoint.
 
+On macOS, a released CLI takes the Linux executable from `interceptor-linux`
+beside the real CLI executable, and verifies it using the adjacent `release.json`.
+Keep the complete extracted archive together (or put a symlink to its CLI on
+`PATH`). Darwin ARM64 uses Linux ARM64; Darwin AMD64 uses Linux AMD64. The target
+image and Docker daemon must match that architecture. The working directory can
+be anywhere, and neither Go nor an Interceptor checkout is required. Missing,
+corrupt, or mismatched companions fail with a re-extraction instruction; released
+CLIs never compile or download a fallback. Linux CLIs continue to copy themselves.
+The wrapper lock's executable digest identifies the Linux bytes inside the
+container, not the native macOS CLI. See [installation](getting-started.md#install-a-release).
+
 When a session starts, that executable runs in `sandboxd` supervisor mode.
 `sandboxd` starts the model proxy, simulated services, and attacker sinks. It
 then prepares the selected application interface—either starting a non-root

@@ -2,13 +2,45 @@
 
 ## Prerequisites
 
-- Go 1.26 or newer
 - a running Docker daemon; Docker Desktop is supported on macOS
-- an application image built for the Docker host architecture
+- an application image and CLI matching the Docker host architecture
 - host credentials for a supported model provider, or the included mock
   provider for a local smoke test
 
-Build and test the project from the repository root:
+## Install a release
+
+Download the archive for your OS and CPU from the project's GitHub Releases.
+Verify its SHA-256 against the release's `SHA256SUMS`, then extract the **entire**
+archive into a dedicated directory. For example, on Apple Silicon:
+
+```sh
+mkdir -p "$HOME/.local/lib/interceptor/0.1.0"
+tar -xzf darwin-arm64.tar.gz -C "$HOME/.local/lib/interceptor/0.1.0"
+export PATH="$HOME/.local/lib/interceptor/0.1.0:$PATH"
+interceptor version
+```
+
+A macOS archive contains `interceptor` (the native CLI), `interceptor-linux`
+(the container supervisor), `release.json`, and `LICENSE`. Keep these files
+together; do not copy just the CLI into another directory. A symlink to the CLI
+is supported. Discovery is relative to the real executable, not the current
+directory. `release.json` covers both executable hashes and their shared release
+version/source revision; do not edit it or replace either executable separately.
+
+Darwin ARM64 packages Linux ARM64; Darwin AMD64 packages Linux AMD64. Your Docker
+daemon and target image must use that same architecture. Cross-architecture
+container execution is not supported by this workflow. Linux archives retain
+the single-executable layout and copy their running CLI into wrappers.
+
+Released macOS installations need no source checkout or Go toolchain to run
+`environment validate`, `environment seal`, `app build`, `app verify`, or `run`.
+A missing, damaged, or mismatched companion produces an error asking you to
+re-extract the matching release; the CLI never downloads a replacement or silently
+compiles source. Older macOS releases without the companion must be upgraded.
+
+## Build from source (development only)
+
+With Go **1.26.5**, build and test from the repository root:
 
 ```sh
 make build
@@ -19,7 +51,11 @@ make vet
 The executable is `bin/interceptor`. Add it to `PATH` or use that path in the
 examples below.
 
-## Run the reference environment
+On macOS, a development (`-dev`) CLI still builds its Linux supervisor from the
+checkout using Go. Run development wrapper builds from inside that checkout.
+This fallback is disabled in release builds.
+
+## Run the reference environment (source-development example)
 
 The reference environment is a small working example containing an agent,
 simulated support-ticket service, synthetic private data, an attacker capture
