@@ -37,16 +37,20 @@ class ReleaseArchivesTest(unittest.TestCase):
     def build(self, platform):
         output = self.root / platform.replace("/", "-")
         with patch.object(builder, "run", side_effect=self.run_build_command):
-            builder.build(self.root, output, "0.1.0", platform)
-        return output / builder.archive_name(platform)
+            builder.build(self.root, output, "0.1.2", platform)
+        return output / builder.archive_name("0.1.2", platform)
 
     def test_contents_integrity_and_identical_build_identity(self):
         for platform in builder.PLATFORMS:
             with self.subTest(platform=platform):
                 self.calls.clear()
                 path = self.build(platform)
-                self.assertEqual(path.name, "interceptor_sandbox-" + platform.replace("/", "_") + ".tar.gz")
+                stem = "interceptor_sandbox-v0.1.2-" + platform.replace("/", "_")
+                self.assertEqual(path.name, stem + ".tar.gz")
+                sums = path.with_name(stem + "-SHA256SUMS")
+                self.assertEqual(sums.read_text(), builder.checksum_line(path))
                 metadata = publisher.read_archive(path)
+                publisher.verify_archive_checksum(path, metadata)
                 names = ["interceptor", "release.json", "LICENSE"]
                 if platform.startswith("darwin/"):
                     names.insert(1, "interceptor-linux")
@@ -59,15 +63,16 @@ class ReleaseArchivesTest(unittest.TestCase):
                                      sorted(names))
                 repeated = self.root / ("repeat-" + platform.replace("/", "-"))
                 with patch.object(builder, "run", side_effect=self.run_build_command):
-                    builder.build(self.root, repeated, "0.1.0", platform)
+                    builder.build(self.root, repeated, "0.1.2", platform)
                 self.assertEqual(path.read_bytes(), (repeated / path.name).read_bytes())
-                self.assertEqual(metadata["version"], "0.1.0")
+                self.assertEqual(sums.read_bytes(), (repeated / sums.name).read_bytes())
+                self.assertEqual(metadata["version"], "0.1.2")
                 self.assertEqual(metadata["source_commit"], "a" * 40)
                 builds = [(args, env) for args, env in self.calls if args[:2] == ["go", "build"]]
                 self.assertEqual(len(builds), 4 if platform.startswith("darwin/") else 2)
                 for args, env in builds:
                     flags = args[args.index("-ldflags") + 1]
-                    self.assertIn("buildinfo.Version=0.1.0", flags)
+                    self.assertIn("buildinfo.Version=0.1.2", flags)
                     self.assertIn("buildinfo.SourceCommit=" + "a" * 40, flags)
                     self.assertEqual(env["GOARCH"], platform.split("/")[1])
                     self.assertEqual(env["CGO_ENABLED"], "0")
@@ -111,6 +116,8 @@ class ReleaseArchivesTest(unittest.TestCase):
             with tarfile.open(path) as archive:
                 files = [(item.name, archive.extractfile(item).read(), item.mode) for item in archive.getmembers()]
             for filename in (platform.replace("/", "-") + ".tar.gz",
+                             "interceptor_sandbox-" + platform.replace("/", "_") + ".tar.gz",
+                             builder.archive_name("0.1.3", platform),
                              "interceptor_sandbox-wrong_arch.tar.gz"):
                 with self.subTest(platform=platform, filename=filename):
                     renamed = path.with_name(filename)
@@ -142,7 +149,30 @@ class ReleaseArchivesTest(unittest.TestCase):
     def test_non_candidate_dispatch_cannot_publish(self):
         context = publisher.event_context({}, "workflow_dispatch", "refs/heads/fix/macos-wrapper-companion", "a"*40, "intrusiveai/interceptor_sandbox")
         self.assertEqual(context["mode"], "verify")
-        self.assertEqual(context["version"], "0.1.1")
+        self.assertEqual(context["version"], "0.1.2")
+
+    def test_names_reject_invalid_versions_and_platforms(self):
+        for version in (None, "v0.1.2", "0.01.2", "0.1.2/other", "0.1.2\n", "0.1.2-rc1"):
+            with self.subTest(version=version), self.assertRaises(ValueError):
+                builder.archive_name(version, "linux/amd64")
+        with self.assertRaises(ValueError):
+            builder.checksum_name("0.1.2", "linux/unknown")
+
+    def test_missing_wrong_or_corrupt_checksum_is_rejected(self):
+        for platform in builder.PLATFORMS:
+            path = self.build(platform)
+            metadata = publisher.read_archive(path)
+            sums = path.with_name(builder.checksum_name("0.1.2", platform))
+            original = sums.read_text()
+            for text in ("", "0" * 64 + "  " + path.name + "\n",
+                         original.replace("v0.1.2", "v0.1.3"), original + original):
+                with self.subTest(platform=platform, text=text):
+                    sums.write_text(text)
+                    with self.assertRaisesRegex(ValueError, "checksum"):
+                        publisher.verify_archive_checksum(path, metadata)
+            sums.unlink()
+            with self.assertRaisesRegex(ValueError, "checksum"):
+                publisher.verify_archive_checksum(path, metadata)
 
 
 if __name__ == "__main__":

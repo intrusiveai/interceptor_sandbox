@@ -19,10 +19,22 @@ PLATFORMS = ("linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64")
 VERSION = r"(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})"
 
 
-def archive_name(platform):
+def archive_name(version, platform):
+    if not isinstance(version, str) or not re.fullmatch(VERSION, version):
+        raise ValueError("release version must be numeric major.minor.patch")
     if platform not in PLATFORMS:
         raise ValueError("unsupported release platform")
-    return ARCHIVE_ROOT + "-" + platform.replace("/", "_") + ".tar.gz"
+    return ARCHIVE_ROOT + "-v" + version + "-" + platform.replace("/", "_") + ".tar.gz"
+
+
+def checksum_name(version, platform):
+    return archive_name(version, platform).removesuffix(".tar.gz") + "-SHA256SUMS"
+
+
+def checksum_line(path):
+    with path.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    return f"{digest}  {path.name}\n"
 
 
 def run(args, root, env=None):
@@ -96,8 +108,10 @@ def build(root, output, version, platform):
             ("release.json", release_json, 0o644),
             ("LICENSE", license_text, 0o644),
         ))
-        archive(output / archive_name(platform),
+        path = output / archive_name(version, platform)
+        archive(path,
                 [(ARCHIVE_ROOT + "/" + name, content, mode) for name, content, mode in files])
+        (output / checksum_name(version, platform)).write_text(checksum_line(path))
     print(json.dumps({"status": "built-not-qualified", **metadata}, sort_keys=True))
 
 

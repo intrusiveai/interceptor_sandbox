@@ -13,7 +13,7 @@ import tempfile
 import time
 import uuid
 
-from build_release import ARCHIVE_ROOT, archive_name
+from build_release import ARCHIVE_ROOT, archive_name, checksum_name, checksum_line
 
 PLATFORMS = {"linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"}
 VERSION = r"(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})"
@@ -28,7 +28,7 @@ def candidate_version(branch):
 
 
 def event_context(event, name, ref, sha, repository):
-    result = {"mode": "verify", "version": "0.1.1", "source": sha,
+    result = {"mode": "verify", "version": "0.1.2", "source": sha,
               "branch": ref.removeprefix("refs/heads/"), "pr": ""}
     if name == "pull_request":
         pr = event["pull_request"]
@@ -107,7 +107,7 @@ def read_archive(path):
             raise ValueError("release archive requires one release.json")
         metadata = json.load(archive.extractfile(prefix + "release.json"))
         platform = metadata.get("platform")
-        if platform not in PLATFORMS or path.name != archive_name(platform):
+        if platform not in PLATFORMS or path.name != archive_name(metadata.get("version"), platform):
             raise ValueError("release archive platform/filename differs")
         names = ["interceptor", "release.json", "LICENSE"]
         if platform.startswith("darwin/"):
@@ -132,10 +132,15 @@ def read_archive(path):
     return metadata
 
 
+def verify_archive_checksum(path, metadata):
+    sums = path.with_name(checksum_name(metadata["version"], metadata["platform"]))
+    if not sums.is_file() or sums.read_text() != checksum_line(path):
+        raise ValueError("release archive checksum file is missing or differs")
+
+
 def assemble(directory, output):
     archives = sorted(directory.glob("*.tar.gz"))
-    expected = {archive_name(platform) for platform in PLATFORMS}
-    if {path.name for path in archives} != expected:
+    if len(archives) != len(PLATFORMS):
         raise ValueError("four distinct platform archives are required")
     metadata = [read_archive(path) for path in archives]
     identity = {(item.get("version"), item.get("source_commit")) for item in metadata}
@@ -143,23 +148,25 @@ def assemble(directory, output):
     if len(identity) != 1 or platforms != PLATFORMS:
         raise ValueError("release source, version or platform identities differ")
     version, source = identity.pop()
+    if {path.name for path in directory.iterdir()} != expected_assets(version) - {"candidate.json"}:
+        raise ValueError("four platform archives and matching checksum files are required")
+    for path, item in zip(archives, metadata):
+        verify_archive_checksum(path, item)
     output.mkdir(mode=0o700)
-    files = []
-    for path in archives:
+    for path in sorted(directory.iterdir()):
         destination = output / path.name
         destination.write_bytes(path.read_bytes())
-        files.append(destination)
     inventory = {"version": version, "source_commit": source,
-                 "archives": {path.name: checksum(path) for path in files}}
+                 "archives": {path.name: checksum(path) for path in archives}}
     record = output / "candidate.json"
     record.write_text(json.dumps(inventory, sort_keys=True, indent=2) + "\n")
-    sums = output / "SHA256SUMS"
-    sums.write_text("".join(f"{checksum(path)[7:]}  {path.name}\n" for path in sorted(files + [record])))
     return inventory, sorted(output.iterdir())
 
 
-def expected_assets():
-    return {archive_name(platform) for platform in PLATFORMS} | {"candidate.json", "SHA256SUMS"}
+def expected_assets(version):
+    return ({archive_name(version, platform) for platform in PLATFORMS}
+            | {checksum_name(version, platform) for platform in PLATFORMS}
+            | {"candidate.json"})
 
 
 def verify_uploaded(github, release, digests):
@@ -184,7 +191,7 @@ def catalog_entry(github, tag, source):
     if (record["version"] != version or record["source_commit"] != source
             or github.api("commits/" + tag)["sha"] != source):
         raise ValueError("catalog source/tag differs from the published candidate")
-    if set(record["assets"]) != expected_assets():
+    if set(record["assets"]) != expected_assets(version):
         raise ValueError("catalog requires all release assets")
     verify_uploaded(github, release, record["assets"])
     if not release["prerelease"]:
@@ -198,7 +205,7 @@ def catalog_entry(github, tag, source):
     assets = {asset["name"]: asset for asset in github.assets(release)}
     artifacts = []
     for platform in sorted(PLATFORMS):
-        name = archive_name(platform)
+        name = archive_name(version, platform)
         asset = assets[name]
         url = f"https://github.com/{github.repository}/releases/download/{tag}/{name}"
         if asset.get("browser_download_url") != url:
@@ -266,7 +273,7 @@ def publish(github, branch, source, inventory, files):
     if release and (not release["prerelease"] or release.get("immutable") or MARKER not in (release.get("body") or "")):
         raise ValueError("cannot replace a stable, immutable or unmanaged release")
     digests = {path.name: checksum(path) for path in files}
-    if set(digests) != expected_assets():
+    if set(digests) != expected_assets(version):
         raise ValueError("candidate file set is incomplete")
     body = MARKER + "\n" + json.dumps({"version": version, "source_commit": source,
                                          "assets": digests}, sort_keys=True)
@@ -312,7 +319,7 @@ def promote(github, number):
     record = json.loads(body.removeprefix(MARKER + "\n"))
     if record["source_commit"] != source or record["version"] != version:
         raise ValueError("prerelease was not built from the merged candidate head")
-    if set(record["assets"]) != expected_assets():
+    if set(record["assets"]) != expected_assets(version):
         raise ValueError("prerelease is missing required artifacts")
     if github.api("commits/v" + version)["sha"] != source:
         raise ValueError("release tag differs from built candidate")
@@ -350,6 +357,7 @@ def main():
         metadata = read_archive(args.archive)
         if metadata.get("source_commit") != args.source or metadata.get("version") != args.version:
             raise ValueError("archive source/version differs from the requested build")
+        verify_archive_checksum(args.archive, metadata)
         print(json.dumps(metadata, sort_keys=True))
         return
     if args.operation == "context":
