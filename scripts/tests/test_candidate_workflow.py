@@ -117,7 +117,7 @@ class CandidateWorkflowTest(unittest.TestCase):
         context = release.event_context({}, "push", "refs/heads/" + BRANCH, source, REPO)
         self.assertEqual(context["mode"], "publish")
         files = []
-        for name in sorted(release.expected_assets()):
+        for name in sorted(release.expected_assets(context["version"])):
             path = self.root / name
             path.write_bytes((name + ":" + source).encode())
             files.append(path)
@@ -153,21 +153,32 @@ class CandidateWorkflowTest(unittest.TestCase):
                     ("release.json", (json.dumps(metadata) + "\n").encode(), 0o644),
                     ("LICENSE", b"license", 0o644),
             ))
-            builder.archive(candidates / builder.archive_name(platform),
+            path = candidates / builder.archive_name("1.2.3", platform)
+            builder.archive(path,
                             [("interceptor_sandbox/" + name, data, mode) for name, data, mode in files])
+            (candidates / builder.checksum_name("1.2.3", platform)).write_text(builder.checksum_line(path))
         inventory, files = release.assemble(candidates, self.root / "assembled")
         self.assertEqual(inventory["version"], "1.2.3")
         self.assertEqual(inventory["source_commit"], FIRST)
-        self.assertEqual({path.name for path in files}, release.expected_assets())
+        self.assertEqual({path.name for path in files}, release.expected_assets("1.2.3"))
         self.assertEqual(set(inventory["archives"]), {
-            "interceptor_sandbox-linux_amd64.tar.gz", "interceptor_sandbox-linux_arm64.tar.gz",
-            "interceptor_sandbox-darwin_amd64.tar.gz", "interceptor_sandbox-darwin_arm64.tar.gz",
+            "interceptor_sandbox-v1.2.3-linux_amd64.tar.gz", "interceptor_sandbox-v1.2.3-linux_arm64.tar.gz",
+            "interceptor_sandbox-v1.2.3-darwin_amd64.tar.gz", "interceptor_sandbox-v1.2.3-darwin_arm64.tar.gz",
         })
-        sums = (self.root / "assembled" / "SHA256SUMS").read_text()
-        for path in files:
-            if path.name == "SHA256SUMS":
-                continue
-            self.assertIn(f"{release.checksum(path)[7:]}  {path.name}\n", sums)
+        for platform in builder.PLATFORMS:
+            sums = self.root / "assembled" / builder.checksum_name("1.2.3", platform)
+            path = self.root / "assembled" / builder.archive_name("1.2.3", platform)
+            self.assertEqual(sums.read_text(), f"{release.checksum(path)[7:]}  {path.name}\n")
+        self.assertNotIn("SHA256SUMS", {path.name for path in files})
+        broken = candidates / builder.checksum_name("1.2.3", "linux/amd64")
+        original = broken.read_text()
+        broken.write_text("0" * 64 + "  wrong.tar.gz\n")
+        with self.assertRaisesRegex(ValueError, "checksum"):
+            release.assemble(candidates, self.root / "rejected")
+        broken.unlink()
+        with self.assertRaisesRegex(ValueError, "matching checksum"):
+            release.assemble(candidates, self.root / "rejected")
+        broken.write_text(original)
         before = {path.name: path.read_bytes() for path in files}
         self.assertEqual(release.publish(self.github, BRANCH, FIRST, inventory, files), "prerelease-published")
         self.github.pr = pull(FIRST)
@@ -216,7 +227,7 @@ class CandidateWorkflowTest(unittest.TestCase):
             release.promote(self.github, 42)
         self.github.fail_upload = False
         self.assertEqual(self.publish(), "prerelease-published")
-        self.assertEqual(set(self.github.uploaded), release.expected_assets())
+        self.assertEqual(set(self.github.uploaded), release.expected_assets("1.2.3"))
 
     def test_main_merge_must_match_candidate_source_and_tree(self):
         self.publish()
@@ -232,12 +243,16 @@ class CandidateWorkflowTest(unittest.TestCase):
         self.publish()
         self.github.pr = pull(FIRST)
         original = dict(self.github.uploaded)
-        for change in ("changed", "missing", "extra"):
+        for change in ("changed", "missing", "extra", "checksum-changed", "checksum-missing"):
             self.github.uploaded = dict(original)
             if change == "changed":
-                self.github.uploaded["interceptor_sandbox-linux_amd64.tar.gz"] = b"unexpected bytes"
+                self.github.uploaded["interceptor_sandbox-v1.2.3-linux_amd64.tar.gz"] = b"unexpected bytes"
             elif change == "missing":
-                self.github.uploaded.pop("interceptor_sandbox-linux_amd64.tar.gz")
+                self.github.uploaded.pop("interceptor_sandbox-v1.2.3-linux_amd64.tar.gz")
+            elif change == "checksum-changed":
+                self.github.uploaded["interceptor_sandbox-v1.2.3-linux_amd64-SHA256SUMS"] = b"changed"
+            elif change == "checksum-missing":
+                self.github.uploaded.pop("interceptor_sandbox-v1.2.3-linux_amd64-SHA256SUMS")
             else:
                 self.github.uploaded["unexpected.exe"] = b"extra"
             with self.assertRaises(ValueError):

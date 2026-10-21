@@ -9,20 +9,27 @@
 
 ## Install a release
 
-Download the archive for your OS and CPU from the project's GitHub Releases.
-Verify its SHA-256 against the release's `SHA256SUMS`, then extract the **entire**
+Download the archive and matching checksum file for your OS and CPU from the
+project's GitHub Releases. Keep both downloads in the same directory.
+Verify its SHA-256 using that checksum file, then extract the **entire**
 archive into a dedicated directory. Archives are named
-`interceptor_sandbox-<os>_<arch>.tar.gz`, where `<os>` is `darwin` or `linux`
-and `<arch>` is `arm64` or `amd64`. Each extracts into a single
+`interceptor_sandbox-v<version>-<os>_<architecture>.tar.gz`, where `<os>` is `darwin` or `linux`
+and `<architecture>` is `arm64` or `amd64`. The corresponding checksum filename is
+`interceptor_sandbox-v<version>-<os>_<architecture>-SHA256SUMS`.
+Each archive extracts into a single
 `interceptor_sandbox/` directory, without an OS, architecture, or version suffix.
-For example, for v0.1.1 on Apple Silicon:
+For example, for v0.1.2 on Apple Silicon, run from the download directory:
 
 ```sh
-mkdir -p "$HOME/.local/lib/interceptor/0.1.1"
-tar -xzf interceptor_sandbox-darwin_arm64.tar.gz -C "$HOME/.local/lib/interceptor/0.1.1"
-export PATH="$HOME/.local/lib/interceptor/0.1.1/interceptor_sandbox:$PATH"
+shasum -a 256 -c interceptor_sandbox-v0.1.2-darwin_arm64-SHA256SUMS
+mkdir -p "$HOME/.local/lib/interceptor/0.1.2"
+tar -xzf interceptor_sandbox-v0.1.2-darwin_arm64.tar.gz -C "$HOME/.local/lib/interceptor/0.1.2"
+export PATH="$HOME/.local/lib/interceptor/0.1.2/interceptor_sandbox:$PATH"
 interceptor version
 ```
+
+On Linux, use `sha256sum -c interceptor_sandbox-v0.1.2-linux_amd64-SHA256SUMS`
+for AMD64 (or replace `amd64` with `arm64`). Continue only when verification reports `OK`.
 
 A macOS archive's `interceptor_sandbox/` directory contains `interceptor` (the native CLI), `interceptor-linux`
 (the container supervisor), `release.json`, and `LICENSE`. Keep these files
@@ -37,10 +44,13 @@ container execution is not supported by this workflow. Linux archives retain
 the single-executable layout and copy their running CLI into wrappers.
 
 Extract each version/platform into a separate parent directory to avoid mixing
-files from different archives. Release URLs identify the version; the archive
-filename and its top-level directory do not. The older v0.1.0 archives retain
-their original `<os>-<arch>.tar.gz` names and extract files directly into the
-destination directory; those published artifacts are unchanged.
+files from different archives. Release URLs and archive filenames identify the
+version; the top-level directory does not. Versioned filenames and per-platform
+checksum files apply from v0.1.2. The v0.1.1 archives retain their unversioned
+`interceptor_sandbox-<os>_<architecture>.tar.gz` names and `interceptor_sandbox/`
+root. The v0.1.0 archives retain `<os>-<arch>.tar.gz` names and extract files
+directly into the destination directory. Both older releases use their aggregate
+`SHA256SUMS` file; those published artifacts are unchanged.
 
 Released macOS installations need no source checkout or Go toolchain to run
 `environment validate`, `environment seal`, `app build`, `app verify`, or `run`.
