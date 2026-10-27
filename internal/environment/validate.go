@@ -126,6 +126,10 @@ func Validate(directory string) (*ValidationReport, error) {
 	if blueprint.Application.Interface.External != nil && blueprint.Application.Interface.External.ConfigAsset != "" {
 		assetSources = append(assetSources, blueprint.Application.Interface.External.ConfigAsset)
 	}
+	if code := blueprint.Application.Interface.Code; code != nil && code.AdapterAsset != "" {
+		add(validateAdapter(root, blueprint))
+		assetSources = append(assetSources, code.AdapterAsset)
+	}
 
 	mutableRoots := map[string]struct{}{}
 	for i, path := range blueprint.Application.Persistence.MutableRoots {
@@ -799,7 +803,7 @@ func validateApplicationInterface(value ApplicationInterface) []error {
 			if strings.TrimSpace(value.Code.Module) == "" || strings.TrimSpace(value.Code.Invoke) == "" {
 				add(errors.New("application.interface.code.module and invoke are required"))
 			}
-			if strings.ContainsAny(value.Code.Module+value.Code.Initialize+value.Code.Invoke, "\x00\r\n") {
+			if strings.ContainsAny(value.Code.Module+value.Code.Initialize+value.Code.Invoke+value.Code.Close, "\x00\r\n") {
 				add(errors.New("application.interface.code names contain forbidden control characters"))
 			}
 			if value.Code.InputMode != "" && value.Code.InputMode != "single" && value.Code.InputMode != "kwargs" {

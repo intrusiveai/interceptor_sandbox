@@ -96,6 +96,10 @@ or TLS private keys into the image. It creates the reusable wrapper image and
 records which exact application, Interceptor build, Sealed Environment, and
 public TLS identity it belongs to.
 
+When a code interface declares `adapter_asset`, the builder also copies that
+sealed adapter directory into the application workdir. Invocation loads this
+installed copy; the original application image remains unchanged.
+
 When `interceptor run` starts a session, it verifies that wrapper record, mounts
 the Sealed Environment and new session storage, and starts the wrapper with the
 `sandboxd` argument. The resulting container command is conceptually:

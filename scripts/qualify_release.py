@@ -24,7 +24,7 @@ from publish_release import read_archive
 from build_release import ARCHIVE_ROOT
 
 
-def qualify(archive, version, source, base_image, output, client):
+def qualify(archive, version, source, base_image, output, client, adapter_language=None):
     metadata = read_archive(archive)
     arch = {"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64"}.get(platform.machine())
     host = platform.system().lower() + "/" + str(arch)
@@ -71,6 +71,20 @@ def qualify(archive, version, source, base_image, output, client):
         run(docker, "tag", base["Id"], target)
         process = None
         try:
+            target_id = base["Id"]
+            example = Path(__file__).resolve().parents[1] / "examples/invocation-adapters" / (adapter_language or "")
+            if adapter_language:
+                context = work / "target"
+                shutil.copytree(example / "target", context)
+                dockerfile = context / "Dockerfile"
+                dockerfile.write_text("FROM " + base_image + "\n" + dockerfile.read_text().split("\n", 1)[1])
+                run(docker, "build", "--pull=false", "--tag", target, str(context))
+                target_id = run(docker, "image", "inspect", "--format", "{{.Id}}", target)
+                run(docker, "create", "--name", inspection, target)
+                absent = subprocess.run([docker, "cp", inspection+":/app/.interceptor-adapter", str(work / "unexpected-adapter")], capture_output=True, timeout=30)
+                if absent.returncode == 0:
+                    raise ValueError("target already contains the adapter")
+                run(docker, "rm", inspection)
             blueprint = outside / "environment"
             run(cli, "environment", "init", str(blueprint))
             record = {
@@ -88,7 +102,14 @@ def qualify(archive, version, source, base_image, output, client):
                 "limits": {"max_turns": 10, "max_tokens": 10000, "max_wall_seconds": 120,
                            "max_snapshots": 1, "max_blob_bytes": 10485760},
             }
-            (blueprint / "environment.yaml").write_text(json.dumps(record))
+            if adapter_language:
+                shutil.copytree(example / "environment", blueprint, dirs_exist_ok=True)
+                yaml = blueprint / "environment.yaml"
+                placeholder = "interceptor-adapter-"+adapter_language+":local@sha256:"+"0"*64
+                if placeholder not in yaml.read_text(): raise ValueError("example image placeholder is missing")
+                yaml.write_text(yaml.read_text().replace(placeholder, target+"@"+target_id))
+            else:
+                (blueprint / "environment.yaml").write_text(json.dumps(record))
             run(cli, "environment", "validate", str(blueprint))
             run(cli, "environment", "seal", str(blueprint))
             lock = json.loads(run(cli, "app", "build", "--environment", str(blueprint), "--tag", wrapper, "--json"))
@@ -98,6 +119,18 @@ def qualify(archive, version, source, base_image, output, client):
             if lock["interceptor_binary_digest"] != "sha256:"+expected or lock["interceptor_version"] != version:
                 raise ValueError("wrapper lock does not identify the packaged executable")
             run(docker, "create", "--name", inspection, wrapper, "version")
+            adapter_digests = {}
+            if adapter_language:
+                copied = work / "copied-adapter"
+                run(docker, "cp", inspection+":/app/.interceptor-adapter", str(copied))
+                for original in sorted((blueprint / "assets/adapter").rglob("*")):
+                    if not original.is_file(): continue
+                    relative = original.relative_to(blueprint / "assets/adapter")
+                    if original.read_bytes() != (copied / relative).read_bytes():
+                        raise ValueError("installed adapter differs from sealed source")
+                    adapter_digests[str(relative)] = hashlib.sha256(original.read_bytes()).hexdigest()
+                if run(docker, "image", "inspect", "--format", "{{.Id}}", target) != target_id:
+                    raise ValueError("target image changed during wrapper construction")
             run(docker, "cp", inspection+":/usr/local/bin/interceptor", str(work / "container-interceptor"))
             if (work / "container-interceptor").read_bytes() != packaged.read_bytes():
                 raise ValueError("wrapper contains different executable bytes")
@@ -118,7 +151,17 @@ def qualify(archive, version, source, base_image, output, client):
                     if session and "Interceptor local API:" in (output / "run.log").read_text(): break
                     time.sleep(0.25)
                 if not session: raise RuntimeError("release readiness timed out")
-                run(str(client), "--command-only", "--output", str(output / "native"))
+                if adapter_language:
+                    # The Blueprint is mounted for verification, as for every
+                    # interface. No separate adapter/application-source mount is
+                    # allowed; the entry module is loaded from the wrapper.
+                    active = run(docker, "ps", "--filter", "ancestor="+wrapper, "--format", "{{.ID}}").splitlines()
+                    if len(active) != 1: raise ValueError("expected one qualification container")
+                    mounts = json.loads(run(docker, "inspect", "--format", "{{json .Mounts}}", active[0]))
+                    if any(m["Destination"] == "/app" or m["Destination"].startswith("/app/") for m in mounts):
+                        raise ValueError("application/adapter source is mounted instead of installed")
+                    (output / "mounts.json").write_text(json.dumps(mounts, indent=2)+"\n")
+                run(str(client), "--adapter-only" if adapter_language else "--command-only", "--output", str(output / "native"))
                 native = json.loads((output / "native/result.json").read_text())
                 if not native["passed"] or native["session_id"] != session["id"]:
                     raise ValueError("native qualification did not pass for this session")
@@ -131,6 +174,16 @@ def qualify(archive, version, source, base_image, output, client):
                       "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
                       "container_binary_sha256": expected, "go_available": False,
                       "target_output": native["target_output"].strip(), "session_id": session["id"]}
+            if adapter_language:
+                logs = list((work / "data").rglob("application.*.log"))
+                diagnostics = "\n".join(p.read_text() for p in logs)
+                if diagnostics.count("application initialized") != 1 or diagnostics.count("application closed") != 1:
+                    raise ValueError("application did not initialize/close exactly once: " + diagnostics)
+                (output / "application.log").write_text(diagnostics)
+                runtime = "/usr/local/bin/python3" if adapter_language == "python" else "/usr/local/bin/node"
+                result.update(adapter_language=adapter_language, adapter_sha256=adapter_digests,
+                              runtime=run(docker, "run", "--rm", "--network", "none", "--entrypoint", runtime, target, "--version"),
+                              target_image=target_id, wrapper_image=lock["wrapper_digest"])
             (output / "result.json").write_text(json.dumps(result, indent=2)+"\n")
             print(json.dumps(result))
         finally:
@@ -155,5 +208,6 @@ if __name__ == "__main__":
     parser.add_argument("--image", required=True, help="existing native Linux image containing /bin/cat")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--client", type=Path, required=True, help="prebuilt examples/local-api-smoke qualification client")
+    parser.add_argument("--adapter-language", choices=("python", "node"), help="qualify the separately installed adapter example using the supplied runtime image")
     args = parser.parse_args()
-    qualify(args.archive.resolve(), args.version, args.source, args.image, args.output, args.client.resolve())
+    qualify(args.archive.resolve(), args.version, args.source, args.image, args.output, args.client.resolve(), args.adapter_language)

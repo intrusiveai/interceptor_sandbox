@@ -1,5 +1,14 @@
 # Application integration
 
+Python and Node applications can supply invocation glue separately from their
+application image. Set `application.interface.code.adapter_asset` to an adapter
+directory in the Blueprint; sealing records its contents and `interceptor app
+build` installs it into the wrapper. The target image still supplies its runtime
+and dependencies. See [invocation adapters](application-interfaces.md#supplying-an-adapter-separately)
+for configuration, imports, session lifetime, and cleanup, and the
+[runnable examples](../examples/invocation-adapters/README.md) for the complete
+build/run workflow.
+
 Interceptor needs a small amount of information about an application before it
 can run it safely. The Environment Blueprint supplies that information: how to
 start the application, how a tester invokes it, which operations may be called,
@@ -12,10 +21,11 @@ or Interceptor-specific listeners to that Dockerfile. After the Environment is
 sealed, `interceptor app build` creates a second image—the wrapper image—by:
 
 1. using the application image as its starting point;
-2. adding the Linux `interceptor` executable; and
+2. adding the Linux `interceptor` executable;
 3. when local TLS is enabled, adding the generated public sandbox CA and
-   applying the selected trust mode; and
-4. making Interceptor the wrapper image's entrypoint.
+   applying the selected trust mode;
+4. copying any declared invocation adapter into the application workdir; and
+5. making Interceptor the wrapper image's entrypoint.
 
 On macOS, a released CLI takes the Linux executable from `interceptor-linux`
 beside the real CLI executable, and verifies it using the adjacent `release.json`.

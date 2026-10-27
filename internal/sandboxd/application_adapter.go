@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -882,6 +883,8 @@ type protocolApplicationAdapter struct {
 	ready     chan error
 	readyOnce sync.Once
 	limit     chan struct{}
+	failed    error // protected by pendingMu; an indeterminate code session cannot be reused
+	closed    chan error
 }
 
 func newProtocolApplicationAdapter(server *Server, command, extraEnv []string) (*protocolApplicationAdapter, error) {
@@ -895,7 +898,7 @@ func newProtocolApplicationAdapter(server *Server, command, extraEnv []string) (
 	if server.blueprint.Application.Interface.Code != nil && server.blueprint.Application.Interface.Code.Concurrency > 0 {
 		concurrency = server.blueprint.Application.Interface.Code.Concurrency
 	}
-	return &protocolApplicationAdapter{server: server, command: command, extraEnv: extraEnv, pending: map[string]chan protocolFrame{}, ready: make(chan error, 1), limit: make(chan struct{}, concurrency)}, nil
+	return &protocolApplicationAdapter{server: server, command: command, extraEnv: extraEnv, pending: map[string]chan protocolFrame{}, ready: make(chan error, 1), closed: make(chan error, 1), limit: make(chan struct{}, concurrency)}, nil
 }
 
 func (a *protocolApplicationAdapter) Kind() string {
@@ -911,17 +914,40 @@ func (a *protocolApplicationAdapter) Start() error {
 	a.server.configureApplicationCommand(command, a.extraEnv)
 	a.input, err = command.StdinPipe()
 	if err != nil {
+		_ = stdoutLog.Close()
+		_ = stderrLog.Close()
 		return err
 	}
-	output, err := command.StdoutPipe()
+	var output io.ReadCloser
+	var protocolWriter *os.File
+	if a.Kind() == "code" {
+		output, protocolWriter, err = os.Pipe()
+		if err == nil {
+			defer protocolWriter.Close()
+			command.ExtraFiles = []*os.File{protocolWriter}
+			command.Env = append(command.Env, "INTERCEPTOR_PROTOCOL_FD=3")
+			command.Stdout = stdoutLog
+		}
+	} else {
+		output, err = command.StdoutPipe()
+	}
 	if err != nil {
+		_ = a.input.Close()
+		_ = stdoutLog.Close()
+		_ = stderrLog.Close()
 		return err
 	}
 	command.Stderr = stderrLog
 	if err := a.server.startApplicationProcess(command, stdoutLog, stderrLog); err != nil {
+		_ = output.Close()
+		_ = a.input.Close()
 		return err
 	}
-	go a.readFrames(output, stdoutLog)
+	var frameLog io.Writer = stdoutLog
+	if a.Kind() == "code" {
+		frameLog = io.Discard
+	}
+	go func() { defer output.Close(); a.readFrames(output, frameLog) }()
 	config := map[string]any{}
 	if external := a.server.blueprint.Application.Interface.External; external != nil {
 		for key, value := range external.Config {
@@ -946,11 +972,30 @@ func (a *protocolApplicationAdapter) readFrames(reader io.Reader, log io.Writer)
 		var frame protocolFrame
 		if err := json.Unmarshal(scanner.Bytes(), &frame); err != nil {
 			a.readyOnce.Do(func() { a.ready <- fmt.Errorf("invalid application protocol frame: %w", err) })
+			if a.Kind() == "code" {
+				a.failSession(err)
+				return
+			}
 			continue
 		}
 		switch frame.Type {
 		case "ready":
 			a.readyOnce.Do(func() { a.ready <- nil })
+		case "error":
+			err := errors.New(frame.Error)
+			a.readyOnce.Do(func() { a.ready <- err })
+			if a.Kind() == "code" {
+				a.failSession(err)
+			}
+		case "closed":
+			var err error
+			if frame.Error != "" {
+				err = errors.New(frame.Error)
+			}
+			select {
+			case a.closed <- err:
+			default:
+			}
 		case "result":
 			a.pendingMu.Lock()
 			channel := a.pending[frame.ID]
@@ -969,6 +1014,9 @@ func (a *protocolApplicationAdapter) readFrames(reader io.Reader, log io.Writer)
 	}
 	a.readyOnce.Do(func() { a.ready <- err })
 	a.pendingMu.Lock()
+	if a.Kind() == "code" && a.failed == nil {
+		a.failed = fmt.Errorf("application process ended: %w; start a new session", err)
+	}
 	for _, channel := range a.pending {
 		select {
 		case channel <- protocolFrame{Type: "result", Error: err.Error()}:
@@ -987,6 +1035,9 @@ func (a *protocolApplicationAdapter) writeFrame(frame protocolFrame) error {
 func (a *protocolApplicationAdapter) WaitReady(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
+		if a.Kind() == "code" {
+			a.failSession(ctx.Err())
+		}
 		return ctx.Err()
 	case err := <-a.ready:
 		return err
@@ -999,6 +1050,9 @@ func (a *protocolApplicationAdapter) Invoke(ctx context.Context, invocation appl
 		defer func() { <-a.limit }()
 	case <-ctx.Done():
 		return applicationResult{}, ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return applicationResult{}, err
 	}
 	if _, ok := a.server.operation(invocation.Operation); !ok {
 		return applicationResult{}, fmt.Errorf("unknown operation %q", invocation.Operation)
@@ -1017,15 +1071,27 @@ func (a *protocolApplicationAdapter) Invoke(ctx context.Context, invocation appl
 	}
 	channel := make(chan protocolFrame, 1)
 	a.pendingMu.Lock()
+	if a.failed != nil {
+		err := a.failed
+		a.pendingMu.Unlock()
+		return applicationResult{}, err
+	}
 	a.pending[id] = channel
 	a.pendingMu.Unlock()
 	defer func() { a.pendingMu.Lock(); delete(a.pending, id); a.pendingMu.Unlock() }()
-	if err := a.writeFrame(protocolFrame{Protocol: applicationProtocol, Type: "invoke", ID: id, Operation: invocation.Operation, Input: input, MediaType: invocation.MediaType}); err != nil {
+	if err := a.writeInvocation(ctx, protocolFrame{Protocol: applicationProtocol, Type: "invoke", ID: id, Operation: invocation.Operation, Input: input, MediaType: invocation.MediaType}); err != nil {
+		if a.Kind() == "code" {
+			a.failSession(err)
+		}
 		return applicationResult{}, err
 	}
 	select {
 	case <-ctx.Done():
-		_ = a.writeFrame(protocolFrame{Protocol: applicationProtocol, Type: "cancel", ID: id})
+		if a.Kind() == "code" {
+			a.failSession(ctx.Err())
+		} else {
+			_ = a.writeFrame(protocolFrame{Protocol: applicationProtocol, Type: "cancel", ID: id})
+		}
 		return applicationResult{}, ctx.Err()
 	case frame := <-channel:
 		if frame.Error != "" {
@@ -1036,6 +1102,68 @@ func (a *protocolApplicationAdapter) Invoke(ctx context.Context, invocation appl
 			output = []byte("null")
 		}
 		return applicationResult{Code: http.StatusOK, Body: output, MediaType: valueOr(frame.MediaType, "application/json")}, nil
+	}
+}
+
+func (a *protocolApplicationAdapter) writeInvocation(ctx context.Context, frame protocolFrame) error {
+	if a.Kind() != "code" {
+		return a.writeFrame(frame)
+	}
+	result := make(chan error, 1)
+	go func() { result <- a.writeFrame(frame) }()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		a.failSession(ctx.Err())
+		return ctx.Err()
+	}
+}
+
+func (a *protocolApplicationAdapter) failSession(cause error) {
+	a.pendingMu.Lock()
+	if a.failed != nil {
+		a.pendingMu.Unlock()
+		return
+	}
+	a.failed = fmt.Errorf("code session is unusable: %w; start a new session", cause)
+	for _, channel := range a.pending {
+		select {
+		case channel <- protocolFrame{Type: "result", Error: a.failed.Error()}:
+		default:
+		}
+	}
+	a.pendingMu.Unlock()
+	// Never wait for arbitrary user code to cooperate after an indeterminate turn.
+	if a.server.app != nil && a.server.app.Process != nil {
+		_ = syscall.Kill(-a.server.app.Process.Pid, syscall.SIGKILL)
+	}
+	if a.input != nil {
+		_ = a.input.Close()
+	}
+}
+
+func (a *protocolApplicationAdapter) Close(ctx context.Context) error {
+	if a.Kind() != "code" {
+		return nil
+	}
+	a.pendingMu.Lock()
+	failed := a.failed
+	a.pendingMu.Unlock()
+	if failed != nil {
+		return nil
+	} // Already terminated; no cleanup guarantee.
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := a.writeInvocation(ctx, protocolFrame{Protocol: applicationProtocol, Type: "close"}); err != nil {
+		return err
+	}
+	select {
+	case err := <-a.closed:
+		return err
+	case <-ctx.Done():
+		a.failSession(ctx.Err())
+		return fmt.Errorf("adapter cleanup timed out: %w", ctx.Err())
 	}
 }
 
@@ -1060,28 +1188,8 @@ func codeDriverCommand(base []string, config *environment.CodeInterface) ([]stri
 	return append(append([]string{}, base...), "-e", nodeCodeDriver), extra, nil
 }
 
-const pythonCodeDriver = `
-import asyncio, importlib, inspect, json, os, sys
-cfg=json.loads(os.environ['INTERCEPTOR_CODE_CONFIG']); mod=importlib.import_module(cfg['module']); target=mod
-init=cfg.get('initialize')
-if init:
-    fn=getattr(mod,init); target=fn(cfg.get('init_arguments') or {})
-    if inspect.isawaitable(target): target=asyncio.run(target)
-print(json.dumps({'protocol':'interceptor.application/v1','type':'ready'}),flush=True)
-for line in sys.stdin:
-    try:
-        f=json.loads(line)
-        if f.get('type')!='invoke': continue
-        fn=getattr(target,cfg['invoke']); value=f.get('input')
-        result=fn(**value) if cfg.get('input_mode')=='kwargs' else fn(value)
-        if inspect.isawaitable(result): result=asyncio.run(result)
-        print(json.dumps({'protocol':'interceptor.application/v1','type':'result','id':f['id'],'output':result},default=str),flush=True)
-    except Exception as e: print(json.dumps({'protocol':'interceptor.application/v1','type':'result','id':f.get('id'),'error':str(e)}),flush=True)
-`
+//go:embed drivers/python.py
+var pythonCodeDriver string
 
-const nodeCodeDriver = `
-const readline=require('readline'); const cfg=JSON.parse(process.env.INTERCEPTOR_CODE_CONFIG);
-(async()=>{ const mod=await import(cfg.module); let target=mod; if(cfg.initialize){ target=await mod[cfg.initialize](cfg.init_arguments||{}); }
-console.log(JSON.stringify({protocol:'interceptor.application/v1',type:'ready'}));
-readline.createInterface({input:process.stdin}).on('line',async line=>{ let f={}; try { f=JSON.parse(line); if(f.type!=='invoke')return; const fn=target[cfg.invoke]; const out=await fn.call(target,f.input); console.log(JSON.stringify({protocol:'interceptor.application/v1',type:'result',id:f.id,output:out})); } catch(e){ console.log(JSON.stringify({protocol:'interceptor.application/v1',type:'result',id:f.id,error:String(e.message||e)})); }}); })().catch(e=>{console.error(e);process.exit(1)});
-`
+//go:embed drivers/node.cjs
+var nodeCodeDriver string

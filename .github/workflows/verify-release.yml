@@ -152,6 +152,19 @@ jobs:
           python3 scripts/qualify_release.py --archive "dist/archives/interceptor_sandbox-v${RELEASE_VERSION}-linux_${ARCH}.tar.gz" \
             --version "$RELEASE_VERSION" --source "$GITHUB_SHA" \
             --image busybox:1.37.0 --client "$RUNNER_TEMP/local-api-smoke" --output dist/qualification
+      - name: Qualify installed Python and Node adapters from the downloaded archive
+        env:
+          ARCH: ${{ matrix.arch }}
+          RELEASE_VERSION: ${{ needs.context.outputs.version }}
+        run: |
+          docker pull python:3.12-slim
+          docker pull node:22-bookworm-slim
+          python3 scripts/qualify_release.py --archive "dist/archives/interceptor_sandbox-v${RELEASE_VERSION}-linux_${ARCH}.tar.gz" \
+            --version "$RELEASE_VERSION" --source "$GITHUB_SHA" --adapter-language python \
+            --image python:3.12-slim --client "$RUNNER_TEMP/local-api-smoke" --output dist/qualification/python-adapter
+          python3 scripts/qualify_release.py --archive "dist/archives/interceptor_sandbox-v${RELEASE_VERSION}-linux_${ARCH}.tar.gz" \
+            --version "$RELEASE_VERSION" --source "$GITHUB_SHA" --adapter-language node \
+            --image node:22-bookworm-slim --client "$RUNNER_TEMP/local-api-smoke" --output dist/qualification/node-adapter
       - name: Retain archive qualification evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

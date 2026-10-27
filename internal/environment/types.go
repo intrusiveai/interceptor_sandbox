@@ -113,6 +113,8 @@ type ExternalInterface struct {
 }
 
 type CodeInterface struct {
+	AdapterAsset  string         `yaml:"adapter_asset,omitempty" json:"adapter_asset,omitempty"`
+	Close         string         `yaml:"close,omitempty" json:"close,omitempty"`
 	Language      string         `yaml:"language" json:"language"`
 	Module        string         `yaml:"module" json:"module"`
 	Initialize    string         `yaml:"initialize,omitempty" json:"initialize,omitempty"`

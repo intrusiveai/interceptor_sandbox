@@ -171,6 +171,7 @@ func evidence(output, id string, maximum int64) {
 func main() {
 	output := flag.String("output", "", "directory for evidence and result JSON")
 	commandOnly := flag.Bool("command-only", false, "qualify a minimal command target's echo operation without snapshots or model calls")
+	adapterOnly := flag.Bool("adapter-only", false, "qualify the stateful invocation-adapter example without snapshots or model calls")
 	maximumEvidence := flag.Int64("evidence-max-bytes", evidencepolicy.DefaultMaxBytes, "local evidence archive acceptance ceiling")
 	root := flag.String("data-root", "", "optional host data root to check reference application state rollback")
 	flag.Parse()
@@ -188,6 +189,10 @@ func main() {
 	must(limitErr)
 	limit := min(*maximumEvidence, attached.EvidenceMaxBytes)
 	first := attached.Binding
+	if *adapterOnly {
+		qualifyAdapter(first, *output, limit)
+		return
+	}
 	if *commandOnly {
 		qualifyCommand(first, *output, limit)
 		return
@@ -237,6 +242,54 @@ func main() {
 	raw, err := json.MarshalIndent(result, "", "  ")
 	must(err)
 	must(os.WriteFile(filepath.Join(*output, "result.json"), raw, 0600))
+	fmt.Println(string(raw))
+}
+
+func qualifyAdapter(binding localapi.Binding, output string, limit int64) {
+	a := attempt(binding)
+	for n := 1; n <= 3; n++ {
+		message := "hello"
+		if n == 3 {
+			message = "error"
+		}
+		input, err := json.Marshal(map[string]string{"message": message})
+		must(err)
+		raw := success(operation(binding, "application.invoke", map[string]any{"operation": "ask", "input": input, "media_type": "application/json", "attempt_id": a.AttemptID, "payload_digest": a.Payload.Digest}, &a))
+		var turn struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		}
+		must(json.Unmarshal(raw, &turn))
+		if n == 3 {
+			require(turn.Status != "complete", "application exception reported success")
+			continue
+		}
+		require(turn.Status == "complete", string(raw))
+		var view adaptive.ObservationView
+		must(json.Unmarshal(success(operation(binding, "observation.read", adaptive.ObservationRequest{TurnID: turn.ID}, &a)), &view))
+		found := false
+		for _, entry := range view.Entries {
+			if entry.Kind != "target_output" || entry.Availability != "available" {
+				continue
+			}
+			var chunk adaptive.FeedbackChunk
+			must(json.Unmarshal(success(operation(binding, "observation.content.read", adaptive.FeedbackReadRequest{ReceiptID: view.ReceiptID, EntryID: entry.ID, MaxBytes: adaptive.MaxFeedbackChunk}, &a)), &chunk))
+			var value struct {
+				Customer string
+				Turn     int
+				Message  string
+			}
+			if json.Unmarshal(chunk.Content, &value) == nil && value.Customer == "alice" && value.Turn == n && value.Message == "hello" {
+				found = true
+			}
+		}
+		require(found, "evidence did not contain the expected stateful adapter output")
+	}
+	success(post("/v1/lifecycle", localapi.LifecycleRequest{WorkerInstanceID: binding.WorkerInstanceID, RunRevision: binding.RunRevision, APIVersion: localapi.Version, CampaignID: campaign, SessionID: binding.SessionID, OperationID: "stop-adapter", Operation: "session.stop"}))
+	evidence(output, binding.SessionID, limit)
+	raw, err := json.MarshalIndent(map[string]any{"passed": true, "session_id": binding.SessionID, "target_output": "alice: turns 1, 2", "checks": []string{"state retained across two turns", "application exception", "confirmed target stop", "complete verified evidence"}}, "", "  ")
+	must(err)
+	must(os.WriteFile(filepath.Join(output, "result.json"), raw, 0600))
 	fmt.Println(string(raw))
 }
 
