@@ -39,26 +39,30 @@ import (
 )
 
 type Config struct {
-	EvidenceMaxBytes     int64
-	SpoolMaxBytes        int64
-	OnFault              func(string, error)
-	InternalOnly         bool // Integrated local API owns all public target access.
-	EnvironmentDirectory string
-	ApplicationPort      int
-	ControlPort          int
-	ProviderType         string
-	ProviderURL          string
-	ProviderAPIKey       string
-	AWSRegion            string
-	AWSProfile           string
-	ProviderAPIVersion   string
-	ProviderAuthMode     string
-	AllowedModels        []string
-	BridgeTransport      string
-	Docker               ociruntime.Docker
-	Output               io.Writer
-	OnReady              func(session.Metadata) error
-	FeedbackProfile      string
+	EvidenceMaxBytes       int64
+	SpoolMaxBytes          int64
+	OnFault                func(string, error)
+	InternalOnly           bool // Integrated local API owns all public target access.
+	EnvironmentDirectory   string
+	ApplicationPort        int
+	ControlPort            int
+	ProviderType           string
+	ProviderURL            string
+	ProviderAPIKey         string
+	EmbeddingsProviderType string
+	EmbeddingsURL          string
+	EmbeddingsAPIKey       string
+	AllowedEmbeddingModels []string
+	AWSRegion              string
+	AWSProfile             string
+	ProviderAPIVersion     string
+	ProviderAuthMode       string
+	AllowedModels          []string
+	BridgeTransport        string
+	Docker                 ociruntime.Docker
+	Output                 io.Writer
+	OnReady                func(session.Metadata) error
+	FeedbackProfile        string
 }
 
 type Running struct {
@@ -537,8 +541,13 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 	if err != nil {
 		return metadata, err
 	}
+	embeddingProvider, err := embeddingsProvider(config)
+	if err != nil {
+		return metadata, err
+	}
 	connector, err := bridge.NewHostConnector(bridge.HostConnectorConfig{
 		SessionID: metadata.ID, Provider: provider,
+		EmbeddingsProvider: embeddingProvider, AllowedEmbeddingModels: config.AllowedEmbeddingModels,
 		AllowedModel: config.AllowedModels, MaxBodyBytes: blueprint.Limits.MaxBlobBytes,
 	})
 	if err != nil {
@@ -1112,4 +1121,14 @@ func preserveRestoreSource(paths session.Paths, checkpoint snapshot.Checkpoint, 
 		}
 	}
 	return fsutil.WriteFile(filepath.Join(directory, "state.jsonl"), prefix.Bytes(), 0600)
+}
+
+func embeddingsProvider(config Config) (bridge.ModelProvider, error) {
+	if config.EmbeddingsProviderType == "" {
+		return nil, nil
+	}
+	if config.EmbeddingsProviderType != bridge.ProviderOpenAICompatible {
+		return nil, errors.New("unsupported embeddings provider")
+	}
+	return bridge.NewOpenAIEmbeddingsProvider(bridge.HTTPProviderConfig{BaseURL: config.EmbeddingsURL, APIKey: config.EmbeddingsAPIKey})
 }

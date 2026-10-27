@@ -3,6 +3,8 @@ package bridge
 import "context"
 
 const (
+	CodecOpenAIEmbeddings      = "openai_embeddings"
+	ProviderOpenAICompatible   = "openai-compatible"
 	CodecOpenAIChat            = "openai_chat_completions"
 	CodecOpenAIResponses       = "openai_responses"
 	CodecBedrockConverse       = "aws_bedrock_converse"

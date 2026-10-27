@@ -103,3 +103,16 @@ renewal after job end, logout or action post-cleanup. Authentication failure MUS
 use existing terminal/uncertain-outcome handling, never replay or resume execution.
 Synthetic tests establish credential-selection behavior; live cloud/OIDC trust,
 permissions and token-lifetime qualification require the actual runner accounts.
+
+### Independent embeddings credentials
+
+An optional embeddings provider uses its own `--embeddings-auth`,
+`--embeddings-credential-config`, and `--embeddings-credential-id`. The configuration
+format and audited host secret resolver are the same as for generation, including
+AWS Secrets Manager. The two slots can explicitly select the same credential ID,
+but never inherit credentials from one another. Generation workload identity does
+not prevent embeddings from using a stored key. Explicit `api-key-env` and `none`
+modes are also available; see [Remote embeddings](model-providers.md#remote-embeddings).
+Real keys stay in the host process and are not part of a Blueprint, container,
+snapshot, or public export. Managed target replacement retains the host provider
+configuration; remote provider state is not snapshotted.

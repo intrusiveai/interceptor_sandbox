@@ -1,0 +1,52 @@
+---
+api_version: interceptor.dev/v1alpha1
+kind: Environment
+metadata:
+  name: embeddings-python
+  version: '1'
+  reviewed_by: adapter-example
+  reviewed_at: '2026-10-26T00:00:00Z'
+application:
+  image: interceptor-adapter-python:local@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  launch:
+    command:
+    - "/usr/local/bin/python3"
+    workdir: "/app"
+    environment:
+      MODEL_BASE_URL: http://127.0.0.1:18080/v1
+      PYTHONDONTWRITEBYTECODE: '1'
+      DATA_GYM_CACHE_DIR: /app/tokenizer-cache
+  interface:
+    kind: code
+    operations:
+    - id: ask
+    code:
+      language: python
+      adapter_asset: assets/adapter
+      module: support_adapter
+      initialize: initialize
+      invoke: invoke
+      close: close
+      init_arguments:
+        customer_id: alice
+      concurrency: 1
+    startup_timeout_ms: 30000
+    turn_timeout_ms: 15000
+  persistence:
+    snapshot_capable: false
+    quiesce:
+      kind: none
+time:
+  base: '2026-01-01T00:00:00Z'
+  mode: fixed
+limits:
+  max_turns: 20
+  max_tokens: 10000
+  max_wall_seconds: 120
+  max_snapshots: 1
+  max_blob_bytes: 10485760
+credentials:
+- id: model-key
+  environment_variable: OPENAI_API_KEY
+  value: interceptor-synthetic-model-key
+  accepted_by: model-proxy

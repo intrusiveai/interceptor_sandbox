@@ -304,3 +304,18 @@ and code for a well-defined module API. Use an external adapter when protocol
 framing or initialization cannot be expressed by the built-ins. The narrowest
 stable boundary usually produces the clearest evidence and the most reliable
 snapshot tests.
+
+### Applications that embed during initialization
+
+A Python or Node invocation adapter can call the local model proxy during its
+initializer and later turns. Configure both generation and embeddings SDK clients
+with `http://127.0.0.1:18080/v1` and declared synthetic credentials. Enable the
+independent host embeddings options described in [Model providers](model-providers.md#remote-embeddings).
+Package SDK dependencies and any tokenizer cache in the target image; no runtime
+downloads are available in the isolated container. The adapter can be supplied
+separately through the existing sealed adapter asset.
+
+Embedding calls preserve their model usage and vector metadata in protected
+evidence. They do not confirm generation injection delivery. See the
+[remote embeddings example](../examples/remote-embeddings/README.md) for startup
+batch embedding and query embedding during later invocations.

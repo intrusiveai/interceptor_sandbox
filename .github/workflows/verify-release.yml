@@ -97,7 +97,7 @@ jobs:
     # Exercise the uploaded archives on native Linux architectures. In particular,
     # Darwin's companion must match the Linux archive from the same revision.
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    timeout-minutes: 25
     permissions:
       contents: read
       actions: read
@@ -165,6 +165,14 @@ jobs:
           python3 scripts/qualify_release.py --archive "dist/archives/interceptor_sandbox-v${RELEASE_VERSION}-linux_${ARCH}.tar.gz" \
             --version "$RELEASE_VERSION" --source "$GITHUB_SHA" --adapter-language node \
             --image node:22-bookworm-slim --client "$RUNNER_TEMP/local-api-smoke" --output dist/qualification/node-adapter
+      - name: Qualify remote embeddings with SDK clients from the downloaded archive
+        env:
+          ARCH: ${{ matrix.arch }}
+          RELEASE_VERSION: ${{ needs.context.outputs.version }}
+        run: |
+          python3 scripts/qualify_release.py --archive "dist/archives/interceptor_sandbox-v${RELEASE_VERSION}-linux_${ARCH}.tar.gz" \
+            --version "$RELEASE_VERSION" --source "$GITHUB_SHA" --adapter-language python --embeddings \
+            --image python:3.12-slim --client "$RUNNER_TEMP/local-api-smoke" --output dist/qualification/embeddings
       - name: Retain archive qualification evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
