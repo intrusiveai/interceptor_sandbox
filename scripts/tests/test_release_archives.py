@@ -149,7 +149,7 @@ class ReleaseArchivesTest(unittest.TestCase):
     def test_non_candidate_dispatch_cannot_publish(self):
         context = publisher.event_context({}, "workflow_dispatch", "refs/heads/fix/macos-wrapper-companion", "a"*40, "intrusiveai/interceptor_sandbox")
         self.assertEqual(context["mode"], "verify")
-        self.assertEqual(context["version"], "0.1.2")
+        self.assertEqual(context["version"], "0.1.3")
 
     def test_names_reject_invalid_versions_and_platforms(self):
         for version in (None, "v0.1.2", "0.01.2", "0.1.2/other", "0.1.2\n", "0.1.2-rc1"):

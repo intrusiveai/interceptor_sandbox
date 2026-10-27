@@ -79,6 +79,15 @@ func Build(ctx context.Context, directory, dataRoot, tag, version string, docker
 		}
 	}
 	dockerfile := fmt.Sprintf("FROM %s\nCOPY --chmod=0555 interceptor /usr/local/bin/interceptor\n", sourceReference)
+	if code := report.Blueprint.Application.Interface.Code; code != nil && code.AdapterAsset != "" {
+		if err := stageAdapter(directory, temporary, code.AdapterAsset, environmentLock.Assets); err != nil {
+			return Lock{}, fmt.Errorf("stage invocation adapter: %w", err)
+		}
+		destination := environment.AdapterPath(report.Blueprint.Application.Launch.Workdir)
+		check, _ := json.Marshal([]string{"/usr/local/bin/interceptor", "image-check-adapter", destination})
+		copyPaths, _ := json.Marshal([]string{"adapter/", destination + "/"})
+		dockerfile += "RUN " + string(check) + "\nCOPY --chown=0:0 " + string(copyPaths) + "\n"
+	}
 	var material tlsMaterial
 	var tlsLock *TLSLock
 	if report.Blueprint.Network.TLS.Enabled {

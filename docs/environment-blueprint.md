@@ -5,6 +5,15 @@ named `environment.yaml` and every asset it references. Unknown YAML fields,
 multiple documents, missing assets, unsafe paths, and unsupported capabilities
 fail validation.
 
+For `application.interface.kind: code`, optional `code.adapter_asset` names a
+directory within this Blueprint that `app build` installs into the wrapper.
+The existing `code.module` selects its Python module or explicit relative Node
+entry file. All adapter files are sealed assets; changing them requires resealing
+and rebuilding. Optional `code.close` names a cleanup method on the initialized
+object (or module without initialization). See the
+[adapter configuration and lifecycle](application-interfaces.md#supplying-an-adapter-separately)
+for path restrictions, dependencies, and examples.
+
 In plain language, the Blueprint answers six questions: What application is
 being tested? What files and services does it believe exist? How should its
 closed DNS and HTTP/TLS plane behave? Which values are safe synthetic

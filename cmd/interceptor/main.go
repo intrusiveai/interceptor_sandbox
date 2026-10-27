@@ -87,6 +87,11 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 			return errors.New("image-install-ca requires one CA path")
 		}
 		return appimage.InstallSystemCA(arguments[1])
+	case "image-check-adapter":
+		if len(arguments) != 2 {
+			return errors.New("image-check-adapter requires one destination")
+		}
+		return appimage.CheckAdapterDestination(arguments[1])
 	case "status":
 		return statusCommand(arguments[1:], stdout)
 	case "list":

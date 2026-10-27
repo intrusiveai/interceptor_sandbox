@@ -132,9 +132,10 @@ simultaneous REPL conversations are not supported.
 ## Python and Node modules
 
 Use `code` when the application is naturally invoked as a function rather than
-as a server or CLI. The application image must contain the runtime, module, and
-all dependencies. The launch command identifies the interpreter, not an
-application server:
+as a server or CLI. The application image must contain the runtime, application,
+and its dependencies. An invocation adapter can either be installed in that
+image or supplied separately with the Blueprint. The launch command identifies
+the interpreter:
 
 ```yaml
 launch:
@@ -172,9 +173,84 @@ way.
 
 The return value must be JSON-serializable. Python values that are not
 serializable fall back to their string form; Node serialization errors fail the
-turn. Cancellation stops waiting for a result, but arbitrary user code cannot
-always be safely interrupted inside a shared language process. Keep individual
-functions bounded and rely on `turn_timeout_ms` as the outer limit.
+turn. An invocation exception fails that turn. A timeout or cancellation after
+dispatch terminates the language process and makes the session unusable, because
+the call may already have changed application state. Start a new session; do not
+retry side-effecting calls without checking their outcome. Canceling a request
+that is still waiting for an invocation slot does not terminate the session.
+
+### Supplying an adapter separately
+
+Use `code.adapter_asset` when the image does not already provide the configured
+calling convention. It names a directory relative to the Blueprint, not the
+shell's working directory:
+
+```text
+environment/
+  environment.yaml
+  assets/adapter/
+    support_adapter.py
+    helpers.py
+```
+
+```yaml
+code:
+  language: python
+  adapter_asset: assets/adapter
+  module: support_adapter
+  initialize: initialize
+  invoke: invoke
+  close: close
+  init_arguments:
+    customer_id: alice
+  concurrency: 1
+```
+
+The initializer receives one dictionary/object and returns an object with the
+configured invocation method. That object persists across turns in one sandbox.
+It can create an application instance and a customer session, then translate
+each input into the application's own calling convention. Separate sandbox
+instances get separate objects. In-memory state is not restored by filesystem
+snapshots; leave `snapshot_capable: false` unless the application implements a
+verified restore mechanism.
+
+Sealing covers the adapter directory and helper files. `interceptor app build`
+copies the verified code into `<launch.workdir>/.interceptor-adapter/` in the
+wrapper. The original image stays unchanged. After editing an adapter, reseal
+the Blueprint and rebuild the wrapper. No pip/npm installation or adapter code
+execution occurs during the build. The released CLI needs Docker and its normal
+release files, including the packaged Linux companion on macOS; it does not
+need a host Python/Node interpreter, Go, or an Interceptor source checkout.
+
+Python `module` is a dotted name inside the adapter directory. Packages require
+`__init__.py`. Helpers can be imported from that directory; application imports
+resolve from the configured working directory and installed Python packages.
+Async initialization, invocation, and cleanup share one event loop.
+
+For Node, set `language: node`, launch the image's Node executable, and use an
+explicit entry file such as `module: ./support_adapter.mjs`. Relative imports
+resolve inside the adapter; ordinary package imports can find the application's
+`node_modules` in the parent working directory. Use `.mjs`, `.cjs`, or `.js`
+with a suitable `package.json` in the adapter directory. For an application file
+outside the adapter, use its explicit container path, for example
+`import {SupportApplication} from '/app/support_app.mjs'`. Node retains `this`
+when calling a method on the initialized object.
+
+Optional `close` names a cleanup method on that object (or the imported module
+if no initializer is configured). Interceptor awaits it on orderly shutdown,
+with a two-second limit. Exceptions and cleanup timeouts are reported; forced
+termination cannot guarantee cleanup. Application print/console output goes to
+application logs independently of the response protocol.
+
+Missing imports, dependencies, or methods fail startup with the failing stage.
+Adapter paths cannot escape the Blueprint or contain symbolic/hard links. The
+installed destination must be absent from the target image and cannot overlap
+writable roots, filesystem seeds, or runtime mounts such as `/tmp` and `/run`.
+Use a dedicated application workdir such as `/app`. Adapters run with the
+application's unprivileged identity and cannot modify their installed code.
+Keep real credentials out of adapter files and `init_arguments`.
+
+See the runnable [Python and Node adapter examples](../examples/invocation-adapters/README.md).
 
 ## External adapter protocol
 

@@ -1644,6 +1644,9 @@ func (s *Server) Close(ctx context.Context) error {
 			_ = s.helperIn.Close()
 			s.helperIn = nil
 		}
+		if adapter, ok := s.adapter.(*protocolApplicationAdapter); ok {
+			result = errors.Join(result, adapter.Close(ctx))
+		}
 		if s.app != nil && s.app.Process != nil {
 			_ = syscall.Kill(-s.app.Process.Pid, syscall.SIGTERM)
 		}
