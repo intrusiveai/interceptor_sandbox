@@ -245,7 +245,7 @@ application logs independently of the response protocol.
 Missing imports, dependencies, or methods fail startup with the failing stage.
 Adapter paths cannot escape the Blueprint or contain symbolic/hard links. The
 installed destination must be absent from the target image and cannot overlap
-writable roots, filesystem seeds, or runtime mounts such as `/tmp` and `/run`.
+writable roots, filesystem seeds, image `VOLUME` paths, or runtime mounts such as `/tmp` and `/run`.
 Use a dedicated application workdir such as `/app`. Adapters run with the
 application's unprivileged identity and cannot modify their installed code.
 Keep real credentials out of adapter files and `init_arguments`.

@@ -80,6 +80,13 @@ func Build(ctx context.Context, directory, dataRoot, tag, version string, docker
 	}
 	dockerfile := fmt.Sprintf("FROM %s\nCOPY --chmod=0555 interceptor /usr/local/bin/interceptor\n", sourceReference)
 	if code := report.Blueprint.Application.Interface.Code; code != nil && code.AdapterAsset != "" {
+		volumes, err := docker.ImageVolumes(ctx, sourceReference)
+		if err != nil {
+			return Lock{}, err
+		}
+		if err := checkAdapterVolumes(report.Blueprint.Application.Launch.Workdir, volumes); err != nil {
+			return Lock{}, err
+		}
 		if err := stageAdapter(directory, temporary, code.AdapterAsset, environmentLock.Assets); err != nil {
 			return Lock{}, fmt.Errorf("stage invocation adapter: %w", err)
 		}

@@ -68,3 +68,14 @@ func TestAdapterDestinationRejectsCollisionAndSymlink(t *testing.T) {
 		t.Fatal("symlink parent accepted")
 	}
 }
+
+func TestAdapterRejectsImageVolumes(t *testing.T) {
+	for _, volume := range []string{"/", "/app", "/app/.interceptor-adapter", "/app/.interceptor-adapter/helper"} {
+		if err := checkAdapterVolumes("/app", []string{volume}); err == nil {
+			t.Errorf("accepted image volume %s", volume)
+		}
+	}
+	if err := checkAdapterVolumes("/app", []string{"/state", "/application"}); err != nil {
+		t.Fatal(err)
+	}
+}

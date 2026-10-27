@@ -51,11 +51,14 @@ export async function initialize(options) {
 }
 `
 
-func startCodeTest(t *testing.T, language, source string, concurrency int) (*protocolApplicationAdapter, string) {
+func startCodeTest(t *testing.T, language, source string, concurrency int, entry ...string) (*protocolApplicationAdapter, string) {
 	t.Helper()
 	runtime, module, filename := "python3", "agent", "agent.py"
 	if language == "node" {
 		runtime, module, filename = "node", "./agent.mjs", "agent.mjs"
+	}
+	if len(entry) != 0 {
+		filename, module = entry[0], "./"+entry[0]
 	}
 	executable, err := exec.LookPath(runtime)
 	if err != nil {
@@ -114,6 +117,22 @@ func startCodeTest(t *testing.T, language, source string, concurrency int) (*pro
 		log.Close()
 	})
 	return a, root
+}
+
+func TestCommonJSAdapter(t *testing.T) {
+	a, _ := startCodeTest(t, "node", `module.exports = {async initialize() { return {count: 0, invoke() {return ++this.count;}, close() {}}; }};`, 1, "agent.cjs")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := a.WaitReady(ctx); err != nil {
+		t.Fatal(err)
+	}
+	result, err := a.Invoke(ctx, applicationInvocation{Operation: "ask", Body: []byte(`{}`)})
+	if err != nil || string(result.Body) != "1" {
+		t.Fatalf("CommonJS invocation: %s %v", result.Body, err)
+	}
+	if err := a.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestInstalledCodeAdapters(t *testing.T) {

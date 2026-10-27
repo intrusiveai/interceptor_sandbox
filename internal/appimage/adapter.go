@@ -3,11 +3,23 @@ package appimage
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
 	"github.com/intrusive-ai/interceptor-sandbox/internal/environment"
 )
+
+func checkAdapterVolumes(workdir string, volumes []string) error {
+	destination := environment.AdapterPath(workdir)
+	for _, volume := range volumes {
+		volume = path.Clean(volume)
+		if volume == "/" || volume == destination || strings.HasPrefix(destination, volume+"/") || strings.HasPrefix(volume, destination+"/") {
+			return fmt.Errorf("image VOLUME %s overlaps installed adapter %s; choose a workdir outside image volumes", volume, destination)
+		}
+	}
+	return nil
+}
 
 // stageAdapter copies into a private build context, then verifies the copy rather
 // than trusting a source tree that may have changed since environment.Verify.

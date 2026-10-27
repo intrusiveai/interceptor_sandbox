@@ -19,7 +19,11 @@ function send(type, fields = {}) {
     const active = new Set();
     try {
         const entry = cfg.adapter_asset ? pathToFileURL(path.resolve('.interceptor-adapter', cfg.module)).href : cfg.module;
-        const mod = await import(entry);
+        const namespace = await import(entry);
+        // CommonJS module.exports is exposed as default; inferred named exports
+        // are not guaranteed for an object assembled by the application.
+        const method = cfg.initialize || cfg.invoke;
+        const mod = typeof namespace[method] === 'function' ? namespace : (namespace.default || namespace);
         let target = mod;
         if (cfg.initialize) {
             stage = 'initialize ' + cfg.initialize;
