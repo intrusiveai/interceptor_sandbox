@@ -33,6 +33,10 @@ type httpModelProvider struct {
 	client           *http.Client
 }
 
+func NewOpenAIEmbeddingsProvider(config HTTPProviderConfig) (ModelProvider, error) {
+	return newHTTPModelProvider(ProviderOpenAICompatible, map[string]string{CodecOpenAIEmbeddings: "embeddings"}, config)
+}
+
 func NewOpenAIChatProvider(config HTTPProviderConfig) (ModelProvider, error) {
 	return newHTTPModelProvider(ProviderOpenAIChat, map[string]string{CodecOpenAIChat: "chat/completions"}, config)
 }
@@ -175,7 +179,7 @@ func (p *httpModelProvider) Complete(ctx context.Context, input ProviderRequest)
 		return ProviderResponse{}, fmt.Errorf("read response: %w", err)
 	}
 	headers := map[string]string{}
-	for _, header := range []string{"Content-Type", "X-Request-ID", "OpenAI-Request-ID"} {
+	for _, header := range []string{"Content-Type", "X-Request-ID", "OpenAI-Request-ID", "Retry-After", "Retry-After-Ms"} {
 		if value := response.Header.Get(header); value != "" {
 			headers[header] = value
 		}

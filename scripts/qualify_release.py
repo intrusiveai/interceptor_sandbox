@@ -7,6 +7,8 @@ Only uniquely named test images/containers and an isolated data root are removed
 """
 
 import argparse
+from contextlib import nullcontext
+from embedding_fixture import EmbeddingFixture
 import hashlib
 import json
 import os
@@ -24,7 +26,9 @@ from publish_release import read_archive
 from build_release import ARCHIVE_ROOT
 
 
-def qualify(archive, version, source, base_image, output, client, adapter_language=None):
+def qualify(archive, version, source, base_image, output, client, adapter_language=None, embeddings=False):
+    if embeddings and adapter_language != "python":
+        raise ValueError("embeddings qualification requires --adapter-language python")
     metadata = read_archive(archive)
     arch = {"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64"}.get(platform.machine())
     host = platform.system().lower() + "/" + str(arch)
@@ -40,7 +44,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
     suffix = uuid.uuid4().hex
     target, wrapper = "interceptor-release-target:"+suffix, "interceptor-release-wrapper:"+suffix
     inspection = "interceptor-release-check-"+suffix
-    with tempfile.TemporaryDirectory(prefix="interceptor-release-qa-") as temporary:
+    with (EmbeddingFixture() if embeddings else nullcontext()) as fixture, tempfile.TemporaryDirectory(prefix="interceptor-release-qa-") as temporary:
         work = Path(temporary).resolve()
         install, outside, bin_dir = (work / name for name in ("install", "outside", "bin"))
         for directory in (install, outside, bin_dir): directory.mkdir()
@@ -53,7 +57,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
             raise ValueError("qualification must not expose Go to the CLI")
         cli = str(install / "interceptor")
         def run(*args):
-            result = subprocess.run(args, cwd=outside, env=env, text=True, capture_output=True, timeout=120)
+            result = subprocess.run(args, cwd=outside, env=env, text=True, capture_output=True, timeout=600 if "build" in args and args[0] == docker else 120)
             if result.returncode:
                 raise RuntimeError(f"{args}: {result.stdout}\n{result.stderr}")
             return result.stdout.strip()
@@ -72,7 +76,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
         process = None
         try:
             target_id = base["Id"]
-            example = Path(__file__).resolve().parents[1] / "examples/invocation-adapters" / (adapter_language or "")
+            example = Path(__file__).resolve().parents[1] / ("examples/remote-embeddings" if embeddings else "examples/invocation-adapters") / (adapter_language or "")
             if adapter_language:
                 context = work / "target"
                 shutil.copytree(example / "target", context)
@@ -136,10 +140,20 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                 raise ValueError("wrapper contains different executable bytes")
             if run(docker, "start", "--attach", inspection) != version:
                 raise ValueError("in-container executable version differs")
+            provider_args = ["--model-provider", "litellm", "--provider-auth", "none",
+                             "--provider-base-url", "http://127.0.0.1:9/v1", "--allow-model", "unused"]
+            if fixture:
+                env.update(QA_GENERATION_KEY=fixture.keys['generation'], QA_EMBEDDINGS_KEY=fixture.keys['embeddings'])
+                provider_args = ["--model-provider", "openai-chat", "--provider-auth", "api-key-env",
+                    "--model-api-key-env", "QA_GENERATION_KEY", "--provider-base-url", fixture.urls['generation'],
+                    "--allow-model", "chat-fixture", "--embeddings-provider", "openai-compatible",
+                    "--embeddings-auth", "api-key-env", "--embeddings-api-key-env", "QA_EMBEDDINGS_KEY",
+                    "--embeddings-base-url", fixture.urls['embeddings'],
+                    "--allow-embedding-model", "text-embedding-3-small", "--allow-embedding-model", "embed-error",
+                    "--allow-embedding-model", "embed-timeout"]
             with (output / "run.log").open("w") as log:
                 process = subprocess.Popen([cli, "run", "--environment", str(blueprint),
-                    "--model-provider", "litellm", "--provider-auth", "none",
-                    "--provider-base-url", "http://127.0.0.1:9/v1", "--allow-model", "unused"],
+                    *provider_args],
                     cwd=outside, env=env, stdout=log, stderr=subprocess.STDOUT)
                 deadline = time.monotonic() + 60
                 session = None
@@ -184,6 +198,8 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                 result.update(adapter_language=adapter_language, adapter_sha256=adapter_digests,
                               runtime=run(docker, "run", "--rm", "--network", "none", "--entrypoint", runtime, target, "--version"),
                               target_image=target_id, wrapper_image=lock["wrapper_digest"])
+            if fixture:
+                result['embeddings'] = fixture.verify(output)
             (output / "result.json").write_text(json.dumps(result, indent=2)+"\n")
             print(json.dumps(result))
         finally:
@@ -209,5 +225,6 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--client", type=Path, required=True, help="prebuilt examples/local-api-smoke qualification client")
     parser.add_argument("--adapter-language", choices=("python", "node"), help="qualify the separately installed adapter example using the supplied runtime image")
+    parser.add_argument("--embeddings", action="store_true", help="qualify remote embeddings with pinned OpenAI/LangChain clients and separate host fixtures")
     args = parser.parse_args()
-    qualify(args.archive.resolve(), args.version, args.source, args.image, args.output, args.client.resolve(), args.adapter_language)
+    qualify(args.archive.resolve(), args.version, args.source, args.image, args.output, args.client.resolve(), args.adapter_language, args.embeddings)

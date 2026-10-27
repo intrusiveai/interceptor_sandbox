@@ -335,3 +335,78 @@ Offline regression tests MUST cover native byte/status preservation, journal
 annotations, retained blob identity, filtered tool-call responses, multiple Chat
 choices, ordinary responses without Azure fields, and provider errors. These tests
 MUST NOT claim live Azure qualification.
+
+## Remote embeddings
+
+Enable an independent OpenAI-compatible embeddings provider when the application
+uses a remote embedding model. Generation keeps its existing provider, credentials,
+and model allowlist; either provider can use the same endpoint if explicitly
+configured that way. For example, add these options to your normal `interceptor run`
+command:
+
+```sh
+--embeddings-provider openai-compatible \
+--embeddings-base-url https://api.openai.com/v1 \
+--embeddings-auth secret-store \
+--embeddings-credential-config /absolute/private/credentials.yaml \
+--embeddings-credential-id embeddings-key \
+--allow-embedding-model text-embedding-3-small
+```
+
+`--allow-embedding-model` is repeatable and must contain at least one exact model
+or deployment identifier. No generation credential or model permission is inherited.
+The embeddings credential file uses the existing host credential-store format,
+including AWS Secrets Manager. It can differ from the generation credential file;
+this also allows cloud workload identity for generation alongside an embeddings key.
+
+For an explicitly selected host environment key, use
+`--embeddings-auth api-key-env --embeddings-api-key-env EMBEDDINGS_API_KEY`
+in place of the stored-credential options. For an intentionally unauthenticated
+gateway, select `--embeddings-auth none` without any credential options. Authentication
+only defaults to `secret-store` when an embeddings credential ID is supplied.
+Without the embeddings option group, embedding requests fail explicitly.
+
+Configure the application's actual SDK clients to use
+`http://127.0.0.1:18080/v1`, for both generation and embeddings, with their respective
+model names and a declared synthetic credential (`accepted_by: model-proxy`). For
+example, `OpenAIEmbeddings(base_url=..., api_key=..., model=..., chunk_size=128)`
+configures LangChain. Host keys stay outside the container. There is no universal
+embeddings environment variable: the application or its invocation adapter must
+actually read the variables you supply. Startup embeddings work during adapter
+initialization before the target becomes ready.
+
+The supported operation is `POST /v1/embeddings`, with `model`, `input`, optional
+positive integer `dimensions`, `encoding_format` (`float` or `base64`), and `user`.
+Input can be nonempty text, a text batch, an integer-token array, or a batch of
+integer-token arrays. Batches are limited to **128 inputs**; request and response
+bodies are each limited to **4 MiB**, or the Blueprint's smaller blob limit. This
+leaves room for evidence copies and base64 expansion inside the existing 32 MiB
+bridge message. Reduce SDK chunk sizes or requested dimensions if a batch exceeds
+these limits. Provider token limits still apply. Vector values and index associations
+are preserved; malformed responses fail rather than producing substitute vectors.
+Native Bedrock/Gemini embedding APIs and multimodal inputs are not supported by
+this OpenAI-compatible route.
+
+Upstream HTTP errors retain their bounded bodies, status, and retry headers.
+Interceptor adds no retries; configure SDK retries/timeouts explicitly when needed.
+Invalid or disabled routes and disallowed models do not contact an upstream.
+Body, deadline, and evidence-storage failures produce explicit errors.
+
+Protected `model_exchange` evidence uses codec `openai_embeddings`, records requested
+and reported model names, input count, vector width, usage, and body references.
+Embedding input tokens count once toward the session token budget. Initialization
+calls without a turn ID remain session activity. Embedding calls neither consume
+generation injections nor establish generation delivery, even if their input
+contains an injected string.
+
+See the [executable embeddings example](../examples/remote-embeddings/README.md)
+for SDK dependency packaging and a wrapper qualification workflow. SDK tokenizers
+must be packaged in the target image when needed; the network-isolated application
+cannot download tokenizer data on first use. Interceptor itself does not require
+a tokenizer or local embedding model.
+
+Document and query vectors must use compatible models, dimensions, and preprocessing.
+Switching an existing 384-dimensional corpus requires re-embedding its documents
+and updating the application's vector schema as needed. Equal dimensions alone do
+not make different models' vectors compatible. Database integration is independent
+of the embeddings transport; this feature does not emulate PostgreSQL or pgvector.

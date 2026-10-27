@@ -251,6 +251,14 @@ func runCommand(arguments []string, stdout io.Writer) error {
 	awsProfile := flags.String("aws-profile", "", "AWS shared configuration profile for bedrock-converse")
 	providerAPIVersion := flags.String("provider-api-version", "", "pinned provider API version (Anthropic only in this release)")
 	providerAuthMode := flags.String("provider-auth", "", "provider authentication selector; see docs/cloud-authentication.md")
+	var embeddings embeddingsOptions
+	flags.StringVar(&embeddings.provider, "embeddings-provider", "", "optional embeddings provider: openai-compatible")
+	flags.StringVar(&embeddings.baseURL, "embeddings-base-url", "", "fixed embeddings API base URL")
+	flags.StringVar(&embeddings.auth, "embeddings-auth", "", "embeddings authentication: secret-store, api-key-env, or none")
+	flags.StringVar(&embeddings.credentialConfig, "embeddings-credential-config", "", "embeddings secret-store configuration")
+	flags.StringVar(&embeddings.credentialID, "embeddings-credential-id", "", "embeddings host credential ID")
+	flags.StringVar(&embeddings.keyEnv, "embeddings-api-key-env", "", "explicit host embeddings key environment variable")
+	flags.Var(&embeddings.models, "allow-embedding-model", "allowed embeddings model (repeatable)")
 	var allowedModels stringList
 	flags.Var(&allowedModels, "allow-model", "allowed model identifier (repeatable)")
 	if err := flags.Parse(arguments); err != nil {
@@ -296,7 +304,13 @@ func runCommand(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	embeddingKey, err := embeddings.resolve(ctx, *production, resolveStoredCredential)
+	if err != nil {
+		return err
+	}
 	err = localapi.Run(ctx, hostrun.Config{
+		EmbeddingsProviderType: embeddings.provider, EmbeddingsURL: embeddings.baseURL,
+		EmbeddingsAPIKey: embeddingKey, AllowedEmbeddingModels: embeddings.models,
 		EnvironmentDirectory: *directory,
 		ProviderType:         *providerType, ProviderURL: *providerURL, ProviderAPIKey: apiKey,
 		AWSRegion: *awsRegion, AWSProfile: *awsProfile, AllowedModels: allowedModels,

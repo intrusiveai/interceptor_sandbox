@@ -52,8 +52,10 @@ type Connector interface {
 }
 
 type HostConnectorConfig struct {
-	SessionID string
-	Provider  ModelProvider
+	SessionID              string
+	Provider               ModelProvider
+	EmbeddingsProvider     ModelProvider
+	AllowedEmbeddingModels []string
 	// ProviderURL, APIKey, and HTTPClient retain source compatibility for
 	// callers that have not yet selected an explicit provider adapter. They
 	// construct the original OpenAI Chat Completions-compatible provider.
@@ -74,6 +76,9 @@ type HostConnector struct {
 func NewHostConnector(config HostConnectorConfig) (*HostConnector, error) {
 	if config.SessionID == "" {
 		return nil, errors.New("connector session ID is required")
+	}
+	if config.EmbeddingsProvider != nil && len(config.AllowedEmbeddingModels) == 0 {
+		return nil, errors.New("embeddings provider requires an explicit model allowlist")
 	}
 	provider := config.Provider
 	if provider == nil {
@@ -110,10 +115,24 @@ func (c *HostConnector) Forward(ctx context.Context, frame ModelFrame) (ModelRes
 	if configCodec := c.config.AllowedCodec; configCodec != "" && frame.Codec != configCodec {
 		return ModelResult{}, fmt.Errorf("connector rejected codec %q", frame.Codec)
 	}
-	if !c.provider.SupportsCodec(frame.Codec) {
-		return ModelResult{}, fmt.Errorf("provider %q does not support application codec %q", c.provider.Name(), frame.Codec)
+	provider, allowedModels, bodyLimit := c.provider, c.config.AllowedModel, c.config.MaxBodyBytes
+	if frame.Codec == CodecOpenAIEmbeddings {
+		provider, allowedModels = c.config.EmbeddingsProvider, c.config.AllowedEmbeddingModels
+		if provider == nil {
+			return ModelResult{}, errors.New("embeddings are not configured; enable --embeddings-provider and its endpoint, authentication, and model allowlist")
+		}
+		bodyLimit = min(bodyLimit, maxEmbeddingBodyBytes)
+		if frame.Path != "/v1/embeddings" {
+			return ModelResult{}, errors.New("unsupported embeddings route")
+		}
+		if _, err := validateEmbeddingRequest(frame.Body); err != nil {
+			return ModelResult{}, err
+		}
 	}
-	if int64(len(frame.Body)) > c.config.MaxBodyBytes {
+	if !provider.SupportsCodec(frame.Codec) {
+		return ModelResult{}, fmt.Errorf("provider %q does not support application codec %q", provider.Name(), frame.Codec)
+	}
+	if int64(len(frame.Body)) > bodyLimit {
 		return ModelResult{}, errors.New("model request exceeds connector body limit")
 	}
 	if !strings.HasPrefix(frame.Path, "/") || strings.Contains(frame.Path, "..") || strings.ContainsAny(frame.Path, "?#") {
@@ -123,7 +142,7 @@ func (c *HostConnector) Forward(ctx context.Context, frame ModelFrame) (ModelRes
 	if err != nil {
 		return ModelResult{}, err
 	}
-	if len(c.config.AllowedModel) > 0 && !contains(c.config.AllowedModel, model) {
+	if len(allowedModels) > 0 && !contains(allowedModels, model) {
 		return ModelResult{}, fmt.Errorf("model %q is not allowed", model)
 	}
 	timeout := time.Duration(frame.TimeoutMS) * time.Millisecond
@@ -132,19 +151,24 @@ func (c *HostConnector) Forward(ctx context.Context, frame ModelFrame) (ModelRes
 	}
 	requestContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	response, err := c.provider.Complete(requestContext, ProviderRequest{
+	response, err := provider.Complete(requestContext, ProviderRequest{
 		Codec:        frame.Codec,
 		Model:        model,
 		Path:         frame.Path,
 		Headers:      frame.Headers,
 		Body:         frame.Body,
-		MaxBodyBytes: c.config.MaxBodyBytes,
+		MaxBodyBytes: bodyLimit,
 	})
 	if err != nil {
 		return ModelResult{}, fmt.Errorf("provider request failed: %w", err)
 	}
-	if response.Status < 100 || response.Status > 599 || int64(len(response.Body)) > c.config.MaxBodyBytes || int64(len(response.RequestBody)) > c.config.MaxBodyBytes || int64(len(response.RawBody)) > c.config.MaxBodyBytes {
+	if response.Status < 100 || response.Status > 599 || int64(len(response.Body)) > bodyLimit || int64(len(response.RequestBody)) > bodyLimit || int64(len(response.RawBody)) > bodyLimit {
 		return ModelResult{}, errors.New("provider returned an invalid or oversized response")
+	}
+	if frame.Codec == CodecOpenAIEmbeddings && response.Status >= 200 && response.Status < 300 {
+		if _, err := embeddingResponseMetadata(frame.Body, response.Body); err != nil {
+			return ModelResult{}, err
+		}
 	}
 	providerRequest := response.RequestBody
 	if len(providerRequest) == 0 {
@@ -160,7 +184,7 @@ func (c *HostConnector) Forward(ctx context.Context, frame ModelFrame) (ModelRes
 		Body:                   response.Body,
 		FinalRequest:           append([]byte(nil), frame.Body...),
 		FinalRequestDigest:     digest.Bytes(frame.Body),
-		Provider:               c.provider.Name(),
+		Provider:               provider.Name(),
 		ProviderRequest:        append([]byte(nil), providerRequest...),
 		ProviderDigest:         digest.Bytes(providerRequest),
 		ProviderResponse:       append([]byte(nil), providerResponse...),
@@ -171,7 +195,7 @@ func (c *HostConnector) Forward(ctx context.Context, frame ModelFrame) (ModelRes
 
 func modelIdentifier(codec, requestPath string, body []byte) (string, error) {
 	switch codec {
-	case CodecOpenAIChat, CodecOpenAIResponses, CodecAnthropicMessages:
+	case CodecOpenAIChat, CodecOpenAIResponses, CodecAnthropicMessages, CodecOpenAIEmbeddings:
 		var envelope struct {
 			Model string `json:"model"`
 		}

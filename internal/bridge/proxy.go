@@ -49,7 +49,11 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 		writeBridgeError(writer, http.StatusNotImplemented, "unsupported_model_route", "unsupported model route")
 		return
 	}
-	body, err := readLimit(request.Body, p.maxBytes)
+	bodyLimit := p.maxBytes
+	if codec == CodecOpenAIEmbeddings {
+		bodyLimit = min(bodyLimit, maxEmbeddingBodyBytes)
+	}
+	body, err := readLimit(request.Body, bodyLimit)
 	if err != nil {
 		writeBridgeError(writer, http.StatusRequestEntityTooLarge, "model_body_limit", err.Error())
 		return
@@ -65,7 +69,7 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 		writeBridgeError(writer, http.StatusBadRequest, "unsupported_model_feature", err.Error())
 		return
 	}
-	if p.injections != nil {
+	if p.injections != nil && codec != CodecOpenAIEmbeddings {
 		switch codec {
 		case CodecOpenAIChat:
 			rewritten, results, err = p.injections.RewriteOpenAI(body, turnID)
@@ -86,10 +90,15 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 	// Freeze already-applied response candidates before forwarding. A response
 	// rewritten while this model request is in flight cannot qualify this request.
 	responseCandidates := []string{}
-	if p.injections != nil {
+	if p.injections != nil && codec != CodecOpenAIEmbeddings {
 		responseCandidates = p.injections.ObservableResponseIDs()
 	}
 	requestRef := p.store(request.Context(), rewritten)
+	if codec == CodecOpenAIEmbeddings && p.blobs != nil && requestRef == "" {
+		p.record("model_error", turnID, "", map[string]any{"codec": codec, "error": "embedding request evidence storage failed"})
+		writeBridgeError(writer, http.StatusInsufficientStorage, "evidence_storage_error", "embedding request exceeds evidence storage limits or storage is unavailable")
+		return
+	}
 	started := time.Now()
 	p.connectorMu.Lock()
 	requestID := p.nextID.Add(1)
@@ -102,7 +111,7 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 	})
 	p.connectorMu.Unlock()
 	if err != nil {
-		p.record("model_error", turnID, requestRef, map[string]any{"error": err.Error(), "elapsed_ms": time.Since(started).Milliseconds()})
+		p.record("model_error", turnID, requestRef, map[string]any{"codec": codec, "error": err.Error(), "elapsed_ms": time.Since(started).Milliseconds()})
 		writeBridgeError(writer, http.StatusBadGateway, "model_connector_error", err.Error())
 		return
 	}
@@ -112,7 +121,7 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 			ids = append(ids, item.InjectionID)
 		}
 	}
-	if p.injections != nil {
+	if p.injections != nil && codec != CodecOpenAIEmbeddings {
 		candidates := append(append([]string(nil), ids...), p.injections.ObservableFidelityIDs(turnID)...)
 		candidates = append(candidates, responseCandidates...)
 		confirmed, confirmErr := p.injections.ConfirmDelivery(result.FinalRequest, candidates)
@@ -135,10 +144,15 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 	responseRef := p.store(request.Context(), result.Body)
 	providerRequestRef := p.store(request.Context(), result.ProviderRequest)
 	providerResponseRef := p.store(request.Context(), result.ProviderResponse)
+	if codec == CodecOpenAIEmbeddings && p.blobs != nil && (responseRef == "" || providerRequestRef == "" || providerResponseRef == "") {
+		p.record("model_error", turnID, requestRef, map[string]any{"codec": codec, "error": "embedding response evidence storage failed"})
+		writeBridgeError(writer, http.StatusInsufficientStorage, "evidence_storage_error", "embedding response exceeds evidence storage limits or storage is unavailable")
+		return
+	}
 	model, usage := modelSemantics(codec, request.URL.EscapedPath(), rewritten, result.Body)
 	finish, safety := modelOutcome(codec, result.Body)
 	attemptID, payloadDigest := "", ""
-	if p.injections != nil {
+	if p.injections != nil && codec != CodecOpenAIEmbeddings {
 		attemptID, payloadDigest = p.injections.Attribution(ids)
 	}
 	if p.onTokens != nil {
@@ -146,7 +160,7 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 			p.onTokens(total)
 		}
 	}
-	p.record("model_exchange", turnID, requestRef, map[string]any{
+	exchange := map[string]any{
 		"codec": codec, "provider": result.Provider, "model": model, "status": result.Status,
 		"request_ref": requestRef, "response_ref": responseRef, "provider_request_ref": providerRequestRef,
 		"provider_response_ref": providerResponseRef, "final_proxy_request_digest": result.FinalRequestDigest,
@@ -154,7 +168,28 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 		"elapsed_ms": time.Since(started).Milliseconds(), "usage": usage, "injection_ids": ids,
 		"provider_metadata": result.ProviderMetadata, "finish_status": finish, "safety_status": safety,
 		"attempt_id": attemptID, "payload_digest": payloadDigest,
-	})
+	}
+	if codec == CodecOpenAIEmbeddings {
+		delete(exchange, "finish_status")
+		delete(exchange, "safety_status")
+		exchange["operation"] = "embeddings"
+		count, _ := validateEmbeddingRequest(rewritten)
+		exchange["input_count"] = count
+		if result.Status >= 200 && result.Status < 300 {
+			metadata, validationErr := embeddingResponseMetadata(rewritten, result.Body)
+			if validationErr != nil {
+				writeBridgeError(writer, http.StatusBadGateway, "invalid_embeddings_response", validationErr.Error())
+				return
+			}
+			for key, value := range metadata {
+				exchange[key] = value
+			}
+		}
+	}
+	if err := p.record("model_exchange", turnID, requestRef, exchange); err != nil && codec == CodecOpenAIEmbeddings {
+		writeBridgeError(writer, http.StatusInsufficientStorage, "evidence_storage_error", "embedding exchange could not be recorded")
+		return
+	}
 	for name, value := range result.Headers {
 		writer.Header().Set(name, value)
 	}
@@ -171,6 +206,9 @@ func validateNativeShape(codec string, body []byte, headers http.Header) error {
 		return errors.New("background model operations are not supported")
 	}
 	switch codec {
+	case CodecOpenAIEmbeddings:
+		_, err := validateEmbeddingRequest(body)
+		return err
 	case CodecAnthropicMessages:
 		if err := rejectUnsupportedKeys(object, []string{"model", "max_tokens", "messages", "system", "temperature", "top_p", "top_k", "stop_sequences", "tools", "tool_choice", "metadata", "stream"}, "Anthropic Messages parameter"); err != nil {
 			return err
@@ -380,16 +418,17 @@ func (p *ModelProxy) store(ctx context.Context, content []byte) string {
 	return object.Digest
 }
 
-func (p *ModelProxy) record(kind, turnID, rawRef string, semantic any) {
+func (p *ModelProxy) record(kind, turnID, rawRef string, semantic any) error {
 	if p.recorder == nil {
-		return
+		return nil
 	}
 	draft := recording.Draft{Channel: recording.Evaluation, Layer: "inference_proxy", Kind: kind, Provenance: recording.Application, TurnID: turnID, RawRef: rawRef, Semantic: semantic}
 	if value, ok := semantic.(map[string]any); ok {
 		draft.AttemptID, _ = value["attempt_id"].(string)
 		draft.PayloadDigest, _ = value["payload_digest"].(string)
 	}
-	_, _ = p.recorder.Append(draft)
+	_, err := p.recorder.Append(draft)
+	return err
 }
 
 func modelSemantics(codec, path string, request, response []byte) (string, any) {
@@ -498,6 +537,8 @@ func modelCodec(method, requestPath string) (string, bool) {
 		return "", false
 	}
 	switch {
+	case requestPath == "/v1/embeddings":
+		return CodecOpenAIEmbeddings, true
 	case strings.HasSuffix(requestPath, "/chat/completions"):
 		return CodecOpenAIChat, true
 	case strings.HasSuffix(requestPath, "/responses"):
