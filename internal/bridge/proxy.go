@@ -141,24 +141,25 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 			}
 		}
 	}
+	model, usage := modelSemantics(codec, request.URL.EscapedPath(), rewritten, result.Body)
+	// Account for a completed provider call even if retaining its evidence fails.
+	if p.onTokens != nil && (codec != CodecOpenAIEmbeddings || result.Status >= 200 && result.Status < 300) {
+		if total := totalTokens(usage); total > 0 {
+			p.onTokens(total)
+		}
+	}
 	responseRef := p.store(request.Context(), result.Body)
 	providerRequestRef := p.store(request.Context(), result.ProviderRequest)
 	providerResponseRef := p.store(request.Context(), result.ProviderResponse)
 	if codec == CodecOpenAIEmbeddings && p.blobs != nil && (len(result.Body) > 0 && responseRef == "" || len(result.ProviderRequest) > 0 && providerRequestRef == "" || len(result.ProviderResponse) > 0 && providerResponseRef == "") {
-		p.record("model_error", turnID, requestRef, map[string]any{"codec": codec, "error": "embedding response evidence storage failed"})
+		p.record("model_error", turnID, requestRef, map[string]any{"codec": codec, "model": model, "status": result.Status, "usage": usage, "error": "embedding response evidence storage failed"})
 		writeBridgeError(writer, http.StatusInsufficientStorage, "evidence_storage_error", "embedding response exceeds evidence storage limits or storage is unavailable")
 		return
 	}
-	model, usage := modelSemantics(codec, request.URL.EscapedPath(), rewritten, result.Body)
 	finish, safety := modelOutcome(codec, result.Body)
 	attemptID, payloadDigest := "", ""
 	if p.injections != nil && codec != CodecOpenAIEmbeddings {
 		attemptID, payloadDigest = p.injections.Attribution(ids)
-	}
-	if p.onTokens != nil {
-		if total := totalTokens(usage); total > 0 {
-			p.onTokens(total)
-		}
 	}
 	exchange := map[string]any{
 		"codec": codec, "provider": result.Provider, "model": model, "status": result.Status,

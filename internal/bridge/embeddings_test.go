@@ -245,8 +245,13 @@ func TestEmbeddingEvidenceStorageFailureIsVisible(t *testing.T) {
 			return ModelResult{Status: 200, Body: []byte(embeddingResponse), FinalRequest: f.Body, ProviderRequest: f.Body, ProviderResponse: []byte(embeddingResponse)}, nil
 		})
 		proxy, _ := NewModelProxy("test", connector, nil, store, nil, 1<<20, time.Second)
+		tokens := int64(0)
+		proxy.SetTokenObserver(func(n int64) { tokens += n })
 		w := httptest.NewRecorder()
 		proxy.ServeHTTP(w, httptest.NewRequest("POST", "/v1/embeddings", strings.NewReader(`{"model":"embed","input":"hi"}`)))
+		if responseFailure && tokens != 3 || !responseFailure && tokens != 0 {
+			t.Fatalf("provider token accounting lost on storage failure: %d", tokens)
+		}
 		if w.Code != 507 || (!responseFailure && calls != 0) {
 			t.Fatalf("storage failure: %d %s calls=%d", w.Code, w.Body, calls)
 		}
