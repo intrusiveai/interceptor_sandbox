@@ -25,12 +25,24 @@ interceptor run --environment examples/invocation-adapters/python/environment \
   --provider-base-url http://127.0.0.1:9/v1 --allow-model unused
 ```
 
-Post `{"message":"hello"}` to `/operations/ask` at the application URL printed
-by `run`. The responses identify customer `alice` with turn `1`, then turn `2`.
+Invoke the declared `ask` operation with JSON input `{"message":"hello"}`
+through the [local API](../../docs/local-api.md) printed by `run`. Its
+`application.invoke` operation returns a turn whose output is available through
+the observation API. The responses identify customer `alice` with turn `1`, then turn `2`.
 Sending `{"message":"error"}` demonstrates an application exception. Sending
 `{"message":"slow"}` exceeds the configured three-second turn timeout and
 terminates that session's language process; start a new session before more calls.
 Ctrl-C stops the session and invokes the adapter's cleanup method on normal exit.
+
+The prebuilt `local-api-smoke` test client can perform these calls, check their
+evidence, and stop the target automatically:
+
+```sh
+/path/to/local-api-smoke --adapter-only --output /tmp/adapter-example-evidence
+```
+
+Build that developer test client as shown below, or use an existing local API
+client such as the testing harness. It is not an application runtime dependency.
 
 For Node, use `node` instead of `python` in the image tags and example paths.
 Its adapter imports an application file from `/app/support_app.mjs`, its own
