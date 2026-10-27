@@ -4,7 +4,9 @@ The Python example calls a remote OpenAI-compatible embeddings endpoint with
 pinned OpenAI and LangChain clients. Its invocation adapter is supplied separately
 from the target image. Initialization embeds two documents; later calls embed a
 query and invoke generation. The target image packages its tokenizer cache, so
-runtime execution requires no external network or local embedding model.
+runtime execution requires no external network or local embedding model. The
+Blueprint declares the SDK-supported `DATA_GYM_CACHE_DIR` path explicitly because
+application launch environments do not inherit arbitrary image environment values.
 
 The example asserts deterministic fixture values. Use it through the qualification
 command below; for your own application, replace those assertions with your

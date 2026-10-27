@@ -2,7 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/credentials"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/intrusive-ai/interceptor-sandbox/internal/bridge"
@@ -70,5 +75,42 @@ func TestEmbeddingsOptionsAreIndependentAndExplicit(t *testing.T) {
 	o.credentialID = "embed"
 	if key, err := o.resolve(context.Background(), true, stored); err != nil || key != "stored-embedding-secret" {
 		t.Fatal(key, err)
+	}
+}
+
+func TestEmbeddingStoredCredentialsReuseAuditedResolver(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		root := t.TempDir()
+		t.Setenv("INTERCEPTOR_DATA_DIR", filepath.Join(root, "data"))
+		config := credentials.Config{
+			Profiles:    []credentials.SecretStoreProfile{{APIVersion: credentials.StoreProfileVersion, Kind: "SecretStoreProfile", ID: "test", BackendKind: "aws-secrets-manager", Region: "us-west-2", AllowedLocatorPrefixes: []string{"aws://us-west-2/test"}, MaxCacheTTLSeconds: 300}},
+			Credentials: []credentials.HostCredentialRef{{APIVersion: credentials.CredentialRefVersion, Kind: "HostCredentialRef", CredentialID: "embeddings", StoreProfileID: "test", Locator: credentials.Locator{BackendKind: "aws-secrets-manager", Region: "us-west-2", SecretID: "test"}, Value: credentials.ValueSelection{Format: "utf8"}, CacheTTLSeconds: 300}},
+		}
+		raw, _ := json.Marshal(config)
+		path := filepath.Join(root, "credentials.json")
+		if err := os.WriteFile(path, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		backend := &checkSecretBackend{failed: failed}
+		resolve := func(ctx context.Context, path, id string) (string, error) {
+			return resolveStoredCredentialWithFactories(ctx, path, id, map[string]credentials.BackendFactory{"aws-secrets-manager": func(context.Context, credentials.SecretStoreProfile) (credentials.Backend, error) {
+				return backend, nil
+			}})
+		}
+		options := embeddingsOptions{provider: bridge.ProviderOpenAICompatible, baseURL: "https://embeddings.example/v1", credentialConfig: path, credentialID: "embeddings", models: stringList{"embed"}}
+		key, err := options.resolve(context.Background(), true, resolve)
+		if (err != nil) != failed || backend.calls != 1 || (!failed && key != "host-secret") {
+			t.Fatal(err, backend.calls)
+		}
+		if err != nil && strings.Contains(err.Error(), "host-secret") {
+			t.Fatal("credential leaked in failure")
+		}
+		audit, err := os.ReadFile(filepath.Join(root, "data/audit/credential-resolutions.jsonl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(audit), "host-secret") || !strings.Contains(string(audit), "embeddings") {
+			t.Fatal("unsafe or absent audit")
+		}
 	}
 }

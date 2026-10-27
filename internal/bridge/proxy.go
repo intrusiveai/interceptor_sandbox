@@ -144,7 +144,7 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 	responseRef := p.store(request.Context(), result.Body)
 	providerRequestRef := p.store(request.Context(), result.ProviderRequest)
 	providerResponseRef := p.store(request.Context(), result.ProviderResponse)
-	if codec == CodecOpenAIEmbeddings && p.blobs != nil && (responseRef == "" || providerRequestRef == "" || providerResponseRef == "") {
+	if codec == CodecOpenAIEmbeddings && p.blobs != nil && (len(result.Body) > 0 && responseRef == "" || len(result.ProviderRequest) > 0 && providerRequestRef == "" || len(result.ProviderResponse) > 0 && providerResponseRef == "") {
 		p.record("model_error", turnID, requestRef, map[string]any{"codec": codec, "error": "embedding response evidence storage failed"})
 		writeBridgeError(writer, http.StatusInsufficientStorage, "evidence_storage_error", "embedding response exceeds evidence storage limits or storage is unavailable")
 		return

@@ -15,6 +15,7 @@ application:
     environment:
       MODEL_BASE_URL: http://127.0.0.1:18080/v1
       PYTHONDONTWRITEBYTECODE: '1'
+      DATA_GYM_CACHE_DIR: /app/tokenizer-cache
   interface:
     kind: code
     operations:
