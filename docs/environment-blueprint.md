@@ -196,6 +196,41 @@ covers only declared hostnames. Trust modes are:
 | `bundle` | Provides `/opt/interceptor/tls/ca.pem` and `INTERCEPTOR_CA_BUNDLE` without altering application-specific trust settings. |
 | `application-managed` | Provides the same bundle but requires `application_managed_probe`, an absolute argv array run as the application user before startup. The command receives `INTERCEPTOR_TLS_PROBE_URL` and must return success only when the application's trust mechanism accepts the endpoint. |
 
+For Python clients that use Certifi, declare each interpreter used by the target
+application under automatic trust:
+
+```yaml
+network:
+  tls:
+    enabled: true
+    trust_mode: auto
+    python_environments:
+      - /app/.venv/bin/python
+      - /opt/worker-venv/bin/python
+```
+
+These are absolute executable paths **inside the target image**. During
+`interceptor app build`, each interpreter locates its installed Certifi bundle
+and Interceptor appends the sandbox public CA, preserving existing roots. This
+allows unchanged HTTPX clients using `verify=True, trust_env=False` to access
+declared HTTPS fixtures with certificate verification enabled. It applies to
+Python applications using any invocation interface, not only the code adapter.
+
+Each declared interpreter and Certifi must already exist in the target image.
+The build fails if an interpreter or bundle is unavailable, invalid, unwritable,
+or hidden by a known runtime mount. Standard virtualenv interpreter and bundle
+symlinks are supported. Install Certifi in the environment's normal site-packages;
+user-site, application-shadowed, or temporary extracted bundles are unsupported.
+The build does not install packages or download certificates. An omitted or empty
+list preserves the existing behavior and requires no Python installation.
+
+This setting requires `auto` trust and cannot be combined with `bundle` or
+`application-managed`. It changes only the wrapper image. Reseal and rebuild
+when declarations change; rebuild the target image and wrapper after Python or
+dependency upgrades. Custom CA files, privately vendored bundles, and certificate
+pinning need their own application-managed trust configuration. Node retains its
+existing `NODE_EXTRA_CA_CERTS` handling. See the [Python HTTPS example](../examples/python-ca/README.md).
+
 The probe URL uses a reserved read-only `GET` endpoint that returns `204`; it
 does not invoke or mutate the selected simulated service.
 

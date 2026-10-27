@@ -1,0 +1,8 @@
+rules:
+  - id: page
+    priority: 1
+    match: {method: GET, path: /page}
+    response:
+      status: 200
+      headers: {Content-Type: text/plain}
+      body: sandbox web page
