@@ -233,6 +233,16 @@ injected trust variables. For `bundle`, configure the client to consume
 should use `application-managed`; its probe runs as the application user and
 fails session startup when trust cannot be established.
 
+For HTTPX with `trust_env=False`, declare the exact Python interpreter in
+`network.tls.python_environments` under `auto` trust, then reseal and rebuild.
+HTTPX ignores the usual CA environment variables in this mode. Check that the
+interpreter and Certifi are installed in the target image, that the application
+uses that environment, and that its bundle is outside image volumes, mutable
+roots, and other runtime mounts. The build error identifies a failed interpreter
+and its underlying error. Install missing dependencies in the target image;
+CA injection never installs them. Explicit custom CA files and pinned
+certificates are not covered by Certifi integration.
+
 ## Snapshot returns `409 snapshot_failed`
 
 Likely causes are:

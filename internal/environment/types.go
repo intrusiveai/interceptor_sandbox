@@ -176,6 +176,7 @@ type TLSConfig struct {
 	Enabled                 bool     `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	Listen                  string   `yaml:"listen,omitempty" json:"listen,omitempty"`
 	TrustMode               string   `yaml:"trust_mode,omitempty" json:"trust_mode,omitempty"`
+	PythonEnvironments      []string `yaml:"python_environments,omitempty" json:"python_environments,omitempty"`
 	ApplicationManagedProbe []string `yaml:"application_managed_probe,omitempty" json:"application_managed_probe,omitempty"`
 }
 

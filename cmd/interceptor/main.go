@@ -92,6 +92,11 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 			return errors.New("image-check-adapter requires one destination")
 		}
 		return appimage.CheckAdapterDestination(arguments[1])
+	case "image-install-python-ca":
+		if len(arguments) < 4 {
+			return errors.New("image-install-python-ca requires CA path, mount list JSON, and interpreter paths")
+		}
+		return appimage.InstallPythonCA(arguments[1], arguments[2], arguments[3:])
 	case "status":
 		return statusCommand(arguments[1:], stdout)
 	case "list":

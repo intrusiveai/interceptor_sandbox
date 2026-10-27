@@ -116,6 +116,14 @@ Blueprint probe command for custom stores such as a JVM truststore or pinned
 runtime. Only the public CA enters the wrapper. The server keypair stays in
 protected host data and is mounted for the supervisor at runtime.
 
+Python applications using Certifi can declare their image interpreter paths in
+`network.tls.python_environments` with `trust_mode: auto`. Wrapper construction
+adds the sandbox public CA to each declared environment's existing bundle, so
+HTTPX clients with `verify=True, trust_env=False` work without application code
+changes. Dependencies must already be installed; the original target image is
+unchanged. [Python trust configuration](environment-blueprint.md#network)
+explains the declaration and supported layouts.
+
 Credential-looking variables—names containing `TOKEN`, `SECRET`, `PASSWORD`,
 or ending in `_KEY`—must be declared in `credentials` with the same value and a
 synthetic service or `model-proxy` in `accepted_by`. Use only synthetic secrets

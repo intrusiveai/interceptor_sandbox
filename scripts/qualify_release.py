@@ -9,6 +9,7 @@ Only uniquely named test images/containers and an isolated data root are removed
 import argparse
 from contextlib import nullcontext
 from embedding_fixture import EmbeddingFixture
+import python_ca_fixture
 import hashlib
 import json
 import os
@@ -26,7 +27,9 @@ from publish_release import read_archive
 from build_release import ARCHIVE_ROOT
 
 
-def qualify(archive, version, source, base_image, output, client, adapter_language=None, embeddings=False):
+def qualify(archive, version, source, base_image, output, client, adapter_language=None, embeddings=False, python_ca=False):
+    if python_ca and (adapter_language != "python" or embeddings):
+        raise ValueError("Python CA qualification requires --adapter-language python and no --embeddings")
     if embeddings and adapter_language != "python":
         raise ValueError("embeddings qualification requires --adapter-language python")
     metadata = read_archive(archive)
@@ -76,7 +79,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
         process = None
         try:
             target_id = base["Id"]
-            example = Path(__file__).resolve().parents[1] / ("examples/remote-embeddings" if embeddings else "examples/invocation-adapters") / (adapter_language or "")
+            example = Path(__file__).resolve().parents[1] / ("examples/python-ca" if python_ca else "examples/remote-embeddings" if embeddings else "examples/invocation-adapters") / (adapter_language or "")
             if adapter_language:
                 context = work / "target"
                 shutil.copytree(example / "target", context)
@@ -118,6 +121,10 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
             run(cli, "environment", "seal", str(blueprint))
             lock = json.loads(run(cli, "app", "build", "--environment", str(blueprint), "--tag", wrapper, "--json"))
             run(cli, "app", "verify", "--environment", str(blueprint))
+            trust_checks = None
+            if python_ca:
+                tls_directory = work / "data/apps/python-ca/1/tls"
+                trust_checks = python_ca_fixture.inspect_images(run, docker, target, wrapper, tls_directory)
             packaged = install / ("interceptor-linux" if host.startswith("darwin/") else "interceptor")
             expected = hashlib.sha256(packaged.read_bytes()).hexdigest()
             if lock["interceptor_binary_digest"] != "sha256:"+expected or lock["interceptor_version"] != version:
@@ -198,6 +205,8 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                 result.update(adapter_language=adapter_language, adapter_sha256=adapter_digests,
                               runtime=run(docker, "run", "--rm", "--network", "none", "--entrypoint", runtime, target, "--version"),
                               target_image=target_id, wrapper_image=lock["wrapper_digest"])
+            if python_ca:
+                result['python_ca'] = dict(images=trust_checks, **python_ca_fixture.verify_evidence(output, diagnostics))
             if fixture:
                 result['embeddings'] = fixture.verify(output)
             (output / "result.json").write_text(json.dumps(result, indent=2)+"\n")
@@ -226,5 +235,6 @@ if __name__ == "__main__":
     parser.add_argument("--client", type=Path, required=True, help="prebuilt examples/local-api-smoke qualification client")
     parser.add_argument("--adapter-language", choices=("python", "node"), help="qualify the separately installed adapter example using the supplied runtime image")
     parser.add_argument("--embeddings", action="store_true", help="qualify remote embeddings with pinned OpenAI/LangChain clients and separate host fixtures")
+    parser.add_argument("--python-ca", action="store_true", help="qualify declared Python Certifi stores with unchanged HTTPX clients")
     args = parser.parse_args()
-    qualify(args.archive.resolve(), args.version, args.source, args.image, args.output, args.client.resolve(), args.adapter_language, args.embeddings)
+    qualify(args.archive.resolve(), args.version, args.source, args.image, args.output, args.client.resolve(), args.adapter_language, args.embeddings, args.python_ca)

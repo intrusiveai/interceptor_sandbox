@@ -116,7 +116,30 @@ func Build(ctx context.Context, directory, dataRoot, tag, version string, docker
 		}
 		dockerfile += "COPY public-ca/ /\n"
 		if report.Blueprint.Network.TLS.TrustMode == "auto" {
-			dockerfile += "RUN [\"/usr/local/bin/interceptor\",\"image-install-ca\",\"" + ContainerCABundle + "\"]\n"
+			python := report.Blueprint.Network.TLS.PythonEnvironments
+			var user string
+			if len(python) != 0 {
+				user, err = docker.ImageUser(ctx, sourceReference)
+				if err != nil {
+					return Lock{}, err
+				}
+				dockerfile += "USER 0:0\n"
+			}
+			dockerfile += "RUN --network=none [\"/usr/local/bin/interceptor\",\"image-install-ca\",\"" + ContainerCABundle + "\"]\n"
+			if len(python) != 0 {
+				volumes, err := docker.ImageVolumes(ctx, sourceReference)
+				if err != nil {
+					return Lock{}, err
+				}
+				mounts, _ := json.Marshal(pythonCAMounts(report.Blueprint, volumes))
+				arguments := append([]string{"/usr/local/bin/interceptor", "image-install-python-ca", ContainerCABundle, string(mounts)}, python...)
+				command, _ := json.Marshal(arguments)
+				dockerfile += "RUN --network=none " + string(command) + "\n"
+				if user == "" {
+					user = "0"
+				}
+				dockerfile += "USER " + user + "\n"
+			}
 		}
 		tlsLock = &TLSLock{TrustMode: report.Blueprint.Network.TLS.TrustMode, Hostnames: hostnames, RootCertificateDigest: digest.Bytes(material.ca), ServerCertificateDigest: digest.Bytes(material.certificate), ServerPrivateKeyDigest: digest.Bytes(material.privateKey)}
 	}

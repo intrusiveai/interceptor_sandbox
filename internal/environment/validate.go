@@ -228,6 +228,21 @@ func Validate(directory string) (*ValidationReport, error) {
 	} else if blueprint.Network.HTTP.Listen != "" {
 		add(errors.New("network.http.listen requires enabled: true"))
 	}
+	if len(blueprint.Network.TLS.PythonEnvironments) != 0 {
+		if !blueprint.Network.TLS.Enabled || blueprint.Network.TLS.TrustMode != "auto" {
+			add(errors.New("network.tls.python_environments requires TLS enabled with auto trust"))
+		}
+		seen := map[string]bool{}
+		for index, interpreter := range blueprint.Network.TLS.PythonEnvironments {
+			if !path.IsAbs(interpreter) || path.Clean(interpreter) != interpreter || interpreter == "/" || len(interpreter) > 4096 || strings.ContainsAny(interpreter, "\\\x00\r\n\t") {
+				add(fmt.Errorf("network.tls.python_environments[%d] must be an absolute, clean Linux executable path", index))
+			}
+			if seen[interpreter] {
+				add(fmt.Errorf("network.tls.python_environments repeats %q", interpreter))
+			}
+			seen[interpreter] = true
+		}
+	}
 	if blueprint.Network.TLS.Enabled {
 		add(validateListen("network.tls.listen", blueprint.Network.TLS.Listen, listens, "network-tls"))
 		if host, _, err := net.SplitHostPort(blueprint.Network.TLS.Listen); err == nil && host != "127.0.0.1" {
