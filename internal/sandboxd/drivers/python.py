@@ -44,6 +44,17 @@ async def main():
         invoke = getattr(target, cfg['invoke'])
         if not callable(invoke):
             raise TypeError('configured invoke method is not callable')
+        store = None
+        if cfg.get('state'):
+            stage = 'validate state methods'
+            save = getattr(target, cfg['state']['save'])
+            restore = getattr(target, cfg['state']['restore'])
+            if not callable(save) or not callable(restore):
+                raise TypeError('configured state methods must be callable')
+            store = StateStore(cfg['state'])
+            if os.environ.get('INTERCEPTOR_STATE_RESTORE') == 'true':
+                stage = 'restore application state'
+                await resolve(restore(store.load()))
         send('ready')
         while True:
             # The event loop stays alive while waiting, including background
@@ -54,6 +65,13 @@ async def main():
             frame = json.loads(line)
             if frame.get('type') == 'close':
                 break
+            if frame.get('type') == 'save_state' and store:
+                try:
+                    store.save(await resolve(save()))
+                    send('state_saved', id=frame['id'])
+                except Exception as error:
+                    send('state_saved', id=frame.get('id'), error='save application state: ' + str(error))
+                continue
             if frame.get('type') != 'invoke':
                 continue
             try:

@@ -131,6 +131,8 @@ func Validate(directory string) (*ValidationReport, error) {
 		assetSources = append(assetSources, code.AdapterAsset)
 	}
 
+	add(validateCodeState(blueprint))
+
 	mutableRoots := map[string]struct{}{}
 	for i, path := range blueprint.Application.Persistence.MutableRoots {
 		clean, err := validateContainerPath(fmt.Sprintf("application.persistence.mutable_roots[%d]", i), path)

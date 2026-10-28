@@ -211,8 +211,8 @@ configured invocation method. That object persists across turns in one sandbox.
 It can create an application instance and a customer session, then translate
 each input into the application's own calling convention. Separate sandbox
 instances get separate objects. In-memory state is not restored by filesystem
-snapshots; leave `snapshot_capable: false` unless the application implements a
-verified restore mechanism.
+snapshots; leave `snapshot_capable: false` unless the application or a configured
+state adapter implements a verified restore mechanism.
 
 Sealing covers the adapter directory and helper files. `interceptor app build`
 copies the verified code into `<launch.workdir>/.interceptor-adapter/` in the
@@ -251,6 +251,57 @@ application's unprivileged identity and cannot modify their installed code.
 Keep real credentials out of adapter files and `init_arguments`.
 
 See the runnable [Python and Node adapter examples](../examples/invocation-adapters/README.md).
+
+### Saving and restoring application state
+
+A separately supplied invocation adapter can also implement application-specific
+state persistence. The target application does not need a framework checkpointer
+or source changes when the adapter can reconstruct all necessary state. Add this
+mapping under `application.interface.code`:
+
+```yaml
+state:
+  save: save_state
+  restore: restore_state
+  path: /app-state/agent.json
+```
+
+Declare `/app-state` in `application.persistence.mutable_roots`, enable
+`snapshot_capable`, and use concurrency `1`. Choose a dedicated state directory
+outside the application workdir, seeded assets, and file-injection namespaces.
+`save_state()` returns a JSON object; `restore_state(state)` applies it to the
+same object used by `invoke`. Both Python and Node support sync and async methods.
+Without an initializer the methods resolve on the imported module.
+
+On snapshot creation, Interceptor waits for invocations to complete, performs
+configured quiescence, calls the save method, and includes the resulting file in
+the normal verified filesystem snapshot. `quiesce.kind: none` does not skip the
+save method. Saving occurs at snapshot boundaries, not on every turn. The driver
+writes a versioned JSON document atomically and enforces `limits.max_blob_bytes`;
+the file also counts against snapshot byte limits. It rejects lossy serialization,
+including unsupported objects, cycles, non-finite numbers, and dropped fields.
+Encode framework message objects explicitly; do not use pickle.
+
+On restore, the driver initializes the application, loads the selected snapshot's
+state, and awaits the restore method before reporting readiness. A fresh session
+never loads a file merely because it exists. Missing, invalid, incompatible, or
+rejected restored state fails startup; it never falls back to empty history.
+Save errors fail the snapshot without replacing it with stale state. A save
+that times out and may still be running makes that application session unusable.
+State capture and admission waiting use the quiescence timeout (default five
+seconds); restored startup uses the existing startup timeout.
+
+The adapter must preserve messages and tool history, summaries, logical identity,
+and any safeguards affecting future decisions. It must rebuild transient locks
+and clients without replaying model requests or business actions. Background
+state mutation must stop at the snapshot boundary through existing quiescence
+facilities; serializing invocations alone does not stop background tasks. Save
+must leave the live application logically unchanged and be safe to repeat.
+
+This adapter is part of the tested configuration. It does not give the original
+application production restart support, capture process memory, or recover
+provider-side conversation state. See the [runnable examples](../examples/application-state-snapshots/README.md)
+and [snapshot behavior](snapshots-and-restore.md).
 
 ## External adapter protocol
 

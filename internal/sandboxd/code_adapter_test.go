@@ -52,6 +52,10 @@ export async function initialize(options) {
 `
 
 func startCodeTest(t *testing.T, language, source string, concurrency int, entry ...string) (*protocolApplicationAdapter, string) {
+	return startCodeTestConfigured(t, language, source, concurrency, nil, entry...)
+}
+
+func startCodeTestConfigured(t *testing.T, language, source string, concurrency int, configure func(string, *environment.CodeInterface) []string, entry ...string) (*protocolApplicationAdapter, string) {
 	t.Helper()
 	runtime, module, filename := "python3", "agent", "agent.py"
 	if language == "node" {
@@ -75,7 +79,12 @@ func startCodeTest(t *testing.T, language, source string, concurrency int, entry
 		}
 	}
 	config := &environment.CodeInterface{Language: language, Module: module, AdapterAsset: "assets/adapter", Initialize: "initialize", Invoke: "invoke", Close: "close", Concurrency: concurrency}
+	var extra []string
+	if configure != nil {
+		extra = configure(root, config)
+	}
 	argv, env, err := codeDriverCommand([]string{executable}, config)
+	env = append(env, extra...)
 	if err != nil {
 		t.Fatal(err)
 	}

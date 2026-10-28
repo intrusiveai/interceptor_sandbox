@@ -1826,6 +1826,15 @@ Verification reports the first failing record and exits non-zero.
 
 ## 13. Logical state journal and snapshots
 
+Application-specific state persistence for the Python and Node code interfaces
+MUST follow [Application state adapters](application-state-snapshots.md). This
+extends declared filesystem persistence: adapters export JSON at a completed-turn
+boundary and reconstruct the application before restored readiness. It does not
+capture process memory, replay old actions, or implicitly enable snapshot support
+for any framework. Applications without this optional configuration retain the
+existing snapshot contract.
+
+
 ### 13.1 Design
 
 The snapshot system is logical, not block based. The Sealed Environment is the

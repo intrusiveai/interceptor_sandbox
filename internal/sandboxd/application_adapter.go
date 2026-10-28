@@ -75,6 +75,7 @@ func (s *Server) newApplicationAdapter() (applicationAdapter, error) {
 		if err != nil {
 			return nil, err
 		}
+		env = append(env, "INTERCEPTOR_STATE_RESTORE="+strconv.FormatBool(s.metadata.ParentCheckpoint != ""), "INTERCEPTOR_STATE_MAX_BYTES="+strconv.FormatInt(s.blueprint.Limits.MaxBlobBytes, 10))
 		return newProtocolApplicationAdapter(s, command, env)
 	default:
 		return nil, fmt.Errorf("unsupported application interface %q", s.blueprint.Application.Interface.Adapter)
@@ -101,6 +102,25 @@ func (s *Server) routeOperation(method, path string) (environment.ApplicationOpe
 
 func (s *Server) adapterHandler(invoke func(context.Context, applicationInvocation) (applicationResult, error)) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if code := s.blueprint.Application.Interface.Code; code != nil && code.State != nil {
+			ctx, cancel := context.WithTimeout(request.Context(), s.turnTimeout())
+			defer cancel()
+			if adapter, ok := s.adapter.(*protocolApplicationAdapter); ok {
+				release, err := adapter.lockState(ctx)
+				if err != nil {
+					writeError(writer, http.StatusRequestTimeout, "application_busy", err.Error())
+					return
+				}
+				defer release()
+				ctx = context.WithValue(ctx, stateInvocationKey{}, adapter)
+			}
+			if err := lockContext(ctx, s.activityMu.TryRLock); err != nil {
+				writeError(writer, http.StatusRequestTimeout, "application_busy", err.Error())
+				return
+			}
+			defer s.activityMu.RUnlock()
+			request = request.WithContext(ctx)
+		}
 		if request.Method != http.MethodPost || !strings.HasPrefix(request.URL.Path, "/operations/") {
 			writeError(writer, http.StatusNotFound, "unsupported_operation", "use POST /operations/{operation-id}")
 			return
@@ -883,6 +903,7 @@ type protocolApplicationAdapter struct {
 	ready     chan error
 	readyOnce sync.Once
 	limit     chan struct{}
+	stateGate chan struct{}
 	failed    error // protected by pendingMu; an indeterminate code session cannot be reused
 	closed    chan error
 }
@@ -898,7 +919,7 @@ func newProtocolApplicationAdapter(server *Server, command, extraEnv []string) (
 	if server.blueprint.Application.Interface.Code != nil && server.blueprint.Application.Interface.Code.Concurrency > 0 {
 		concurrency = server.blueprint.Application.Interface.Code.Concurrency
 	}
-	return &protocolApplicationAdapter{server: server, command: command, extraEnv: extraEnv, pending: map[string]chan protocolFrame{}, ready: make(chan error, 1), closed: make(chan error, 1), limit: make(chan struct{}, concurrency)}, nil
+	return &protocolApplicationAdapter{server: server, command: command, extraEnv: extraEnv, pending: map[string]chan protocolFrame{}, ready: make(chan error, 1), closed: make(chan error, 1), stateGate: make(chan struct{}, 1), limit: make(chan struct{}, concurrency)}, nil
 }
 
 func (a *protocolApplicationAdapter) Kind() string {
@@ -996,7 +1017,7 @@ func (a *protocolApplicationAdapter) readFrames(reader io.Reader, log io.Writer)
 			case a.closed <- err:
 			default:
 			}
-		case "result":
+		case "result", "state_saved":
 			a.pendingMu.Lock()
 			channel := a.pending[frame.ID]
 			a.pendingMu.Unlock()
@@ -1045,6 +1066,11 @@ func (a *protocolApplicationAdapter) WaitReady(ctx context.Context) error {
 }
 
 func (a *protocolApplicationAdapter) Invoke(ctx context.Context, invocation applicationInvocation) (applicationResult, error) {
+	release, err := a.lockState(ctx)
+	if err != nil {
+		return applicationResult{}, err
+	}
+	defer release()
 	select {
 	case a.limit <- struct{}{}:
 		defer func() { <-a.limit }()
@@ -1155,6 +1181,12 @@ func (a *protocolApplicationAdapter) Close(ctx context.Context) error {
 	} // Already terminated; no cleanup guarantee.
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
+	release, err := a.lockState(ctx)
+	if err != nil {
+		a.failSession(err)
+		return err
+	}
+	defer release()
 	if err := a.writeInvocation(ctx, protocolFrame{Protocol: applicationProtocol, Type: "close"}); err != nil {
 		return err
 	}
@@ -1183,9 +1215,9 @@ func codeDriverCommand(base []string, config *environment.CodeInterface) ([]stri
 	}
 	extra := []string{"INTERCEPTOR_CODE_CONFIG=" + string(encoded)}
 	if config.Language == "python" {
-		return append(append([]string{}, base...), "-u", "-c", pythonCodeDriver), extra, nil
+		return append(append([]string{}, base...), "-u", "-c", pythonStateStore+"\n"+pythonCodeDriver), extra, nil
 	}
-	return append(append([]string{}, base...), "-e", nodeCodeDriver), extra, nil
+	return append(append([]string{}, base...), "-e", nodeStateStore+"\n"+nodeCodeDriver), extra, nil
 }
 
 //go:embed drivers/python.py
@@ -1193,3 +1225,9 @@ var pythonCodeDriver string
 
 //go:embed drivers/node.cjs
 var nodeCodeDriver string
+
+//go:embed drivers/state.py
+var pythonStateStore string
+
+//go:embed drivers/state.cjs
+var nodeStateStore string

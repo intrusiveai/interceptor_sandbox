@@ -112,7 +112,14 @@ type ExternalInterface struct {
 	Concurrency int            `yaml:"concurrency,omitempty" json:"concurrency,omitempty"`
 }
 
+type CodeState struct {
+	Save    string `yaml:"save" json:"save"`
+	Restore string `yaml:"restore" json:"restore"`
+	Path    string `yaml:"path" json:"path"`
+}
+
 type CodeInterface struct {
+	State         *CodeState     `yaml:"state,omitempty" json:"state,omitempty"`
 	AdapterAsset  string         `yaml:"adapter_asset,omitempty" json:"adapter_asset,omitempty"`
 	Close         string         `yaml:"close,omitempty" json:"close,omitempty"`
 	Language      string         `yaml:"language" json:"language"`

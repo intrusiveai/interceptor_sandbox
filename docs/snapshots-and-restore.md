@@ -232,6 +232,29 @@ Branching does not make later model sampling deterministic. To compare branches
 fairly, control the provider/model settings and sampling parameters or use a
 deterministic mock/recorded provider.
 
+## Restoring an agent's conversation
+
+A Python or Node [application state adapter](application-interfaces.md#saving-and-restoring-application-state)
+can persist conversation context and session state alongside managed service
+records and files. Interceptor packages the adapter through `app build`, asks it
+to save at a completed-turn boundary, and includes its JSON file in the existing
+integrity-checked snapshot. Restore loads that state into the newly initialized
+application before readiness. The application keeps its logical conversation
+identity while the sandbox receives a new native session ID.
+
+This is not a process-memory snapshot or replay of the harness's interaction log.
+The adapter must reconstruct the state that the application actually uses for
+subsequent model calls and decisions. State not captured by the adapter or managed
+files/services remains outside the restore guarantee. Snapshots do not restore
+remote provider conversation state or renew old credentials by replaying them.
+
+State-enabled adapters use one invocation at a time. New invocations wait during
+capture; a hung export fails the session rather than continuing with uncertain
+state. A recoverable export or size-limit error rejects the snapshot and permits
+continued operation. Missing or incompatible state on restore fails startup.
+Without state configuration, existing file-based application persistence and
+snapshot semantics are unchanged.
+
 ## Conditions for truthful snapshots
 
 Before setting `snapshot_capable: true`, verify all of the following:

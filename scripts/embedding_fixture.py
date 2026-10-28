@@ -47,7 +47,7 @@ class EmbeddingFixture(AbstractContextManager):
                 request = json.loads(self.rfile.read(size))
                 model = request['model']
                 fixture.calls.append({'provider': kind, 'model': model,
-                                      'input': request.get('input'), 'encoding_format': request.get('encoding_format'),
+                                      'request': request, 'input': request.get('input'), 'encoding_format': request.get('encoding_format'),
                                       'credential_matched': True})
                 status = 200
                 if kind == 'generation':
