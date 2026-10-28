@@ -75,6 +75,9 @@ func (s *Server) ownerChanged(owner adaptive.ExecutionOwner) error {
 	if err := session.Save(s.paths.Metadata, s.metadata); err != nil {
 		return err
 	}
+	if s.recorder.Err() != nil {
+		return nil
+	} // Closure remains possible with incomplete evidence.
 	_, err := s.recorder.Append(recording.Draft{Channel: recording.Control, Layer: "operations", Kind: "execution_owner_changed", Provenance: recording.SandboxControl, Semantic: map[string]any{"campaign_id": owner.CampaignID, "worker_instance_id": owner.WorkerInstanceID, "run_revision": owner.RunRevision, "allow_target_stop": owner.AllowTargetStop, "closed_at": owner.ClosedAt, "closure_reason": owner.ClosureReason, "session_revision": s.metadata.Revision}})
 	if err != nil {
 		return err
@@ -82,10 +85,14 @@ func (s *Server) ownerChanged(owner adaptive.ExecutionOwner) error {
 	return s.recorder.Flush()
 }
 func (s *Server) checkOperation(r adaptive.OperationRequest, body json.RawMessage, state adaptive.ExecutionState) error {
+	evidenceErr := s.evidenceError()
+	if evidenceErr != nil && (r.Operation == "application.invoke" || r.Operation == "snapshot.create") {
+		return errors.New("evidence_storage_error")
+	}
 	s.metadataMu.RLock()
 	phase := s.metadata.Phase
 	s.metadataMu.RUnlock()
-	if phase != session.Running && phase != session.Quiescing && r.Operation != "session.status" && r.Operation != "operation.status" && r.Operation != "session.owner" {
+	if phase != session.Running && phase != session.Quiescing && r.Operation != "session.status" && r.Operation != "operation.status" && r.Operation != "session.owner" && r.Operation != "session.stop" && r.Operation != "observation.read" && r.Operation != "observation.content.read" && r.Operation != "artifact.read" && r.Operation != "capabilities.read" {
 		return errors.New("session_not_running")
 	}
 	switch r.Operation {
@@ -184,6 +191,7 @@ func (s *Server) dispatchOperation(ctx context.Context, r adaptive.OperationRequ
 	method, path := http.MethodGet, "/v1/status"
 	switch r.Operation {
 	case "session.status":
+		_ = s.evidenceError()
 		s.metadataMu.RLock()
 		metadata := s.metadata
 		s.metadataMu.RUnlock()
@@ -248,12 +256,14 @@ func (s *Server) dispatchOperation(ctx context.Context, r adaptive.OperationRequ
 	default:
 		return adaptive.OperationError(400, "unsupported_operation")
 	}
-	if method != http.MethodGet {
+	if method != http.MethodGet && !(r.Operation == "session.stop" && s.recorder.Err() != nil) {
 		if _, err := s.recorder.Append(recording.Draft{Channel: recording.Control, Layer: "operations", Kind: "operation_dispatched", Provenance: recording.SandboxControl, Semantic: map[string]any{"request_id": r.RequestID, "operation_id": r.OperationID, "operation": r.Operation, "campaign_id": r.CampaignID, "worker_instance_id": r.WorkerInstanceID, "run_revision": r.RunRevision, "body_digest": r.BodyDigest}}); err != nil {
-			return adaptive.OperationError(503, "recording_failed")
+			_ = s.evidenceError()
+			return adaptive.OperationError(507, "evidence_storage_error")
 		}
 		if err := s.recorder.Flush(); err != nil {
-			return adaptive.OperationError(503, "recording_failed")
+			_ = s.evidenceError()
+			return adaptive.OperationError(507, "evidence_storage_error")
 		}
 	}
 	request, err := http.NewRequestWithContext(ctx, method, path, bytes.NewReader(body))
@@ -295,12 +305,14 @@ func (s *Server) dispatchOperation(ctx context.Context, r adaptive.OperationRequ
 			return adaptive.OperationError(503, "revision_persistence_failed")
 		}
 	}
-	if method != http.MethodGet {
+	if method != http.MethodGet && !(r.Operation == "session.stop" && s.recorder.Err() != nil) {
 		if _, err := s.recorder.Append(recording.Draft{Channel: recording.Control, Layer: "operations", Kind: "operation_returned", Provenance: recording.SandboxControl, Semantic: map[string]any{"operation_id": r.OperationID, "status": status, "session_revision": result.SessionRevision}}); err != nil {
-			return adaptive.OperationError(503, "recording_failed")
+			_ = s.evidenceError()
+			return adaptive.OperationError(507, "evidence_storage_error")
 		}
 		if err := s.recorder.Flush(); err != nil {
-			return adaptive.OperationError(503, "recording_failed")
+			_ = s.evidenceError()
+			return adaptive.OperationError(507, "evidence_storage_error")
 		}
 	}
 	return result

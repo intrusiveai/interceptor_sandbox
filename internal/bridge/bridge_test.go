@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/recording"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -526,5 +527,41 @@ func updateMaximum(maximum *atomic.Int64, current int64) {
 		if current <= previous || maximum.CompareAndSwap(previous, current) {
 			return
 		}
+	}
+}
+
+func TestTurnScopedInjectionUsesOnlySupervisorObservation(t *testing.T) {
+	for _, window := range []string{"observed", "outside_turn", "ambiguous"} {
+		t.Run(window, func(t *testing.T) {
+			journal, err := statejournal.Open(filepath.Join(t.TempDir(), "state.jsonl"), "sess-test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer journal.Close()
+			manager := injection.NewManager(journal, nil)
+			err = manager.Arm(injection.Definition{ID: "scoped", Surface: "model_tool_result", Mode: "simulation", Scope: "next_turn", Enabled: true, Selector: injection.Selector{TurnID: "real", ToolName: "lookup", CallOrdinal: "first"}, Placement: injection.Placement{Operation: "append_text"}, Payload: json.RawMessage(`" injected"`)}, "real")
+			if err != nil {
+				t.Fatal(err)
+			}
+			connector := &captureConnector{}
+			proxy, err := NewModelProxy("sess-test", connector, manager, nil, nil, 1<<20, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := `{"model":"safe-model","messages":[{"role":"assistant","tool_calls":[{"id":"c1","function":{"name":"lookup","arguments":"{}"}}]},{"role":"tool","tool_call_id":"c1","content":"result"}]}`
+			r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+			observation := recording.Observation{Window: window}
+			r.Header.Set("X-Interceptor-Turn-ID", "real")
+			if window == "observed" {
+				observation.TurnID = "real"
+				r.Header.Set("X-Interceptor-Turn-ID", "wrong")
+			}
+			r = r.WithContext(recording.WithObservation(r.Context(), observation))
+			w := httptest.NewRecorder()
+			proxy.ServeHTTP(w, r)
+			if w.Code != 200 || strings.Contains(string(connector.frame.Body), "injected") != (window == "observed") {
+				t.Fatalf("header selected injection: %d %s", w.Code, connector.frame.Body)
+			}
+		})
 	}
 }

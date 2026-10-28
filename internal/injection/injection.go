@@ -125,7 +125,7 @@ func Validate(definition Definition) error {
 		return fmt.Errorf("unsupported injection scope %q", definition.Scope)
 	}
 	if (definition.Surface == "service_response" || definition.Surface == "mcp_tool_result") && definition.Scope == "next_turn" {
-		return errors.New("response injection cannot use next_turn because managed service requests have no trusted turn binding")
+		return errors.New("response injection does not support turn-scoped delivery")
 	}
 	if len(definition.Payload) == 0 || !json.Valid(definition.Payload) {
 		return errors.New("payload must be valid JSON")

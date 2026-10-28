@@ -2,6 +2,7 @@ package services
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -147,12 +148,12 @@ func (h *StatefulHandler) ServeHTTP(writer http.ResponseWriter, request *http.Re
 			continue
 		}
 		if err := h.handle(writer, request, route, key); err != nil {
-			h.record("stateful_error", map[string]any{"route": route.ID, "error": err.Error()})
+			h.record(request.Context(), "stateful_error", map[string]any{"route": route.ID, "error": err.Error()})
 			writeServiceError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		}
 		return
 	}
-	h.record("coverage_gap", map[string]any{"service": h.serviceID, "method": request.Method, "path": request.URL.Path})
+	h.record(request.Context(), "coverage_gap", map[string]any{"service": h.serviceID, "method": request.Method, "path": request.URL.Path})
 	writeServiceError(writer, http.StatusNotImplemented, "coverage_gap", "no sealed stateful route matched request")
 }
 
@@ -176,7 +177,7 @@ func (h *StatefulHandler) handle(writer http.ResponseWriter, request *http.Reque
 		}
 		h.mu.RUnlock()
 		h.writeJSON(writer, http.StatusOK, items)
-		h.record("stateful_read", map[string]any{"route": route.ID, "collection": route.Collection, "count": len(items)})
+		h.record(request.Context(), "stateful_read", map[string]any{"route": route.ID, "collection": route.Collection, "count": len(items)})
 		return nil
 	case "get":
 		value, exists := h.get(route.Collection, key)
@@ -185,7 +186,7 @@ func (h *StatefulHandler) handle(writer http.ResponseWriter, request *http.Reque
 			return nil
 		}
 		h.writeRawJSON(writer, http.StatusOK, value)
-		h.record("stateful_read", map[string]any{"route": route.ID, "collection": route.Collection, "key": key})
+		h.record(request.Context(), "stateful_read", map[string]any{"route": route.ID, "collection": route.Collection, "key": key})
 		return nil
 	case "delete":
 		if _, exists := h.get(route.Collection, key); !exists {
@@ -200,7 +201,7 @@ func (h *StatefulHandler) handle(writer http.ResponseWriter, request *http.Reque
 		delete(h.state[route.Collection], key)
 		h.mu.Unlock()
 		writer.WriteHeader(http.StatusNoContent)
-		h.record("stateful_mutation", map[string]any{"route": route.ID, "action": route.Action, "collection": route.Collection, "key": key})
+		h.record(request.Context(), "stateful_mutation", map[string]any{"route": route.ID, "action": route.Action, "collection": route.Collection, "key": key})
 		return nil
 	case "create", "replace", "patch":
 		body, err := readBounded(request.Body, maxServiceRequestBody)
@@ -267,7 +268,7 @@ func (h *StatefulHandler) handle(writer http.ResponseWriter, request *http.Reque
 			status = http.StatusCreated
 		}
 		h.writeRawJSON(writer, status, encoded)
-		h.record("stateful_mutation", map[string]any{"route": route.ID, "action": route.Action, "collection": route.Collection, "key": key})
+		h.record(request.Context(), "stateful_mutation", map[string]any{"route": route.ID, "action": route.Action, "collection": route.Collection, "key": key})
 		return nil
 	default:
 		return fmt.Errorf("unsupported action %q", route.Action)
@@ -356,11 +357,11 @@ func (h *StatefulHandler) commit(reason string, operations []statejournal.Operat
 	return err
 }
 
-func (h *StatefulHandler) record(kind string, semantic any) {
+func (h *StatefulHandler) record(ctx context.Context, kind string, semantic any) {
 	if h.recorder == nil {
 		return
 	}
-	_, _ = h.recorder.Append(recording.Draft{Channel: recording.Evaluation, Layer: "stateful_service", Kind: kind, Provenance: recording.EnvironmentSealed, Semantic: semantic})
+	_, _ = h.recorder.AppendContext(ctx, recording.Draft{Channel: recording.Evaluation, Layer: "stateful_service", Kind: kind, Provenance: recording.EnvironmentSealed, Semantic: semantic})
 }
 
 func (h *StatefulHandler) writeJSON(writer http.ResponseWriter, status int, value any) {

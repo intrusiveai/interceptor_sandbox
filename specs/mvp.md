@@ -2637,3 +2637,14 @@ and `evidence_retained: true` in the ordinary body. Successful transfer advertis
 full length/digest for receiver verification. This is a reporting/collection
 failure, not a new execution failure or evidence deletion. The
 [local API contract](../docs/local-api.md#stop-and-evidence) defines the wire fields.
+
+
+## Native observation and evidence completeness
+
+The [observed-turn evidence contract](observed-turn-evidence.md) governs
+supervisor-owned observation windows and required evidence-storage failures.
+Native model/service turn association MUST mean observed during an invocation,
+not causal provenance. Interceptor MUST NOT use application correlation headers
+for this association or turn-specific injection selection. Required capture
+failure MUST block subsequent invocations and snapshots, preserve inspection and
+cleanup, and prevent missing evidence from becoming a negative oracle outcome.

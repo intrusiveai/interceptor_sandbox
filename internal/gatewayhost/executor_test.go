@@ -66,6 +66,12 @@ func TestRetainedLookupDoesNotRestartSession(t *testing.T) {
 	if err != nil || string(status["execution_available"]) != "false" {
 		t.Fatalf("status: %+v %v", result, err)
 	}
+	r.Operation = "observation.read"
+	metadata.Taints = []string{"evidence_incomplete"}
+	result, err = retainedOperation(metadata, paths, "host", r, []byte(`{"turn_id":"turn-2"}`))
+	if err != nil || result.Status != 503 || !strings.Contains(string(result.Body), "evidence_storage_error") {
+		t.Fatalf("lost evidence not explicit: %+v %v", result, err)
+	}
 	r.Operation = "application.invoke"
 	result, _ = retainedOperation(metadata, paths, "host", r, []byte(`{}`))
 	if result.Status != 409 {

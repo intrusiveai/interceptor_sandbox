@@ -79,6 +79,11 @@ func retainedOperation(metadata session.Metadata, paths session.Paths, principal
 			return adaptive.OperationError(400, "invalid_observation_request"), nil
 		}
 		if input.ReceiptID == "" {
+			for _, taint := range metadata.Taints {
+				if taint == "evidence_incomplete" {
+					return adaptive.OperationError(503, "evidence_storage_error"), nil
+				}
+			}
 			return adaptive.OperationError(409, "retained_feedback_requires_receipt"), nil
 		}
 		return adaptive.RetainedFeedback(paths.Root, r, input.ReceiptID), nil

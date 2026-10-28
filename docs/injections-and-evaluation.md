@@ -207,8 +207,9 @@ content silently.
 Response-side `service_response` and `mcp_tool_result` surfaces intentionally
 exclude `insert_array`; they support only replace, text prepend/append, and
 allowlisted object merge. They also exclude `next_turn` and turn selectors:
-managed service requests do not carry a trusted turn binding, so accepting a
-caller-supplied one would create false causality. Use `once` or `standing`.
+service observations now carry supervisor-owned execution-window associations,
+which describe when a request was observed rather than causal delivery. This
+change does not enable response-side turn selectors. Use `once` or `standing`.
 
 ## Scope
 
@@ -382,3 +383,41 @@ Interceptor rejects it and records a coverage gap. `interceptor coverage`
 reports those events. A gap means the Blueprint does not yet simulate something
 the application expected. Add and review that missing behavior instead of
 allowing the application to reach an unknown real service.
+
+
+## Observed turns and incomplete evidence
+
+Model and managed-service events describe what Interceptor **observed during a
+turn**. `turn_id` identifies the sole application invocation executing when a
+request entered its collector. The request keeps this association through its
+response, even if the invocation has ended. `attribution.window` is `observed`,
+`outside_turn`, `ambiguous` (overlapping invocations), or `uncertain_execution`
+(application work may remain after cancellation). Only `observed` carries a turn
+ID. Queued invocations are not active windows.
+
+`attribution.observed_attempt_id` and `observed_payload_digest` describe the
+admitted invocation context. Existing top-level attempt/payload fields retain
+injection-origin meaning where supplied; an injection can originate in another
+attempt. Application-supplied turn headers have no attribution authority.
+Historical records without window metadata retain their original meaning.
+
+Parallel tool/model requests within one turn share its observation window.
+Independent background tasks may also run during that window: timing does not
+prove causation. A model's claim that a business action succeeded does not prove
+that a service mutation committed. Use independent service/journal state for
+that conclusion. Existing session-cumulative oracle results remain cumulative.
+
+Required blob, event, journal, or flush failures latch `evidence_storage_error`.
+Interceptor rejects new turns, dependent operations, and new snapshots in that
+session. Request-capture failure prevents forwarding; result-capture failure may
+follow an operation that already happened. Interceptor does not automatically
+retry or claim rollback. A target that catches the error cannot make the turn's
+capture successful.
+
+The session carries the `evidence_incomplete` taint. Affected feedback is partial
+or unavailable and evaluation fails explicitly; missing evidence is not a
+negative finding or a resisted attack. Status, feedback reads, and cleanup remain
+available. Existing evidence remains inspectable/exportable when its integrity
+checks pass. Corrupt storage causes an explicit export error and is not repaired
+silently. Hash verification establishes integrity of retained records, not
+completeness of capture. Repair storage and start a new session to resume work.

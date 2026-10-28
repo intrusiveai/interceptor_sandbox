@@ -30,6 +30,8 @@ import (
 const applicationProtocol = "interceptor.application/v1"
 
 type applicationInvocation struct {
+	AttemptID     string
+	PayloadDigest string
 	TurnID        string
 	Operation     string
 	Method        string
@@ -102,6 +104,10 @@ func (s *Server) routeOperation(method, path string) (environment.ApplicationOpe
 
 func (s *Server) adapterHandler(invoke func(context.Context, applicationInvocation) (applicationResult, error)) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if err := s.evidenceError(); err != nil {
+			writeError(writer, 507, "evidence_storage_error", err.Error())
+			return
+		}
 		if code := s.blueprint.Application.Interface.Code; code != nil && code.State != nil {
 			ctx, cancel := context.WithTimeout(request.Context(), s.turnTimeout())
 			defer cancel()
@@ -153,10 +159,18 @@ func (s *Server) adapterHandler(invoke func(context.Context, applicationInvocati
 		result, err := invoke(ctx, applicationInvocation{TurnID: invocationID, Operation: operationID, Body: body, MediaType: request.Header.Get("Content-Type")})
 		if err != nil {
 			s.recordDirectInvocation(invocationID, operationID, 0, nil, err)
+			if evidenceErr := s.evidenceError(); evidenceErr != nil {
+				writeError(writer, 507, "evidence_storage_error", evidenceErr.Error())
+				return
+			}
 			writeError(writer, http.StatusBadGateway, "application_error", err.Error())
 			return
 		}
 		s.recordDirectInvocation(invocationID, operationID, result.Code, result.Body, nil)
+		if err := s.evidenceError(); err != nil {
+			writeError(writer, 507, "evidence_storage_error", err.Error())
+			return
+		}
 		for name, value := range result.Headers {
 			writer.Header().Set(name, value)
 		}
@@ -366,9 +380,12 @@ func (a *httpApplicationAdapter) Invoke(ctx context.Context, invocation applicat
 	if invocation.MediaType != "" {
 		request.Header.Set("Content-Type", invocation.MediaType)
 	}
-	if invocation.TurnID != "" {
-		request.Header.Set("X-Interceptor-Turn-ID", invocation.TurnID)
+
+	finishWindow, windowErr := a.server.beginInvocation(ctx, invocation)
+	if windowErr != nil {
+		return applicationResult{}, windowErr
 	}
+	defer finishWindow()
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		return applicationResult{}, err
@@ -380,6 +397,10 @@ func (a *httpApplicationAdapter) Invoke(ctx context.Context, invocation applicat
 
 func (a *httpApplicationAdapter) Handler() http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if err := a.server.evidenceError(); err != nil {
+			writeError(writer, 507, "evidence_storage_error", err.Error())
+			return
+		}
 		operation, ok := a.server.routeOperation(request.Method, request.URL.Path)
 		if !ok {
 			writeError(writer, http.StatusNotImplemented, "unsupported_route", "route is not declared by the Sealed Environment")
@@ -422,32 +443,21 @@ func (a *httpApplicationAdapter) Handler() http.Handler {
 			writeError(writer, http.StatusTooManyRequests, "turn_limit", "turn limit is exhausted")
 			return
 		}
-		request.Header.Set("X-Interceptor-Turn-ID", invocationID)
-		recorder := &statusResponseWriter{ResponseWriter: writer, status: http.StatusOK}
-		a.proxy.ServeHTTP(recorder, request)
-		a.server.recordDirectInvocation(invocationID, operation.ID, recorder.status, nil, nil)
+		finishWindow, windowErr := a.server.beginInvocation(request.Context(), applicationInvocation{TurnID: invocationID, Operation: operation.ID})
+		if windowErr != nil {
+			writeError(writer, 507, "evidence_storage_error", windowErr.Error())
+			return
+		}
+		capture := newEvidenceResponse(a.server.blueprint.Limits.MaxBlobBytes, a.server.recorder)
+		a.proxy.ServeHTTP(capture, request)
+		finishWindow()
+		a.server.recordDirectInvocation(invocationID, operation.ID, capture.status, capture.body.Bytes(), nil)
+		if err := a.server.evidenceError(); err != nil {
+			writeError(writer, 507, "evidence_storage_error", err.Error())
+			return
+		}
+		capture.publish(writer)
 	})
-}
-
-type statusResponseWriter struct {
-	http.ResponseWriter
-	status      int
-	wroteHeader bool
-}
-
-func (w *statusResponseWriter) WriteHeader(status int) {
-	if w.wroteHeader {
-		return
-	}
-	w.wroteHeader = true
-	w.status = status
-	w.ResponseWriter.WriteHeader(status)
-}
-
-func (w *statusResponseWriter) Flush() {
-	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
-		flusher.Flush()
-	}
 }
 
 func (s *Server) recordDirectInvocation(id, operation string, code int, body []byte, invocationError error) {
@@ -455,10 +465,24 @@ func (s *Server) recordDirectInvocation(id, operation string, code int, body []b
 	if invocationError != nil {
 		errorText = invocationError.Error()
 	}
+	outputRef := ""
+	if len(body) > 0 && s.blobs != nil {
+		object, err := s.blobs.Put(context.Background(), bytes.NewReader(body))
+		if err != nil {
+			s.recorder.Fail(err)
+		} else {
+			outputRef = object.Digest
+		}
+	}
+	inline := body
+	if len(inline) > 64<<10 {
+		inline = nil
+	}
 	_, _ = s.recorder.Append(recording.Draft{
+		RawRef:  outputRef,
 		Channel: recording.Attack, Layer: "application_bridge", Kind: "application_invocation_completed",
 		Provenance: recording.Application, TurnID: id,
-		Semantic: map[string]any{"operation": operation, "code": code, "body": string(body), "error": errorText},
+		Semantic: map[string]any{"operation": operation, "code": code, "body": string(inline), "output_ref": outputRef, "error": errorText, "evidence_partial": s.pendingEvidence(id)},
 	})
 	_ = s.recorder.Flush()
 }
@@ -501,6 +525,11 @@ func (a *commandApplicationAdapter) Invoke(ctx context.Context, invocation appli
 	} else if stdinMode == "json" && !json.Valid(stdin) {
 		return applicationResult{}, errors.New("command input must be valid JSON")
 	}
+	finishWindow, windowErr := a.server.beginInvocation(ctx, invocation)
+	if windowErr != nil {
+		return applicationResult{}, windowErr
+	}
+	defer finishWindow()
 	response, err := a.server.callHelper(ctx, HelperRequest{Command: command, Stdin: stdin, TimeoutMS: a.server.turnTimeout().Milliseconds()})
 	a.server.appendApplicationLogs(response.Stdout, response.Stderr)
 	if err != nil {
@@ -683,6 +712,11 @@ func (a *stdioApplicationAdapter) Invoke(ctx context.Context, invocation applica
 	}
 	a.invokeMu.Lock()
 	defer a.invokeMu.Unlock()
+	finishWindow, windowErr := a.server.beginInvocation(ctx, invocation)
+	if windowErr != nil {
+		return applicationResult{}, windowErr
+	}
+	defer finishWindow()
 	a.output.consumeAll()
 	suffix := a.config.InputSuffix
 	if suffix == "" {
@@ -1105,6 +1139,12 @@ func (a *protocolApplicationAdapter) Invoke(ctx context.Context, invocation appl
 	a.pending[id] = channel
 	a.pendingMu.Unlock()
 	defer func() { a.pendingMu.Lock(); delete(a.pending, id); a.pendingMu.Unlock() }()
+	invocation.TurnID = id
+	finishWindow, windowErr := a.server.beginInvocation(ctx, invocation)
+	if windowErr != nil {
+		return applicationResult{}, windowErr
+	}
+	defer finishWindow()
 	if err := a.writeInvocation(ctx, protocolFrame{Protocol: applicationProtocol, Type: "invoke", ID: id, Operation: invocation.Operation, Input: input, MediaType: invocation.MediaType}); err != nil {
 		if a.Kind() == "code" {
 			a.failSession(err)

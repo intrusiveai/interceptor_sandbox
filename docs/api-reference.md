@@ -168,8 +168,9 @@ expects a user credential.
 In the compatibility form, `body` is also base64. The decoded request is
 limited to 2 MiB. `method` and `path` must match one declared HTTP operation.
 Only `Content-Type`, `Accept`, `If-Match`, and
-`If-None-Match` request headers are forwarded. Interceptor adds
-`X-Interceptor-Turn-ID`.
+`If-None-Match` request headers are forwarded. Interceptor associates model and
+service observations with the active invocation internally; applications do not
+need to supply or forward a turn header.
 
 The response is:
 
