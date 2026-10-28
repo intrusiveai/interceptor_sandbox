@@ -20,6 +20,8 @@ class ReleaseArchivesTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         (self.root / "LICENSE").write_text("license")
+        (self.root / "internal/appimage").mkdir(parents=True)
+        (self.root / "internal/appimage/postgresql-go.LICENSE").write_text("protocol client notices")
         self.calls = []
 
     def run_build_command(self, args, root, env=None):

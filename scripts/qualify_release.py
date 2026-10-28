@@ -143,7 +143,24 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                     raise ValueError('packaged database license inventory is incomplete')
                 if '18.6' not in (licenses / 'INDEX').read_text() or '0.8.7' not in (licenses / 'INDEX').read_text():
                     raise ValueError('packaged database version notices differ')
+                expected_sources = {'postgresql-18.6-source.tar.bz2':'555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f', 'pgvector-0.8.7-source.tar.gz':'cac0b10c360f05b2d521200105ba3697e773d4cd3731f5a915a7e37ebe0bea85'}
+                for name, expected_source in expected_sources.items():
+                    if hashlib.sha256((licenses/name).read_bytes()).hexdigest() != expected_source:
+                        raise ValueError('packaged upstream source/notice archive differs: '+name)
+                for source_archive, member, notice in [('postgresql-18.6-source.tar.bz2','postgresql-18.6/COPYRIGHT','PostgreSQL.txt'),('pgvector-0.8.7-source.tar.gz','pgvector-0.8.7/LICENSE','pgvector.txt')]:
+                    with tarfile.open(licenses/source_archive) as upstream:
+                        if upstream.extractfile(member).read() != (licenses/notice).read_bytes():
+                            raise ValueError('upstream notice changed: '+notice)
+                for name, embedded in [('musl.txt','postgresql-musl.LICENSE'),('GPL3.txt','postgresql-GPL3.LICENSE'),('GCC-runtime.txt','postgresql-GCC-runtime.LICENSE')]:
+                    if (licenses/name).read_bytes() != (Path(__file__).resolve().parents[1]/'internal/appimage'/embedded).read_bytes():
+                        raise ValueError('runtime license changed: '+name)
+                if run(docker,'run','--rm','--network','none','--entrypoint','/opt/interceptor/postgresql/bin/postgres',wrapper,'--version') != 'postgres (PostgreSQL) 18.6':
+                    raise ValueError('packaged PostgreSQL executable version differs')
                 shutil.copytree(licenses, output / 'database-licenses')
+            run(docker,'cp',inspection+':/usr/local/share/interceptor/licenses/PostgreSQL-client.txt',str(work/'postgresql-client.LICENSE'))
+            client_notices=(Path(__file__).resolve().parents[1]/'internal/appimage/postgresql-go.LICENSE').read_bytes()
+            if (work/'postgresql-client.LICENSE').read_bytes()!=client_notices or client_notices not in (install/'LICENSE').read_bytes():
+                raise ValueError('protocol-client dependency notices missing or changed')
             adapter_digests = {}
             if adapter_language:
                 copied = work / "copied-adapter"
@@ -200,7 +217,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                         run(docker, 'exec', '--user', str(os.getuid()), active[0], '/bin/sh', '-c',
                             'test -s /opt/interceptor/environment/environment.yaml && test -d /run/interceptor-session/pg/database/data')
                         run(docker, 'exec', '--user', '20000:20000', active[0], '/bin/sh', '-c',
-                            'test ! -r /opt/interceptor/environment/environment.yaml && test ! -r /run/interceptor-tls/server-key.pem && test ! -x /run/interceptor-session/pg/database/data && set -- /tmp/interceptor-pg-* && test "$1" != "/tmp/interceptor-pg-*" && for path do test ! -x "$path" || exit 1; done')
+                            'for path in /opt/interceptor/environment/environment.yaml /run/interceptor-tls/server-key.pem; do if head -c 1 "$path" >/dev/null 2>&1; then id; ls -ld /opt/interceptor/environment; echo "application can open $path"; exit 1; fi; done; if test -x /run/interceptor-session/pg/database/data; then echo "application can enter database data"; exit 1; fi; set -- /tmp/interceptor-pg-*; if test "$1" = "/tmp/interceptor-pg-*"; then echo "private socket directory missing"; ls -ld /tmp /tmp/*; exit 1; fi; for path do if test -x "$path"; then echo "application can enter $path"; exit 1; fi; done')
                         (output / 'database-isolation.json').write_text(json.dumps({'application_uid':20000,'private_blueprint':True,'private_database':True,'private_sockets':True,'private_tls_key':True})+'\n')
                 run(str(client), "--customer-support" if customer_support else "--postgresql" if postgresql else "--state-snapshots" if state_snapshots else "--adapter-only" if adapter_language else "--command-only", "--output", str(output / "native"), *(["--evidence-failure", "--data-root", str(work / "data")] if evidence_failure else []))
                 native = json.loads((output / "native/result.json").read_text())

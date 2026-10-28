@@ -84,7 +84,11 @@ func Build(ctx context.Context, directory, dataRoot, tag, version string, docker
 	if err != nil {
 		return Lock{}, err
 	}
+	if err := os.WriteFile(filepath.Join(temporary, "postgresql-client.LICENSE"), postgresClientLicense, 0644); err != nil {
+		return Lock{}, err
+	}
 	dockerfile := databaseStage + fmt.Sprintf("FROM %s\nCOPY --chmod=0555 interceptor /usr/local/bin/interceptor\n", sourceReference) + databaseCopy
+	dockerfile += "COPY --chmod=0444 postgresql-client.LICENSE /usr/local/share/interceptor/licenses/PostgreSQL-client.txt\n"
 	if databaseCopy != "" {
 		originalUser, err := docker.ImageUser(ctx, sourceReference)
 		if err != nil {

@@ -398,7 +398,11 @@ func (s *connection) forward(ctx context.Context, b *pgproto3.Backend, up net.Co
 			s.mu.Unlock()
 			return errors.New("unsupported PostgreSQL protocol message")
 		}
+		tooMany := len(s.statements) > 256 || len(s.portals) > 256 || len(s.cursors) > 256
 		s.mu.Unlock()
+		if tooMany {
+			return errors.New("PostgreSQL connection exceeded 256 statement/portal/cursor objects")
+		}
 		if r.kind == 'Q' || r.kind == 'E' || r.kind == 'P' {
 			tokens, x := sqlTokens(r.sql)
 			if x != nil {
@@ -658,12 +662,18 @@ func (s *connection) responses(ctx context.Context, f *pgproto3.Frontend, c net.
 	}
 }
 func (s *connection) releaseRows(r *execution, c net.Conn, fields []pgproto3.FieldDescription, rows []*pgproto3.DataRow, result int) error {
-	if rows == nil {
+	if rows == nil && len(fields) == 0 {
 		return nil
+	}
+	if rows == nil {
+		rows = []*pgproto3.DataRow{}
 	}
 	raw, _ := json.Marshal(rows)
 	if err := s.p.Engine.Record(r.ctx, "database_result", recording.Application, map[string]any{"connection": s.id, "execution": r.id, "result": result, "columns": fields, "rows": len(rows)}, raw); err != nil {
 		return err
+	}
+	if len(rows) == 0 {
+		return nil
 	}
 	values := make([]any, len(rows))
 	for i, row := range rows {

@@ -15,9 +15,11 @@ import (
 	"time"
 
 	"github.com/intrusive-ai/interceptor-sandbox/internal/blobstore"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/digest"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/recording"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/statejournal"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgproto3"
 )
 
 // Engine state and its Unix socket are under a supervisor-only directory. The
@@ -56,6 +58,11 @@ func (e *Engine) connection(ctx context.Context, role string) (*pgx.Conn, error)
 	c.Fallbacks = nil
 	c.ConnectTimeout = 5 * time.Second
 	c.DefaultQueryExecMode = pgx.QueryExecModeExec
+	c.BuildFrontend = func(r io.Reader, w io.Writer) *pgproto3.Frontend {
+		f := pgproto3.NewFrontend(r, w)
+		f.SetMaxBodyLen(int(e.Config.MaxResultBytes))
+		return f
+	}
 	return pgx.ConnectConfig(ctx, c)
 }
 func (e *Engine) commandFor(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -168,6 +175,7 @@ func (e *Engine) Start(ctx context.Context, assets string, restore *statejournal
 	if err != nil {
 		return err
 	}
+	assetDigests := map[string]string{}
 	if restore != nil {
 		if err = ValidateCheckpoint(*restore); err != nil {
 			return err
@@ -191,6 +199,7 @@ func (e *Engine) Start(ctx context.Context, assets string, restore *statejournal
 			if x != nil {
 				return x
 			}
+			assetDigests[asset] = digest.Bytes(data)
 			// Exec without arguments uses PostgreSQL's simple-query protocol; no psql
 			// metacommand or shell evaluation is involved.
 			if _, err = e.admin.Exec(ctx, string(data)); err != nil {
@@ -257,7 +266,7 @@ func (e *Engine) Start(ctx context.Context, assets string, restore *statejournal
 			}
 		}
 	}()
-	return e.Record(ctx, "database_ready", recording.SandboxControl, map[string]any{"engine": Version, "pgvector": version, "restored": restore != nil}, nil)
+	return e.Record(ctx, "database_ready", recording.SandboxControl, map[string]any{"engine": Version, "pgvector": version, "restored": restore != nil, "asset_digests": assetDigests}, nil)
 }
 func (e *Engine) Record(ctx context.Context, kind string, provenance recording.Provenance, semantic any, raw []byte) error {
 	if err := e.Recorder.Err(); err != nil {
@@ -412,10 +421,19 @@ func (e *Engine) Oracle(ctx context.Context, sql string) (json.RawMessage, error
 	}
 	defer rows.Close()
 	values := []any{}
+	resultBytes := int64(2)
 	for rows.Next() {
 		v, x := rows.Values()
 		if x != nil {
 			return nil, x
+		}
+		encoded, x := json.Marshal(v)
+		if x != nil {
+			return nil, x
+		}
+		resultBytes += int64(len(encoded)) + 1
+		if resultBytes > e.Config.MaxResultBytes {
+			return nil, errors.New("oracle result exceeds byte limit")
 		}
 		values = append(values, v)
 		if len(values) > 10000 {

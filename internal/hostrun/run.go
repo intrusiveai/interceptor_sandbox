@@ -589,12 +589,8 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 			bridgeErrors <- bridge.ServeSpool(bridgeContext, filepath.Join(paths.Sockets, "model-spool"), connector)
 		}()
 	}
-	runtimeEnvironment, err := privateDatabaseEnvironment(absolute(config.EnvironmentDirectory), paths.Root, blueprint)
-	if err != nil {
-		return metadata, err
-	}
 	mounts := []ociruntime.Mount{
-		{Source: runtimeEnvironment, Target: "/opt/interceptor/environment", ReadOnly: true},
+		{Source: absolute(config.EnvironmentDirectory), Target: "/opt/interceptor/environment", ReadOnly: true},
 		{Source: paths.Root, Target: "/run/interceptor-session"},
 		{Source: paths.Blobs, Target: "/run/interceptor-blobs"},
 	}

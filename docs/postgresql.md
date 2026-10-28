@@ -84,8 +84,10 @@ budgets large enough for PostgreSQL's catalog and WAL overhead.
 
 The wrapper records the database versions and builder's supervisor UID in its
 existing application lock. Rebuild if running under a different host UID.
-Application execution retains its separate restricted UID. Database data and
-management sockets are private to the supervisor. Runtime executables use their
+Application execution retains its separate restricted UID. Database data, evidence, TLS keys and the Blueprint are mounted beneath a
+supervisor-owned Linux directory; their ordinary paths resolve through fixed
+symlinks. This protects them even when Docker Desktop remaps bind-mount ownership.
+Management sockets use a separate supervisor-only directory on container tmpfs. Runtime executables use their
 packaged musl library, independent of the target image's C library.
 
 ## Injection and committed-state checks
@@ -166,3 +168,7 @@ GCC runtime code from the native GCC build. Build-tool versions are retained in
 `build-packages.txt`. Wrapper qualification checks these files in the produced
 image. The CLI archives contain the embedded build recipe and accompanying
 license assets; the native database is assembled during `app build`.
+
+Go protocol-client dependency notices accompany the existing `LICENSE` file in
+CLI archives and `/usr/local/share/interceptor/licenses/PostgreSQL-client.txt`
+in wrappers, including wrappers that do not declare a database.
