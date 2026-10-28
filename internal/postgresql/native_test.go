@@ -74,6 +74,7 @@ func TestNativePostgreSQL(t *testing.T) {
 	os.WriteFile(filepath.Join(root, "seed.sql"), []byte(seeds), 0600)
 	cfg := Config{Database: "support", Roles: []Role{{Name: "agent", Password: "synthetic-password"}}, Schema: []string{"schema.sql"}, Seeds: []string{"seed.sql"}, Tables: []Table{{ID: "documents", Schema: "public", Name: "documents", Keys: []string{"id"}, Fields: []string{"body", "metadata", "embedding"}, AllowCreate: true, MaxRecords: 10}}}
 	cfg.Defaults()
+	cfg.MaxConnections = 2
 	e := &Engine{ID: "database", Config: cfg, Root: filepath.Join(root, "engine"), Bin: os.Getenv("INTERCEPTOR_TEST_POSTGRES_BIN"), Recorder: rec, Journal: journal, Blobs: blobs}
 	if err = e.Start(ctx, root, nil); err != nil {
 		t.Fatal(err)
@@ -104,7 +105,7 @@ func TestNativePostgreSQL(t *testing.T) {
 		t.Cleanup(func() { conn.Close(context.Background()) })
 		return conn
 	}
-	a, b := connect(), connect()
+	a := connect()
 	for _, mode := range []string{"wrong-password", "wrong-hostname", "management-role"} {
 		bad := a.Config().Copy()
 		bad.TLSConfig = bad.TLSConfig.Clone()
@@ -121,6 +122,20 @@ func TestNativePostgreSQL(t *testing.T) {
 			conn.Close(ctx)
 			t.Fatalf("accepted %s", mode)
 		}
+	}
+	b := connect()
+	if extra, x := pgx.ConnectConfig(ctx, a.Config().Copy()); x == nil {
+		extra.Close(ctx)
+		t.Fatal("connection ceiling ignored")
+	}
+	queryDone := make(chan error, 1)
+	go func() { _, err := a.Exec(ctx, "SELECT pg_sleep(10)"); queryDone <- err }()
+	time.Sleep(100 * time.Millisecond)
+	if err = a.PgConn().CancelRequest(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = <-queryDone; err == nil {
+		t.Fatal("full-pool cancellation did not cancel query")
 	}
 	var body string
 	if err = a.QueryRow(ctx, "SELECT body FROM documents WHERE id=$1", "one").Scan(&body); err != nil || body != "benign" {

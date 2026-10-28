@@ -2,6 +2,7 @@ package postgresql
 
 import (
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
@@ -30,6 +31,7 @@ type Proxy struct {
 	mu         sync.Mutex
 	clients    map[net.Conn]bool
 	keys       map[uint32][]byte
+	active     int
 	next       atomic.Uint64
 	wg         sync.WaitGroup
 }
@@ -54,7 +56,7 @@ func (p *Proxy) Start(address string) error {
 				return
 			}
 			p.mu.Lock()
-			if len(p.clients) >= p.Engine.Config.MaxConnections {
+			if len(p.clients) >= p.Engine.Config.MaxConnections+8 {
 				p.mu.Unlock()
 				c.Close()
 				continue
@@ -138,6 +140,9 @@ func (p *Proxy) serve(raw net.Conn) error {
 	if err != nil {
 		return err
 	}
+	if request, ok := start.(*pgproto3.CancelRequest); ok {
+		return p.cancel(request)
+	}
 	startup, ok := start.(*pgproto3.StartupMessage)
 	if !ok {
 		return fatal(c, errors.New("unsupported PostgreSQL startup"))
@@ -151,6 +156,17 @@ func (p *Proxy) serve(raw net.Conn) error {
 	if !allowed || startup.Parameters["database"] != p.Engine.Config.Database || startup.Parameters["replication"] != "" {
 		return fatal(c, errors.New("undeclared PostgreSQL role, database, or replication connection"))
 	}
+	// Reserve native application slots after startup, retaining bounded
+	// handshake headroom for cancellation even when the pool is full.
+	p.mu.Lock()
+	if p.active >= p.Engine.Config.MaxConnections {
+		p.mu.Unlock()
+		_ = send(c, &pgproto3.ErrorResponse{Severity: "FATAL", Code: "53300", Message: "PostgreSQL max_connections reached; reduce pool size or increase the Blueprint limit"})
+		return errors.New("PostgreSQL max_connections reached")
+	}
+	p.active++
+	p.mu.Unlock()
+	defer func() { p.mu.Lock(); p.active--; p.mu.Unlock() }()
 	upstream, err := net.DialTimeout("unix", p.Engine.socket()+"/.s.PGSQL.5432", 5*time.Second)
 	if err != nil {
 		return fatal(c, errors.New("private PostgreSQL is unavailable"))
@@ -238,7 +254,7 @@ func (p *Proxy) cancel(request *pgproto3.CancelRequest) error {
 	p.mu.Lock()
 	key, ok := p.keys[request.ProcessID]
 	p.mu.Unlock()
-	if !ok || string(key) != string(request.SecretKey) {
+	if !ok || subtle.ConstantTimeCompare(key, request.SecretKey) != 1 {
 		return errors.New("unknown PostgreSQL cancellation key")
 	}
 	c, err := net.DialTimeout("unix", p.Engine.socket()+"/.s.PGSQL.5432", time.Second)
