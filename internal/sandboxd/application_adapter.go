@@ -159,6 +159,10 @@ func (s *Server) adapterHandler(invoke func(context.Context, applicationInvocati
 		result, err := invoke(ctx, applicationInvocation{TurnID: invocationID, Operation: operationID, Body: body, MediaType: request.Header.Get("Content-Type")})
 		if err != nil {
 			s.recordDirectInvocation(invocationID, operationID, 0, nil, err)
+			if evidenceErr := s.evidenceError(); evidenceErr != nil {
+				writeError(writer, 507, "evidence_storage_error", evidenceErr.Error())
+				return
+			}
 			writeError(writer, http.StatusBadGateway, "application_error", err.Error())
 			return
 		}
@@ -454,27 +458,6 @@ func (a *httpApplicationAdapter) Handler() http.Handler {
 		}
 		capture.publish(writer)
 	})
-}
-
-type statusResponseWriter struct {
-	http.ResponseWriter
-	status      int
-	wroteHeader bool
-}
-
-func (w *statusResponseWriter) WriteHeader(status int) {
-	if w.wroteHeader {
-		return
-	}
-	w.wroteHeader = true
-	w.status = status
-	w.ResponseWriter.WriteHeader(status)
-}
-
-func (w *statusResponseWriter) Flush() {
-	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
-		flusher.Flush()
-	}
 }
 
 func (s *Server) recordDirectInvocation(id, operation string, code int, body []byte, invocationError error) {

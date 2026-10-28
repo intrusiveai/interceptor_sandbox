@@ -352,3 +352,16 @@ func TestApplicationCannotHideEvidenceFailure(t *testing.T) {
 		t.Fatal(w.Code, calls.Load())
 	}
 }
+
+func TestDirectApplicationErrorCannotHideCaptureFailure(t *testing.T) {
+	s, _ := nativeOperationServer(t)
+	handler := s.adapterHandler(func(context.Context, applicationInvocation) (applicationResult, error) {
+		s.recorder.Fail(errors.New("response capture failed"))
+		return applicationResult{}, errors.New("application caught HTTP 507")
+	})
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest("POST", "/operations/invoke", strings.NewReader("hello")))
+	if w.Code != 507 || !strings.Contains(w.Body.String(), `"code":"evidence_storage_error"`) {
+		t.Fatal(w.Code, w.Body)
+	}
+}
