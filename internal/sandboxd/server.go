@@ -212,7 +212,16 @@ func New() (*Server, error) {
 		return nil, err
 	}
 	journal.SetFailureHandler(recorder.Fail)
-	blobs, err := blobstore.Open(containerBlobs, report.Blueprint.Limits.MaxBlobBytes)
+	blobRoot := containerBlobs
+	for _, service := range report.Blueprint.Services {
+		if service.Kind == "postgresql" {
+			// Database wrappers put mounts beneath a native, private ancestor.
+			// Open its real directory; blobstore intentionally rejects aliases.
+			blobRoot = "/run/interceptor-private/interceptor-blobs"
+			break
+		}
+	}
+	blobs, err := blobstore.Open(blobRoot, report.Blueprint.Limits.MaxBlobBytes)
 	if err != nil {
 		journal.Close()
 		recorder.Close()
