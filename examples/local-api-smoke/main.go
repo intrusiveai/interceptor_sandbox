@@ -170,6 +170,7 @@ func evidence(output, id string, maximum int64) {
 }
 func main() {
 	output := flag.String("output", "", "directory for evidence and result JSON")
+	stateSnapshots := flag.Bool("state-snapshots", false, "qualify packaged application state snapshot and restore")
 	commandOnly := flag.Bool("command-only", false, "qualify a minimal command target's echo operation without snapshots or model calls")
 	adapterOnly := flag.Bool("adapter-only", false, "qualify the stateful invocation-adapter example without snapshots or model calls")
 	maximumEvidence := flag.Int64("evidence-max-bytes", evidencepolicy.DefaultMaxBytes, "local evidence archive acceptance ceiling")
@@ -189,6 +190,10 @@ func main() {
 	must(limitErr)
 	limit := min(*maximumEvidence, attached.EvidenceMaxBytes)
 	first := attached.Binding
+	if *stateSnapshots {
+		qualifyStateSnapshots(first, *output, limit)
+		return
+	}
 	if *adapterOnly {
 		qualifyAdapter(first, *output, limit)
 		return

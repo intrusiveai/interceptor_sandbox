@@ -165,6 +165,17 @@ jobs:
           python3 scripts/qualify_release.py --archive "dist/archives/interceptor_sandbox-v${RELEASE_VERSION}-linux_${ARCH}.tar.gz" \
             --version "$RELEASE_VERSION" --source "$GITHUB_SHA" --adapter-language node \
             --image node:22-bookworm-slim --client "$RUNNER_TEMP/local-api-smoke" --output dist/qualification/node-adapter
+      - name: Qualify application state snapshots from the downloaded archive
+        env:
+          ARCH: ${{ matrix.arch }}
+          RELEASE_VERSION: ${{ needs.context.outputs.version }}
+        run: |
+          python3 scripts/qualify_release.py --archive "dist/archives/interceptor_sandbox-v${RELEASE_VERSION}-linux_${ARCH}.tar.gz" \
+            --version "$RELEASE_VERSION" --source "$GITHUB_SHA" --adapter-language python --state-snapshots \
+            --image python:3.12-slim --client "$RUNNER_TEMP/local-api-smoke" --output dist/qualification/python-state
+          python3 scripts/qualify_release.py --archive "dist/archives/interceptor_sandbox-v${RELEASE_VERSION}-linux_${ARCH}.tar.gz" \
+            --version "$RELEASE_VERSION" --source "$GITHUB_SHA" --adapter-language node --state-snapshots \
+            --image node:22-bookworm-slim --client "$RUNNER_TEMP/local-api-smoke" --output dist/qualification/node-state
       - name: Qualify remote embeddings with SDK clients from the downloaded archive
         env:
           ARCH: ${{ matrix.arch }}

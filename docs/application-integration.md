@@ -180,6 +180,15 @@ All information that must survive a restart needs to be written under
 `mutable_roots`. Information held only in memory, `/tmp`, an undeclared folder,
 an open connection, or an external service is not included in a snapshot.
 
+For a Python or Node application that keeps its conversation in memory, a
+separately packaged [state adapter](application-interfaces.md#saving-and-restoring-application-state)
+can export that context and reconstruct it after restart. This does not require
+a framework checkpointer. It does require an application-specific inventory of
+messages, identity, safeguards, and any other state needed for continuation.
+Initialization and restore must not replay business operations. Full support
+must be demonstrated by comparing continued execution before and after restore;
+merely configuring methods is not sufficient.
+
 Before taking a snapshot, Interceptor asks the application to finish or save any
 work that is still in progress. This is called **quiescence**. Declare one way
 for Interceptor to request that safe stopping point:

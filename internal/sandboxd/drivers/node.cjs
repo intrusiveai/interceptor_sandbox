@@ -37,10 +37,28 @@ function send(type, fields = {}) {
         if (typeof target[cfg.invoke] !== 'function') throw new TypeError('configured invoke method is not callable');
         const invoke = target[cfg.invoke].bind(target);
         const input = readline.createInterface({input: process.stdin});
+        let store, save;
+        if (cfg.state) {
+            stage = 'validate state methods';
+            if (typeof target[cfg.state.save] !== 'function' || typeof target[cfg.state.restore] !== 'function')
+                throw new Error('configured state methods must be callable');
+            save = target[cfg.state.save].bind(target);
+            store = createStateStore(cfg.state);
+            if (process.env.INTERCEPTOR_STATE_RESTORE === 'true') {
+                stage = 'restore application state';
+                await target[cfg.state.restore](store.load());
+            }
+        }
         send('ready');
         for await (const line of input) {
             const frame = JSON.parse(line);
             if (frame.type === 'close') { input.close(); break; }
+            if (frame.type === 'save_state' && store) {
+                await Promise.all(active);
+                try { store.save(await save()); send('state_saved', {id: frame.id}); }
+                catch (error) { send('state_saved', {id: frame.id, error: 'save application state: ' + String(error.message || error)}); }
+                continue;
+            }
             if (frame.type !== 'invoke') continue;
             const task = (async () => {
                 try { send('result', {id: frame.id, output: await invoke(frame.input)}); }

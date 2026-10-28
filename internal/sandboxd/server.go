@@ -564,6 +564,10 @@ func (s *Server) startModelProxy() error {
 
 func (s *Server) startHostBridge(ctx context.Context) error {
 	appHandler := s.trackActivity(s.adapter.Handler())
+	if a, ok := s.adapter.(*protocolApplicationAdapter); ok && a.stateEnabled() {
+		// State adapters admit the entire request before acquiring activity locks.
+		appHandler = s.adapter.Handler()
+	}
 	controlHandler := s.controlHandler()
 	if s.metadata.BridgeTransport == "unix" {
 		if err := s.serveUnix(filepath.Join(s.paths.Sockets, "application.sock"), appHandler); err != nil {
@@ -751,6 +755,17 @@ func (s *Server) bumpRevision() {
 }
 
 func (s *Server) turnHandler(writer http.ResponseWriter, request *http.Request) {
+	if a, ok := s.adapter.(*protocolApplicationAdapter); ok && a.stateEnabled() {
+		ctx, cancel := context.WithTimeout(request.Context(), s.turnTimeout())
+		defer cancel()
+		release, err := a.lockState(ctx)
+		if err != nil {
+			writeError(writer, http.StatusRequestTimeout, "application_busy", err.Error())
+			return
+		}
+		defer release()
+		request = request.WithContext(context.WithValue(ctx, stateInvocationKey{}, a))
+	}
 	s.activityMu.RLock()
 	defer s.activityMu.RUnlock()
 	s.metadataMu.RLock()
@@ -1234,6 +1249,13 @@ func (s *Server) resolveInjectionFile(selector injection.Selector) (string, stri
 		}
 		containerPath = pathpkg.Join(namespace.Root, selector.RelativePath)
 	}
+	if code := s.blueprint.Application.Interface.Code; code != nil && code.State != nil {
+		clean := pathpkg.Clean(containerPath)
+		state := code.State.Path
+		if clean == state || strings.HasPrefix(state, clean+"/") || strings.HasPrefix(clean, state+"/") {
+			return "", "", nil, false
+		}
+	}
 	hostPath, ok := resolveMutablePath(s.containerRoots(), containerPath)
 	return containerPath, hostPath, namespace, ok
 }
@@ -1345,9 +1367,33 @@ func (s *Server) createSnapshotHandler(writer http.ResponseWriter, request *http
 }
 
 func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommittedBytes snapshot.ByteAllowance, checkpointMetadata snapshot.Metadata) (snapshot.Checkpoint, error) {
-	s.controlMu.Lock()
+	stateAdapter, hasState := s.adapter.(*protocolApplicationAdapter)
+	hasState = hasState && stateAdapter.stateEnabled()
+	if hasState {
+		timeout := time.Duration(s.blueprint.Application.Persistence.Quiesce.TimeoutMS) * time.Millisecond
+		if timeout <= 0 {
+			timeout = 5 * time.Second
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	// Drain invocations before taking the service/activity lock: a running
+	// turn may still need to call a managed service or the model proxy.
+	if hasState {
+		release, err := stateAdapter.lockState(ctx)
+		if err != nil {
+			return snapshot.Checkpoint{}, err
+		}
+		defer release()
+	}
+	if err := lockContext(ctx, s.controlMu.TryLock); err != nil {
+		return snapshot.Checkpoint{}, err
+	}
 	defer s.controlMu.Unlock()
-	s.activityMu.Lock()
+	if err := lockContext(ctx, s.activityMu.TryLock); err != nil {
+		return snapshot.Checkpoint{}, err
+	}
 	defer s.activityMu.Unlock()
 	if !s.blueprint.Application.Persistence.SnapshotCapable {
 		return snapshot.Checkpoint{}, errors.New("application is not snapshot capable")
@@ -1377,6 +1423,11 @@ func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommit
 	}()
 	if err := s.quiesce(ctx); err != nil {
 		return snapshot.Checkpoint{}, err
+	}
+	if hasState {
+		if err := stateAdapter.saveState(ctx); err != nil {
+			return snapshot.Checkpoint{}, err
+		}
 	}
 	if err := s.recorder.Flush(); err != nil {
 		return snapshot.Checkpoint{}, err

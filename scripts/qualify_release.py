@@ -27,7 +27,9 @@ from publish_release import read_archive
 from build_release import ARCHIVE_ROOT
 
 
-def qualify(archive, version, source, base_image, output, client, adapter_language=None, embeddings=False, python_ca=False):
+def qualify(archive, version, source, base_image, output, client, adapter_language=None, embeddings=False, python_ca=False, state_snapshots=False):
+    if state_snapshots and (not adapter_language or embeddings or python_ca):
+        raise ValueError("state snapshots require an adapter language and no other qualification mode")
     if python_ca and (adapter_language != "python" or embeddings):
         raise ValueError("Python CA qualification requires --adapter-language python and no --embeddings")
     if embeddings and adapter_language != "python":
@@ -47,7 +49,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
     suffix = uuid.uuid4().hex
     target, wrapper = "interceptor-release-target:"+suffix, "interceptor-release-wrapper:"+suffix
     inspection = "interceptor-release-check-"+suffix
-    with (EmbeddingFixture() if embeddings else nullcontext()) as fixture, tempfile.TemporaryDirectory(prefix="interceptor-release-qa-") as temporary:
+    with (EmbeddingFixture() if (embeddings or state_snapshots) else nullcontext()) as fixture, tempfile.TemporaryDirectory(prefix="interceptor-release-qa-") as temporary:
         work = Path(temporary).resolve()
         install, outside, bin_dir = (work / name for name in ("install", "outside", "bin"))
         for directory in (install, outside, bin_dir): directory.mkdir()
@@ -79,7 +81,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
         process = None
         try:
             target_id = base["Id"]
-            example = Path(__file__).resolve().parents[1] / ("examples/python-ca" if python_ca else "examples/remote-embeddings" if embeddings else "examples/invocation-adapters") / (adapter_language or "")
+            example = Path(__file__).resolve().parents[1] / ("examples/application-state-snapshots" if state_snapshots else "examples/python-ca" if python_ca else "examples/remote-embeddings" if embeddings else "examples/invocation-adapters") / (adapter_language or "")
             if adapter_language:
                 context = work / "target"
                 shutil.copytree(example / "target", context)
@@ -182,7 +184,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                     if any(m["Destination"] == "/app" or m["Destination"].startswith("/app/") for m in mounts):
                         raise ValueError("application/adapter source is mounted instead of installed")
                     (output / "mounts.json").write_text(json.dumps(mounts, indent=2)+"\n")
-                run(str(client), "--adapter-only" if adapter_language else "--command-only", "--output", str(output / "native"))
+                run(str(client), "--state-snapshots" if state_snapshots else "--adapter-only" if adapter_language else "--command-only", "--output", str(output / "native"))
                 native = json.loads((output / "native/result.json").read_text())
                 if not native["passed"] or native["session_id"] != session["id"]:
                     raise ValueError("native qualification did not pass for this session")
@@ -190,7 +192,8 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                 if process.wait(timeout=30) != 0:
                     raise RuntimeError("release shutdown failed: " + (output / "run.log").read_text())
                 process = None
-            run(cli, "logs", "verify", session["id"])
+            for verified_session in native.get("sessions", [session["id"]]):
+                run(cli, "logs", "verify", verified_session)
             result = {"platform": host, "source_commit": source, "version": version,
                       "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
                       "container_binary_sha256": expected, "go_available": False,
@@ -198,7 +201,8 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
             if adapter_language:
                 logs = list((work / "data").rglob("application.*.log"))
                 diagnostics = "\n".join(p.read_text() for p in logs)
-                if diagnostics.count("application initialized") != 1 or diagnostics.count("application closed") != 1:
+                expected_processes = 3 if state_snapshots else 1
+                if diagnostics.count("application initialized") != expected_processes or diagnostics.count("application closed") != expected_processes:
                     raise ValueError("application did not initialize/close exactly once: " + diagnostics)
                 (output / "application.log").write_text(diagnostics)
                 runtime = "/usr/local/bin/python3" if adapter_language == "python" else "/usr/local/bin/node"
@@ -207,7 +211,17 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                               target_image=target_id, wrapper_image=lock["wrapper_digest"])
             if python_ca:
                 result['python_ca'] = dict(images=trust_checks, **python_ca_fixture.verify_evidence(output, diagnostics))
-            if fixture:
+            if state_snapshots:
+                if fixture.failures: raise ValueError(fixture.failures)
+                requests = [c['request'] for c in fixture.calls]
+                if len(requests) != 9 or requests[2] != requests[4] or requests[3] != requests[5]:
+                    raise ValueError('restored model requests differ from uninterrupted context')
+                if len(requests[-1]['messages']) <= len(requests[4]['messages']):
+                    raise ValueError('conversation did not continue after restore')
+                (output / 'model-requests.json').write_text(json.dumps(requests, indent=2)+'\n')
+                result['state_snapshots'] = {'model_requests': len(requests), 'identical_continuation': True, 'restores': 2,
+                                             'sessions': native['sessions'], 'live_provider': False}
+            elif fixture:
                 result['embeddings'] = fixture.verify(output)
             (output / "result.json").write_text(json.dumps(result, indent=2)+"\n")
             print(json.dumps(result))
@@ -236,5 +250,6 @@ if __name__ == "__main__":
     parser.add_argument("--adapter-language", choices=("python", "node"), help="qualify the separately installed adapter example using the supplied runtime image")
     parser.add_argument("--embeddings", action="store_true", help="qualify remote embeddings with pinned OpenAI/LangChain clients and separate host fixtures")
     parser.add_argument("--python-ca", action="store_true", help="qualify declared Python Certifi stores with unchanged HTTPX clients")
+    parser.add_argument("--state-snapshots", action="store_true", help="qualify application context and sandbox restore with packaged Python or Node adapters")
     args = parser.parse_args()
-    qualify(args.archive.resolve(), args.version, args.source, args.image, args.output, args.client.resolve(), args.adapter_language, args.embeddings, args.python_ca)
+    qualify(args.archive.resolve(), args.version, args.source, args.image, args.output, args.client.resolve(), args.adapter_language, args.embeddings, args.python_ca, args.state_snapshots)

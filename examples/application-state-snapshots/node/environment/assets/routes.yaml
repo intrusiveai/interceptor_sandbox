@@ -1,0 +1,12 @@
+routes:
+  - id: read-counter
+    method: GET
+    path: /records/{id}
+    action: get
+    collection: records
+  - id: change-counter
+    method: PATCH
+    path: /records/{id}
+    action: patch
+    collection: records
+    patch_fields: [count]
