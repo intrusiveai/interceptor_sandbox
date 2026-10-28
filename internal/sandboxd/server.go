@@ -1071,10 +1071,12 @@ func (s *Server) fidelityMutation(ctx context.Context, definition injection.Defi
 			return nil, nil, err
 		}
 		return nil, func() error {
+			s.databaseOracleMu.Lock()
+			defer s.databaseOracleMu.Unlock()
 			if err := db.Mutate(ctx, definition); err != nil {
 				return err
 			}
-			return s.captureDatabaseOracles(ctx, selector.Service, "harness")
+			return s.captureDatabaseOraclesLocked(ctx, selector.Service, "harness")
 		}, nil
 	}
 	if selector.Service != "" {

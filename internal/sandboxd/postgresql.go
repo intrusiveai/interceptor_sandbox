@@ -85,6 +85,9 @@ func (s *Server) startDatabase(def environment.Service) error {
 func (s *Server) captureDatabaseOracles(ctx context.Context, service, source string) error {
 	s.databaseOracleMu.Lock()
 	defer s.databaseOracleMu.Unlock()
+	return s.captureDatabaseOraclesLocked(ctx, service, source)
+}
+func (s *Server) captureDatabaseOraclesLocked(ctx context.Context, service, source string) error {
 	e := s.databases[service]
 	if e == nil {
 		return errors.New("database oracle service unavailable")

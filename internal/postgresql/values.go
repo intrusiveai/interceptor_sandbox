@@ -170,18 +170,31 @@ func cursorName(t string) string {
 	}
 	return strings.ToLower(t)
 }
-func (s *connection) cursorQuery(sql string) string {
+
+type cursor struct {
+	sql        string
+	parameters *portal
+}
+
+func (s *connection) cursorQuery(sql string, execution ...*execution) string {
 	t, err := sqlTokens(sql)
 	if err != nil || len(t) == 0 {
 		return sql
 	}
 	if strings.EqualFold(t[0], "DECLARE") && len(t) > 3 {
-		s.cursors[cursorName(t[1])] = sql
+		var bound *portal
+		if len(execution) > 0 {
+			bound = execution[0].portal
+		}
+		s.cursors[cursorName(t[1])] = cursor{sql: sql, parameters: bound}
 	}
 	if strings.EqualFold(t[0], "FETCH") {
 		for i := len(t) - 1; i >= 1; i-- {
 			if q, ok := s.cursors[cursorName(t[i])]; ok {
-				return q
+				if len(execution) > 0 {
+					execution[0].origin = q.parameters
+				}
+				return q.sql
 			}
 		}
 	}

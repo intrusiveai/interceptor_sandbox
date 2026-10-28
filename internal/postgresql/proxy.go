@@ -260,6 +260,7 @@ type execution struct {
 	kind      byte
 	sql       string
 	portal    *portal
+	origin    *portal
 	statement *statement
 	ctx       context.Context
 	done      func()
@@ -284,11 +285,18 @@ type connection struct {
 	mu         sync.Mutex
 	statements map[string]*statement
 	portals    map[string]*portal
-	cursors    map[string]string
+	cursors    map[string]cursor
 }
 
 func newConnection(p *Proxy, id uint64) *connection {
-	return &connection{p: p, id: id, statements: map[string]*statement{}, portals: map[string]*portal{}, cursors: map[string]string{}}
+	return &connection{p: p, id: id, statements: map[string]*statement{}, portals: map[string]*portal{}, cursors: map[string]cursor{}}
+}
+func cloneFields(fields []pgproto3.FieldDescription) []pgproto3.FieldDescription {
+	copied := append([]pgproto3.FieldDescription(nil), fields...)
+	for i := range copied {
+		copied[i].Name = append([]byte(nil), copied[i].Name...)
+	}
+	return copied
 }
 func cloneBytes(v [][]byte) [][]byte {
 	r := make([][]byte, len(v))
@@ -414,12 +422,12 @@ func (s *connection) forward(ctx context.Context, b *pgproto3.Backend, up net.Co
 			r.id = s.next
 			s.mu.Lock()
 			if r.kind != 'S' {
-				saved := make(map[string]string, len(s.cursors))
+				saved := make(map[string]cursor, len(s.cursors))
 				for k, v := range s.cursors {
 					saved[k] = v
 				}
 				r.undo = func() { s.cursors = saved }
-				r.sql = s.cursorQuery(r.sql)
+				r.sql = s.cursorQuery(r.sql, r)
 			}
 			s.mu.Unlock()
 			raw, _ := msg.Encode(nil)
@@ -505,7 +513,7 @@ func (s *connection) responses(ctx context.Context, f *pgproto3.Frontend, c net.
 			resultIndex = 0
 			if r.portal != nil && r.portal.statement != nil {
 				s.mu.Lock()
-				fields = append([]pgproto3.FieldDescription(nil), r.portal.statement.columns...)
+				fields = cloneFields(r.portal.statement.columns)
 				s.mu.Unlock()
 				for i := range fields {
 					formats := r.portal.resultFormats
@@ -537,7 +545,7 @@ func (s *connection) responses(ctx context.Context, f *pgproto3.Frontend, c net.
 		complete := false
 		switch v := m.(type) {
 		case *pgproto3.RowDescription:
-			fields = append([]pgproto3.FieldDescription(nil), v.Fields...)
+			fields = cloneFields(v.Fields)
 			if r.kind == 'D' {
 				s.mu.Lock()
 				if r.statement != nil {
@@ -654,17 +662,21 @@ func (s *connection) releaseRows(r *execution, c net.Conn, fields []pgproto3.Fie
 	}
 	candidate := map[string]any{"rows": values}
 	params := []any{}
-	if r.portal != nil {
-		for i, b := range r.portal.params {
+	bound := r.portal
+	if r.origin != nil {
+		bound = r.origin
+	}
+	if bound != nil {
+		for i, b := range bound.params {
 			format := int16(0)
-			if len(r.portal.formats) == 1 {
-				format = r.portal.formats[0]
-			} else if i < len(r.portal.formats) {
-				format = r.portal.formats[i]
+			if len(bound.formats) == 1 {
+				format = bound.formats[0]
+			} else if i < len(bound.formats) {
+				format = bound.formats[i]
 			}
 			var oid uint32
-			if r.portal.statement != nil && i < len(r.portal.statement.types) {
-				oid = r.portal.statement.types[i]
+			if bound.statement != nil && i < len(bound.statement.types) {
+				oid = bound.statement.types[i]
 			}
 			var value any = string(b)
 			if b == nil {

@@ -23,24 +23,25 @@ import (
 // Engine state and its Unix socket are under a supervisor-only directory. The
 // application has no connection path except Proxy; no backend TCP is enabled.
 type Engine struct {
-	ID       string
-	Config   Config
-	Root     string
-	Bin      string
-	Blobs    *blobstore.Store
-	Recorder *recording.Writer
-	Journal  *statejournal.Writer
-	command  *exec.Cmd
-	done     chan error
-	Failure  func(error)
-	stop     chan struct{}
-	stopOnce sync.Once
-	admin    *pgx.Conn
-	adminMu  sync.Mutex
-	gate     sync.RWMutex
+	ID        string
+	Config    Config
+	Root      string
+	Bin       string
+	Blobs     *blobstore.Store
+	Recorder  *recording.Writer
+	Journal   *statejournal.Writer
+	command   *exec.Cmd
+	done      chan error
+	Failure   func(error)
+	stop      chan struct{}
+	stopOnce  sync.Once
+	socketDir string
+	admin     *pgx.Conn
+	adminMu   sync.Mutex
+	gate      sync.RWMutex
 }
 
-func (e *Engine) socket() string { return filepath.Join(e.Root, "socket") }
+func (e *Engine) socket() string { return e.socketDir }
 func (e *Engine) connection(ctx context.Context, role string) (*pgx.Conn, error) {
 	c, err := pgx.ParseConfig("")
 	if err != nil {
@@ -72,9 +73,17 @@ func (e *Engine) Start(ctx context.Context, assets string, restore *statejournal
 	if e.Recorder == nil || e.Blobs == nil || e.Journal == nil {
 		return errors.New("database requires native evidence sinks")
 	}
-	if len(e.socket()) > 90 {
-		return errors.New("database Unix socket path exceeds supported length")
+	// macOS Docker bind mounts cannot chmod Unix sockets. Keep the private
+	// socket on the container filesystem, outside the host-mounted data tree.
+	e.socketDir, err = os.MkdirTemp("/tmp", "interceptor-pg-")
+	if err != nil {
+		return err
 	}
+	defer func() {
+		if err != nil {
+			e.Close()
+		}
+	}()
 	if err = os.MkdirAll(e.Root, 0700); err != nil {
 		return err
 	}
@@ -83,9 +92,6 @@ func (e *Engine) Start(ctx context.Context, assets string, restore *statejournal
 	}
 	if _, err = os.Stat(filepath.Join(e.Root, "data")); err == nil {
 		return errors.New("database runtime already exists; refusing implicit reuse")
-	}
-	if err = os.Mkdir(e.socket(), 0700); err != nil {
-		return err
 	}
 	init := e.commandFor(ctx, "initdb", "-D", filepath.Join(e.Root, "data"), "-U", "interceptor_admin", "--auth-local=trust", "--auth-host=reject", "--encoding=UTF8", "--locale=C")
 	if out, x := init.CombinedOutput(); x != nil {
@@ -123,11 +129,6 @@ func (e *Engine) Start(ctx context.Context, assets string, restore *statejournal
 			}
 		}
 	}()
-	defer func() {
-		if err != nil {
-			e.Close()
-		}
-	}()
 	// The application database does not exist during initial readiness.
 	name := e.Config.Database
 	e.Config.Database = "postgres"
@@ -139,7 +140,8 @@ func (e *Engine) Start(ctx context.Context, assets string, restore *statejournal
 		}
 		if time.Now().After(deadline) || ctx.Err() != nil {
 			e.Config.Database = name
-			return fmt.Errorf("PostgreSQL readiness: %w", err)
+			diagnostics, _ := os.ReadFile(filepath.Join(e.Root, "postgres.log"))
+			return fmt.Errorf("PostgreSQL readiness: %w: %s", err, diagnostics)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -284,6 +286,11 @@ func (e *Engine) Record(ctx context.Context, kind string, provenance recording.P
 	return err
 }
 func (e *Engine) Close() error {
+	defer func() {
+		if e.socketDir != "" {
+			_ = os.RemoveAll(e.socketDir)
+		}
+	}()
 	e.stopOnce.Do(func() {
 		if e.stop != nil {
 			close(e.stop)
