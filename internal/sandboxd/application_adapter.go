@@ -1156,6 +1156,7 @@ func (a *protocolApplicationAdapter) Invoke(ctx context.Context, invocation appl
 	a.pending[id] = channel
 	a.pendingMu.Unlock()
 	defer func() { a.pendingMu.Lock(); delete(a.pending, id); a.pendingMu.Unlock() }()
+	invocation.TurnID = id
 	finishWindow, windowErr := a.server.beginInvocation(ctx, invocation)
 	if windowErr != nil {
 		return applicationResult{}, windowErr

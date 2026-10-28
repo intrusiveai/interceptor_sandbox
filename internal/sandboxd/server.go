@@ -1751,7 +1751,9 @@ func (s *Server) Close(ctx context.Context) error {
 		_ = session.Save(s.paths.Metadata, s.metadata)
 		s.metadataMu.Unlock()
 		_, _ = s.recorder.Append(recording.Draft{Channel: recording.Control, Layer: "sandboxd", Kind: "session_stopped", Provenance: recording.SandboxControl, Semantic: map[string]any{}})
-		result = errors.Join(result, s.recorder.Close(), s.journal.Close())
+		closeErr := errors.Join(s.recorder.Close(), s.journal.Close())
+		s.recorder.Fail(closeErr)
+		result = errors.Join(result, closeErr, s.evidenceError())
 	})
 	return result
 }

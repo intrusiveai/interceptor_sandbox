@@ -63,15 +63,18 @@ func (s *Server) observeRequest(ctx context.Context) (context.Context, func()) {
 		s.windows.pending[observation.TurnID]++
 	}
 	s.windows.mu.Unlock()
+	var once sync.Once
 	return recording.WithObservation(ctx, observation), func() {
-		s.windows.mu.Lock()
-		defer s.windows.mu.Unlock()
-		if observation.TurnID != "" {
-			s.windows.pending[observation.TurnID]--
-			if s.windows.pending[observation.TurnID] == 0 {
-				delete(s.windows.pending, observation.TurnID)
+		once.Do(func() {
+			s.windows.mu.Lock()
+			defer s.windows.mu.Unlock()
+			if observation.TurnID != "" {
+				s.windows.pending[observation.TurnID]--
+				if s.windows.pending[observation.TurnID] == 0 {
+					delete(s.windows.pending, observation.TurnID)
+				}
 			}
-		}
+		})
 	}
 }
 
@@ -183,6 +186,7 @@ func (s *Server) observedHandler(next http.Handler, serviceID string) http.Handl
 				writeError(writer, 507, "evidence_storage_error", err.Error())
 				return
 			}
+			finish() // Required capture is complete before exposing the response.
 			capture.publish(writer)
 		})).ServeHTTP(writer, request.WithContext(ctx))
 	})

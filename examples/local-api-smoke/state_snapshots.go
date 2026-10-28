@@ -114,11 +114,10 @@ func qualifyEvidenceFailure(binding localapi.Binding, a adaptive.AttemptContext,
 	require(next.Status >= 400, "next turn admitted after evidence failure")
 	snap := operation(binding, "snapshot.create", map[string]string{"label": "incomplete"}, nil)
 	require(snap.Status >= 400, "snapshot admitted after evidence failure")
-	// The failed third turn remains available even though its native completion
-	// event could not be written. Evidence collection must be reported partial.
-	var view adaptive.ObservationView
-	must(json.Unmarshal(success(operation(binding, "observation.read", adaptive.ObservationRequest{TurnID: "turn-2"}, &a)), &view))
-	require(view.CollectionState == "partial", "failed turn feedback claims completeness")
+	// Terminal host reporting retains existing receipts. A failed turn without
+	// a retained receipt must explicitly report unavailable evidence.
+	feedback := operation(binding, "observation.read", adaptive.ObservationRequest{TurnID: "turn-2"}, &a)
+	require(feedback.Status == 503 && strings.Contains(string(feedback.Body), "evidence_storage_error"), fmt.Sprintf("failed feedback not unavailable: %d %s", feedback.Status, feedback.Body))
 	raw, err := os.ReadFile(paths.Metadata)
 	must(err)
 	require(strings.Contains(string(raw), "evidence_incomplete"), "session failure not persisted")

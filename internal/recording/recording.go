@@ -121,13 +121,13 @@ func Open(path, sessionID string) (*Writer, error) {
 }
 
 func (w *Writer) Append(draft Draft) (eventResult Event, appendErr error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	defer func() {
 		if appendErr != nil {
 			w.Fail(appendErr)
 		}
 	}()
-	w.mu.Lock()
-	defer w.mu.Unlock()
 	if err := w.Err(); err != nil {
 		return Event{}, err
 	}
@@ -165,13 +165,13 @@ func (w *Writer) Append(draft Draft) (eventResult Event, appendErr error) {
 }
 
 func (w *Writer) Flush() (flushErr error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	defer func() {
 		if flushErr != nil {
 			w.Fail(flushErr)
 		}
 	}()
-	w.mu.Lock()
-	defer w.mu.Unlock()
 	if err := w.Err(); err != nil {
 		return err
 	}
