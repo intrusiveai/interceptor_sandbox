@@ -34,6 +34,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/identity"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/injection"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/postgresql"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/recording"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/services"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/session"
@@ -49,6 +50,11 @@ const (
 )
 
 type Server struct {
+	databases          map[string]*postgresql.Engine
+	databaseProxies    map[string]*postgresql.Proxy
+	databaseOracleMu   sync.Mutex
+	databaseOracleBase map[string]json.RawMessage
+
 	windows         executionWindows
 	feedbackMu      sync.Mutex
 	execution       *adaptive.ExecutionStore
@@ -206,7 +212,16 @@ func New() (*Server, error) {
 		return nil, err
 	}
 	journal.SetFailureHandler(recorder.Fail)
-	blobs, err := blobstore.Open(containerBlobs, report.Blueprint.Limits.MaxBlobBytes)
+	blobRoot := containerBlobs
+	for _, service := range report.Blueprint.Services {
+		if service.Kind == "postgresql" {
+			// Database wrappers put mounts beneath a native, private ancestor.
+			// Open its real directory; blobstore intentionally rejects aliases.
+			blobRoot = "/run/interceptor-private/interceptor-blobs"
+			break
+		}
+	}
+	blobs, err := blobstore.Open(blobRoot, report.Blueprint.Limits.MaxBlobBytes)
 	if err != nil {
 		journal.Close()
 		recorder.Close()
@@ -342,6 +357,11 @@ func (s *Server) startSyntheticServices() error {
 	for _, definition := range s.blueprint.Services {
 		var handler http.Handler
 		switch definition.Kind {
+		case "postgresql":
+			if err := s.startDatabase(definition); err != nil {
+				return err
+			}
+			continue
 		case "fixture_http":
 			fixtures, err := services.LoadFixtureSet(filepath.Join(containerEnvironment, definition.Fixtures))
 			if err != nil {
@@ -1055,6 +1075,19 @@ func (s *Server) fidelityMutation(ctx context.Context, definition injection.Defi
 		return nil, nil, nil
 	}
 	selector := definition.Selector
+	if db := s.databases[selector.Service]; db != nil {
+		if err := db.ValidateMutation(definition); err != nil {
+			return nil, nil, err
+		}
+		return nil, func() error {
+			s.databaseOracleMu.Lock()
+			defer s.databaseOracleMu.Unlock()
+			if err := db.Mutate(ctx, definition); err != nil {
+				return err
+			}
+			return s.captureDatabaseOraclesLocked(ctx, selector.Service, "harness")
+		}, nil
+	}
 	if selector.Service != "" {
 		handler := s.services[selector.Service]
 		if handler == nil {
@@ -1201,7 +1234,15 @@ func (s *Server) validateInjectionTarget(definition injection.Definition) error 
 	switch definition.Surface {
 	case "model_tool_result":
 		return nil
+	case "database_response":
+		if s.databases[definition.Selector.Service] == nil {
+			return errors.New("database response requires a PostgreSQL service")
+		}
+		return nil
 	case "service_response":
+		if s.databases[definition.Selector.Service] != nil {
+			return errors.New("PostgreSQL requires database_response surface")
+		}
 		for _, service := range s.blueprint.Services {
 			if service.ID == definition.Selector.Service {
 				return nil
@@ -1224,7 +1265,7 @@ func (s *Server) validateInjectionTarget(definition injection.Definition) error 
 		}
 		return errors.New("MCP result target is not a declared MCP service")
 	case "environment_state":
-		if definition.Selector.Service != "" && s.services[definition.Selector.Service] == nil {
+		if definition.Selector.Service != "" && s.services[definition.Selector.Service] == nil && s.databases[definition.Selector.Service] == nil {
 			return errors.New("environment state target is not a managed service")
 		}
 		if definition.Selector.FileNamespace != "" {
@@ -1461,6 +1502,13 @@ func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommit
 	if err := s.recorder.Flush(); err != nil {
 		return snapshot.Checkpoint{}, err
 	}
+	dbContext, dbCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer dbCancel()
+	databaseBackups, releaseDatabases, err := s.freezeDatabases(dbContext)
+	if err != nil {
+		return snapshot.Checkpoint{}, err
+	}
+	defer releaseDatabases()
 	roots := s.containerRoots()
 	first, err := s.scanMutable(ctx, roots)
 	if err != nil {
@@ -1480,6 +1528,12 @@ func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommit
 		return snapshot.Checkpoint{}, err
 	}
 	canonicalSize := int64(0)
+	for _, op := range databaseBackups {
+		if op.Size > allowance-canonicalSize {
+			return snapshot.Checkpoint{}, snapshot.ErrBytesExhausted
+		}
+		canonicalSize += op.Size
+	}
 	for _, entry := range current.Entries {
 		if entry.Type == "file" {
 			if entry.Size < 0 || entry.Size > allowance-canonicalSize {
@@ -1496,6 +1550,7 @@ func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommit
 	if err != nil {
 		return snapshot.Checkpoint{}, err
 	}
+	operations = append(operations, databaseBackups...)
 	if len(operations) > 0 {
 		if _, err := s.journal.Append("snapshot_filesystem_delta", operations); err != nil {
 			return snapshot.Checkpoint{}, err
@@ -1733,6 +1788,9 @@ func (s *Server) Close(ctx context.Context) error {
 		if s.helper != nil && s.helper.Process != nil {
 			_ = syscall.Kill(-s.helper.Process.Pid, syscall.SIGTERM)
 		}
+		for _, proxy := range s.databaseProxies {
+			result = errors.Join(result, proxy.Close())
+		}
 		for _, path := range s.identityFiles {
 			_ = os.Remove(path)
 		}
@@ -1751,6 +1809,9 @@ func (s *Server) Close(ctx context.Context) error {
 		_ = session.Save(s.paths.Metadata, s.metadata)
 		s.metadataMu.Unlock()
 		_, _ = s.recorder.Append(recording.Draft{Channel: recording.Control, Layer: "sandboxd", Kind: "session_stopped", Provenance: recording.SandboxControl, Semantic: map[string]any{}})
+		for _, db := range s.databases {
+			result = errors.Join(result, db.Close())
+		}
 		closeErr := errors.Join(s.recorder.Close(), s.journal.Close())
 		s.recorder.Fail(closeErr)
 		result = errors.Join(result, closeErr, s.evidenceError())

@@ -214,3 +214,16 @@ legacy gates and missing-contract warnings. Adaptive tests cover versioned
 digests, limits and detached public copies. Service and sandboxd tests cover
 served-copy and file-source isolation. These unit/in-process tests do not
 replace live container, gateway, ownership, Operator or model integration gates.
+
+## Managed database extension
+
+The [PostgreSQL integration contract](postgresql-integration.md) extends managed
+services with `postgresql`, independent `postgresql+tls` transport, the
+`database_response` simulation surface, policy-constrained `environment_state`
+database mutations, and `database_query_match` oracles. Database response
+selection MUST use query/parameter predicates and result/cell ordinals; HTTP
+selectors and HTTP endpoint contracts MUST NOT describe this transport.
+Capabilities MUST expose only public table policy and supported surfaces, never
+credentials or oracle SQL. Native backups MUST use integrity-covered
+`database_checkpoint` journal operations; observation windows and required
+capture-failure policy MUST apply to native database evidence.

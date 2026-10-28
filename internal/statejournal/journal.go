@@ -204,6 +204,11 @@ func VerifyFile(path string) ([]Transaction, error) {
 
 func ValidateOperation(operation Operation) error {
 	switch operation.Kind {
+	case "database_checkpoint":
+		if operation.Service == "" || !digest.Valid(operation.Blob) || operation.Size < 0 || !json.Valid(operation.Value) {
+			return errors.New("invalid database checkpoint")
+		}
+		return rejectFields(operation, "kind", "service", "blob", "size", "value")
 	case "file_upsert":
 		if err := validMutablePath(operation.Path); err != nil || !digest.Valid(operation.Blob) || operation.Size < 0 {
 			return errors.New("file_upsert requires a clean absolute path, blob digest, and nonnegative size")

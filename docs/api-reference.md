@@ -350,3 +350,9 @@ or every change made to the environment.
 - `429` turn limit exhausted
 - `501` unsupported application, synthetic-service, sink, or model route
 - `500` integrity or evaluation failure
+
+## Managed PostgreSQL
+
+See [PostgreSQL and pgvector](postgresql.md) for the managed database Blueprint,
+wrapper packaging, verified driver TLS, database injection surfaces, independent
+committed-state oracles, evidence and coordinated restore contract.

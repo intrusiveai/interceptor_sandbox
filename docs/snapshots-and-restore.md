@@ -309,3 +309,9 @@ Required evidence-storage failure blocks new snapshots. The session's
 observation history. Previously completed snapshots retain their original
 scope. State-save and restore hooks run outside application-turn observation
 windows; their model/service activity is not assigned a synthetic turn.
+
+## Managed PostgreSQL
+
+See [PostgreSQL and pgvector](postgresql.md) for the managed database Blueprint,
+wrapper packaging, verified driver TLS, database injection surfaces, independent
+committed-state oracles, evidence and coordinated restore contract.

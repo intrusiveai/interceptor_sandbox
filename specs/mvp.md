@@ -2648,3 +2648,16 @@ not causal provenance. Interceptor MUST NOT use application correlation headers
 for this association or turn-specific injection selection. Required capture
 failure MUST block subsequent invocations and snapshots, preserve inspection and
 cleanup, and prevent missing evidence from becoming a negative oracle outcome.
+
+## Managed database extension
+
+The [PostgreSQL integration contract](postgresql-integration.md) extends managed
+services with `postgresql`, independent `postgresql+tls` transport, the
+`database_response` simulation surface, policy-constrained `environment_state`
+database mutations, and `database_query_match` oracles. Database response
+selection MUST use query/parameter predicates and result/cell ordinals; HTTP
+selectors and HTTP endpoint contracts MUST NOT describe this transport.
+Capabilities MUST expose only public table policy and supported surfaces, never
+credentials or oracle SQL. Native backups MUST use integrity-covered
+`database_checkpoint` journal operations; observation windows and required
+capture-failure policy MUST apply to native database evidence.

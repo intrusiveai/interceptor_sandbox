@@ -2,6 +2,7 @@ package environment
 
 import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/delivery"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/postgresql"
 	"time"
 )
 
@@ -209,6 +210,7 @@ type SeedEntry struct {
 }
 
 type Service struct {
+	PostgreSQL        *postgresql.Config     `yaml:"postgresql,omitempty" json:"postgresql,omitempty"`
 	Implementation    string                 `yaml:"implementation,omitempty" json:"implementation,omitempty"`
 	ExportContracts   bool                   `yaml:"export_contracts,omitempty" json:"export_contracts,omitempty"`
 	ResolvedEndpoints []delivery.Endpoint    `yaml:"-" json:"-"`

@@ -33,6 +33,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/hostlifetime"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/ociruntime"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/postgresql"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/session"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/snapshot"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/statejournal"
@@ -211,6 +212,22 @@ func Restore(ctx context.Context, config Config, sourceSessionID, checkpointID s
 	}
 	if checkpoint.JournalSeq == 0 || checkpoint.JournalSeq > uint64(len(transactions)) || transactions[checkpoint.JournalSeq-1].Hash != checkpoint.JournalHash {
 		return session.Metadata{}, errors.New("checkpoint journal head is missing or inconsistent")
+	}
+	databaseCheckpoints := map[string]bool{}
+	for _, tx := range transactions[:checkpoint.JournalSeq] {
+		for _, op := range tx.Operations {
+			if op.Kind == "database_checkpoint" {
+				if err := postgresql.ValidateCheckpoint(op); err != nil {
+					return session.Metadata{}, err
+				}
+				databaseCheckpoints[op.Service] = true
+			}
+		}
+	}
+	for _, service := range report.Blueprint.Services {
+		if service.Kind == "postgresql" && !databaseCheckpoints[service.ID] {
+			return session.Metadata{}, fmt.Errorf("checkpoint lacks database %s", service.ID)
+		}
 	}
 	blobs, err := blobstore.Open(sourcePaths.Blobs, report.Blueprint.Limits.MaxBlobBytes)
 	if err != nil {

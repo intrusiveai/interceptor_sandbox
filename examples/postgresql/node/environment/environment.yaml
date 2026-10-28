@@ -1,0 +1,106 @@
+---
+api_version: interceptor.dev/v1alpha1
+kind: Environment
+metadata:
+  name: adapter-node
+  version: '1'
+  reviewed_by: adapter-example
+  reviewed_at: '2026-10-26T00:00:00Z'
+application:
+  image: interceptor-adapter-node:local@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  launch:
+    command:
+    - "/usr/local/bin/node"
+    workdir: "/app"
+    environment:
+      PGHOST: database.sandbox.test
+      PGPORT: '15432'
+      PGDATABASE: support
+      PGUSER: agent
+      PGPASSWORD: synthetic-password
+      PGSSLMODE: verify-full
+      PGSSLROOTCERT: /opt/interceptor/tls/ca.pem
+      PGCHANNELBINDING: disable
+      MODEL_BASE_URL: http://127.0.0.1:18080/v1
+  interface:
+    kind: code
+    operations:
+    - id: ask
+    code:
+      language: node
+      adapter_asset: assets/adapter
+      module: "./support_adapter.mjs"
+      initialize: initialize
+      invoke: invoke
+      close: close
+      init_arguments:
+        customer_id: alice
+      concurrency: 1
+      state:
+        save: save_state
+        restore: restore_state
+        path: /app-state/agent.json
+    startup_timeout_ms: 30000
+    turn_timeout_ms: 15000
+  persistence:
+    snapshot_capable: true
+    mutable_roots: [/app-state]
+    quiesce:
+      kind: none
+      timeout_ms: 10000
+time:
+  base: '2026-01-01T00:00:00Z'
+  mode: fixed
+limits:
+  max_turns: 40
+  max_tokens: 10000
+  max_wall_seconds: 600
+  max_snapshots: 3
+  max_blob_bytes: 33554432
+
+network:
+  dns:
+    enabled: true
+  tls:
+    enabled: true
+    trust_mode: auto
+services:
+  - id: database
+    kind: postgresql
+    listen: 127.0.0.1:15432
+    hostnames: [database.sandbox.test]
+    postgresql:
+      database: support
+      roles:
+        - name: agent
+          password: synthetic-password
+      schema: [assets/schema.sql]
+      seeds: [assets/seed.sql]
+      tables:
+        - id: documents
+          schema: public
+          name: documents
+          keys: [id]
+          fields: [body, metadata, embedding, author_id]
+          allow_create: true
+          max_records: 10
+        - id: refunds
+          schema: public
+          name: refunds
+          keys: [id]
+          fields: [amount]
+          allow_create: true
+          max_records: 10
+oracles:
+  - id: refund-committed
+    kind: database_query_match
+    service: database
+    match:
+      query: SELECT count(*)::int FROM refunds WHERE amount=42
+      equals: [[1]]
+
+credentials:
+  - id: database-password
+    environment_variable: PGPASSWORD
+    value: synthetic-password
+    accepted_by: database
