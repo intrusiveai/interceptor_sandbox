@@ -92,7 +92,8 @@ func (h *SinkHandler) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	if len(body) > 0 && h.blobs != nil {
 		object, err := h.blobs.Put(request.Context(), strings.NewReader(string(body)))
 		if err != nil {
-			writeServiceError(writer, http.StatusInternalServerError, "recording_error", "unable to durably capture request")
+			h.recorder.Fail(err)
+			writeServiceError(writer, http.StatusInsufficientStorage, "evidence_storage_error", "unable to durably capture request")
 			return
 		}
 		bodyRef = object.Digest
@@ -106,7 +107,7 @@ func (h *SinkHandler) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	h.items = append(h.items, observation)
 	h.mu.Unlock()
 	if h.recorder != nil {
-		_, _ = h.recorder.Append(recording.Draft{
+		_, _ = h.recorder.AppendContext(request.Context(), recording.Draft{
 			Channel: recording.Attack, Layer: "attacker_sink", Kind: "attacker_observation", Provenance: recording.AttackerInfrastructure, RawRef: bodyRef,
 			Semantic: map[string]any{"service": h.serviceID, "observation": observation.Sequence, "method": observation.Method, "path": observation.Path, "body": observation.Body},
 		})

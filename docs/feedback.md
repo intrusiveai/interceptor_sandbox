@@ -177,3 +177,16 @@ digests change. Regenerate source-bound manifests and deploy matching host binar
 and rebuilt supervisor images; do not silently mix old feedback clients with the
 new view. Legacy retained target evidence remains available through its existing
 reporting path, but no missing feedback receipt is fabricated from it.
+
+
+Native model and service turn associations mean **observed during** the invocation,
+not caused by it. When a request remains in flight at invocation completion, the
+turn reports `evidence_partial: true`; its feedback does not claim full capture.
+A later response keeps its original turn ID in exported events but does not
+retroactively change a retained feedback receipt. Overlapping invocations have
+ambiguous observations without a turn ID.
+
+Required evidence-storage failure makes affected feedback partial/unavailable and
+blocks new application invocations. Feedback inspection remains available when
+its own storage is usable. Existing successful oracle results do not establish
+that the affected turn was fully observed or that missing actions did not occur.

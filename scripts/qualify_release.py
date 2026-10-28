@@ -27,7 +27,9 @@ from publish_release import read_archive
 from build_release import ARCHIVE_ROOT
 
 
-def qualify(archive, version, source, base_image, output, client, adapter_language=None, embeddings=False, python_ca=False, state_snapshots=False):
+def qualify(archive, version, source, base_image, output, client, adapter_language=None, embeddings=False, python_ca=False, state_snapshots=False, evidence_failure=False):
+    if evidence_failure and not state_snapshots:
+        raise ValueError("evidence failure qualification requires state snapshots")
     if state_snapshots and (not adapter_language or embeddings or python_ca):
         raise ValueError("state snapshots require an adapter language and no other qualification mode")
     if python_ca and (adapter_language != "python" or embeddings):
@@ -184,12 +186,12 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                     if any(m["Destination"] == "/app" or m["Destination"].startswith("/app/") for m in mounts):
                         raise ValueError("application/adapter source is mounted instead of installed")
                     (output / "mounts.json").write_text(json.dumps(mounts, indent=2)+"\n")
-                run(str(client), "--state-snapshots" if state_snapshots else "--adapter-only" if adapter_language else "--command-only", "--output", str(output / "native"))
+                run(str(client), "--state-snapshots" if state_snapshots else "--adapter-only" if adapter_language else "--command-only", "--output", str(output / "native"), *(["--evidence-failure", "--data-root", str(work / "data")] if evidence_failure else []))
                 native = json.loads((output / "native/result.json").read_text())
                 if not native["passed"] or native["session_id"] != session["id"]:
                     raise ValueError("native qualification did not pass for this session")
                 process.send_signal(signal.SIGINT)
-                if process.wait(timeout=30) != 0:
+                if process.wait(timeout=30) != 0 and not evidence_failure:
                     raise RuntimeError("release shutdown failed: " + (output / "run.log").read_text())
                 process = None
             for verified_session in native.get("sessions", [session["id"]]):
@@ -221,6 +223,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                 (output / 'model-requests.json').write_text(json.dumps(requests, indent=2)+'\n')
                 result['state_snapshots'] = {'model_requests': len(requests), 'identical_continuation': True, 'restores': 2,
                                              'sessions': native['sessions'], 'live_provider': False}
+                result['observed_evidence'] = verify_observed_evidence(output, evidence_failure)
             elif fixture:
                 result['embeddings'] = fixture.verify(output)
             (output / "result.json").write_text(json.dumps(result, indent=2)+"\n")
@@ -239,6 +242,33 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                 subprocess.run([docker, "image", "rm", image], capture_output=True, timeout=30)
 
 
+def verify_observed_evidence(output, failure):
+    events = {}
+    incomplete = 0
+    journals = []
+    for path in (output / 'native').glob('*.tar'):
+        with tarfile.open(path) as bundle:
+            for line in bundle.extractfile('events.jsonl'):
+                event = json.loads(line)
+                events[event['hash']] = event
+            state = json.load(bundle.extractfile('evidence-bundle.json'))
+            incomplete += state['completeness']['state'] == 'partial'
+            journals.extend(json.loads(line) for line in bundle.extractfile('state.jsonl'))
+    observed = [e for e in events.values() if e['kind'] in ('model_exchange', 'stateful_read', 'stateful_mutation')]
+    if not observed or any(not e.get('turn_id') or e.get('attribution', {}).get('window') != 'observed' or not e['attribution'].get('observed_attempt_id') for e in observed):
+        raise ValueError('native observation window or attempt context missing')
+    if incomplete != int(failure):
+        raise ValueError('unexpected evidence completeness')
+    if failure:
+        # The final service mutation occurred before the model request's failed
+        # evidence write. Preserve it independently; do not claim rollback.
+        mutations = [op for tx in journals for op in tx['operations'] if op.get('service') == 'records' and isinstance(op.get('value'), dict)]
+        if not any(op['value'].get('count') == 4 for op in mutations):
+            raise ValueError('committed pre-failure service effect is missing')
+    return {'observations': len(observed), 'all_observed_during_turn': True,
+            'incomplete_sessions': incomplete, 'failure_blocks_next_turn': failure}
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--archive", type=Path, required=True)
@@ -250,6 +280,7 @@ if __name__ == "__main__":
     parser.add_argument("--adapter-language", choices=("python", "node"), help="qualify the separately installed adapter example using the supplied runtime image")
     parser.add_argument("--embeddings", action="store_true", help="qualify remote embeddings with pinned OpenAI/LangChain clients and separate host fixtures")
     parser.add_argument("--python-ca", action="store_true", help="qualify declared Python Certifi stores with unchanged HTTPX clients")
+    parser.add_argument("--evidence-failure", action="store_true", help="qualify evidence failure using test-only blob directory permissions")
     parser.add_argument("--state-snapshots", action="store_true", help="qualify application context and sandbox restore with packaged Python or Node adapters")
     args = parser.parse_args()
-    qualify(args.archive.resolve(), args.version, args.source, args.image, args.output, args.client.resolve(), args.adapter_language, args.embeddings, args.python_ca, args.state_snapshots)
+    qualify(args.archive.resolve(), args.version, args.source, args.image, args.output, args.client.resolve(), args.adapter_language, args.embeddings, args.python_ca, args.state_snapshots, args.evidence_failure)

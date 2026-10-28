@@ -58,7 +58,7 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 		writeBridgeError(writer, http.StatusRequestEntityTooLarge, "model_body_limit", err.Error())
 		return
 	}
-	turnID := request.Header.Get("X-Interceptor-Turn-ID")
+	turnID := recording.ObservationFrom(request.Context()).TurnID
 	rewritten := body
 	results := []injection.Result{}
 	if err := validateNonStreaming(codec, body); err != nil {
@@ -94,13 +94,28 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 		responseCandidates = p.injections.ObservableResponseIDs()
 	}
 	requestRef := p.store(request.Context(), rewritten)
-	if codec == CodecOpenAIEmbeddings && p.blobs != nil && requestRef == "" {
-		p.record("model_error", turnID, "", map[string]any{"codec": codec, "error": "embedding request evidence storage failed"})
-		writeBridgeError(writer, http.StatusInsufficientStorage, "evidence_storage_error", "embedding request exceeds evidence storage limits or storage is unavailable")
+	if p.blobs != nil && requestRef == "" {
+		p.record(request.Context(), "model_error", turnID, "", map[string]any{"codec": codec, "error": "model request evidence storage failed"})
+		writeBridgeError(writer, http.StatusInsufficientStorage, "evidence_storage_error", "model request exceeds evidence storage limits or storage is unavailable")
 		return
+	}
+	if err := p.record(request.Context(), "model_request", turnID, requestRef, map[string]any{"codec": codec}); err != nil {
+		writeBridgeError(writer, http.StatusInsufficientStorage, "evidence_storage_error", err.Error())
+		return
+	}
+	if p.recorder != nil {
+		if err := p.recorder.Flush(); err != nil {
+			writeBridgeError(writer, http.StatusInsufficientStorage, "evidence_storage_error", err.Error())
+			return
+		}
 	}
 	started := time.Now()
 	p.connectorMu.Lock()
+	if err := p.recorder.Err(); err != nil {
+		p.connectorMu.Unlock()
+		writeBridgeError(writer, 507, "evidence_storage_error", err.Error())
+		return
+	}
 	requestID := p.nextID.Add(1)
 	result, err := p.connector.Forward(request.Context(), ModelFrame{
 		SessionID: p.sessionID, RequestID: requestID, Codec: codec, Path: request.URL.EscapedPath(),
@@ -111,7 +126,7 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 	})
 	p.connectorMu.Unlock()
 	if err != nil {
-		p.record("model_error", turnID, requestRef, map[string]any{"codec": codec, "error": err.Error(), "elapsed_ms": time.Since(started).Milliseconds()})
+		p.record(request.Context(), "model_error", turnID, requestRef, map[string]any{"codec": codec, "error": err.Error(), "elapsed_ms": time.Since(started).Milliseconds()})
 		writeBridgeError(writer, http.StatusBadGateway, "model_connector_error", err.Error())
 		return
 	}
@@ -126,12 +141,12 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 		candidates = append(candidates, responseCandidates...)
 		confirmed, confirmErr := p.injections.ConfirmDelivery(result.FinalRequest, candidates)
 		if confirmErr != nil {
-			p.record("injection_state_error", turnID, requestRef, map[string]any{"error": confirmErr.Error()})
+			p.record(request.Context(), "injection_state_error", turnID, requestRef, map[string]any{"error": confirmErr.Error()})
 			writeBridgeError(writer, http.StatusInternalServerError, "injection_state_error", confirmErr.Error())
 			return
 		}
 		if err := p.injections.CompleteFidelityTurn(turnID, confirmed); err != nil {
-			p.record("injection_state_error", turnID, requestRef, map[string]any{"error": err.Error()})
+			p.record(request.Context(), "injection_state_error", turnID, requestRef, map[string]any{"error": err.Error()})
 			writeBridgeError(writer, http.StatusInternalServerError, "injection_state_error", err.Error())
 			return
 		}
@@ -151,9 +166,9 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 	responseRef := p.store(request.Context(), result.Body)
 	providerRequestRef := p.store(request.Context(), result.ProviderRequest)
 	providerResponseRef := p.store(request.Context(), result.ProviderResponse)
-	if codec == CodecOpenAIEmbeddings && p.blobs != nil && (len(result.Body) > 0 && responseRef == "" || len(result.ProviderRequest) > 0 && providerRequestRef == "" || len(result.ProviderResponse) > 0 && providerResponseRef == "") {
-		p.record("model_error", turnID, requestRef, map[string]any{"codec": codec, "model": model, "status": result.Status, "usage": usage, "error": "embedding response evidence storage failed"})
-		writeBridgeError(writer, http.StatusInsufficientStorage, "evidence_storage_error", "embedding response exceeds evidence storage limits or storage is unavailable")
+	if p.blobs != nil && (len(result.Body) > 0 && responseRef == "" || len(result.ProviderRequest) > 0 && providerRequestRef == "" || len(result.ProviderResponse) > 0 && providerResponseRef == "") {
+		p.record(request.Context(), "model_error", turnID, requestRef, map[string]any{"codec": codec, "model": model, "status": result.Status, "usage": usage, "error": "model response evidence storage failed"})
+		writeBridgeError(writer, http.StatusInsufficientStorage, "evidence_storage_error", "model response exceeds evidence storage limits or storage is unavailable")
 		return
 	}
 	finish, safety := modelOutcome(codec, result.Body)
@@ -187,8 +202,8 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 			}
 		}
 	}
-	if err := p.record("model_exchange", turnID, requestRef, exchange); err != nil && codec == CodecOpenAIEmbeddings {
-		writeBridgeError(writer, http.StatusInsufficientStorage, "evidence_storage_error", "embedding exchange could not be recorded")
+	if err := p.record(request.Context(), "model_exchange", turnID, requestRef, exchange); err != nil {
+		writeBridgeError(writer, http.StatusInsufficientStorage, "evidence_storage_error", "model exchange could not be recorded")
 		return
 	}
 	for name, value := range result.Headers {
@@ -414,12 +429,13 @@ func (p *ModelProxy) store(ctx context.Context, content []byte) string {
 	}
 	object, err := p.blobs.Put(ctx, bytes.NewReader(content))
 	if err != nil {
+		p.recorder.Fail(err)
 		return ""
 	}
 	return object.Digest
 }
 
-func (p *ModelProxy) record(kind, turnID, rawRef string, semantic any) error {
+func (p *ModelProxy) record(ctx context.Context, kind, turnID, rawRef string, semantic any) error {
 	if p.recorder == nil {
 		return nil
 	}
@@ -428,7 +444,7 @@ func (p *ModelProxy) record(kind, turnID, rawRef string, semantic any) error {
 		draft.AttemptID, _ = value["attempt_id"].(string)
 		draft.PayloadDigest, _ = value["payload_digest"].(string)
 	}
-	_, err := p.recorder.Append(draft)
+	_, err := p.recorder.AppendContext(ctx, draft)
 	return err
 }
 

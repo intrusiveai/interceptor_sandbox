@@ -49,6 +49,7 @@ const (
 )
 
 type Server struct {
+	windows         executionWindows
 	feedbackMu      sync.Mutex
 	execution       *adaptive.ExecutionStore
 	blueprint       *environment.Blueprint
@@ -115,6 +116,7 @@ type TurnRequest struct {
 }
 
 type Turn struct {
+	EvidencePartial      bool              `json:"evidence_partial,omitempty"`
 	OutputContractStatus string            `json:"output_contract_status,omitempty"`
 	ID                   string            `json:"id"`
 	Operation            string            `json:"operation,omitempty"`
@@ -203,6 +205,7 @@ func New() (*Server, error) {
 		recorder.Close()
 		return nil, err
 	}
+	journal.SetFailureHandler(recorder.Fail)
 	blobs, err := blobstore.Open(containerBlobs, report.Blueprint.Limits.MaxBlobBytes)
 	if err != nil {
 		journal.Close()
@@ -313,6 +316,9 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := s.adapter.WaitReady(readyContext); err != nil {
 		return err
 	}
+	if err := s.evidenceError(); err != nil {
+		return err
+	}
 	if err := s.startHostBridge(ctx); err != nil {
 		return err
 	}
@@ -367,7 +373,7 @@ func (s *Server) startSyntheticServices() error {
 			}
 			handler = authority.Authorize(definition.ID, *definition.Authorization, handler)
 		}
-		handler = s.trackActivity(handler)
+		handler = s.observedHandler(handler, definition.ID)
 		s.registerHostRoutes(definition.Hostnames, handler)
 		if err := s.serveTCP(definition.Listen, handler); err != nil {
 			return fmt.Errorf("start service %s: %w", definition.ID, err)
@@ -391,7 +397,7 @@ func (s *Server) startSyntheticServices() error {
 		if definition.Response.Mode == "dynamic" {
 			handler = services.WithResponseInjection(definition.ID, definition.Kind, handler, s.injections, s.recorder)
 		}
-		handler = s.trackActivity(handler)
+		handler = s.observedHandler(handler, definition.ID)
 		s.registerHostRoutes(definition.Hostnames, handler)
 		if err := s.serveTCP(definition.Listen, handler); err != nil {
 			return fmt.Errorf("start attacker service %s: %w", definition.ID, err)
@@ -559,7 +565,7 @@ func (s *Server) startModelProxy() error {
 		return err
 	}
 	proxy.SetTokenObserver(s.consumeTokens)
-	return s.serveTCP(baseURL.Host, s.trackActivity(proxy))
+	return s.serveTCP(baseURL.Host, s.observedHandler(proxy, ""))
 }
 
 func (s *Server) startHostBridge(ctx context.Context) error {
@@ -643,9 +649,13 @@ func (s *Server) controlHandler() http.Handler {
 }
 
 func (s *Server) statusHandler(writer http.ResponseWriter, _ *http.Request) {
+	evidenceErr := s.evidenceError()
 	s.metadataMu.RLock()
 	metadata := s.metadata
 	s.metadataMu.RUnlock()
+	if evidenceErr != nil {
+		metadata.TerminationReason = evidenceErr.Error()
+	}
 	writeJSON(writer, http.StatusOK, metadata)
 }
 
@@ -755,6 +765,10 @@ func (s *Server) bumpRevision() {
 }
 
 func (s *Server) turnHandler(writer http.ResponseWriter, request *http.Request) {
+	if err := s.evidenceError(); err != nil {
+		writeError(writer, 507, "evidence_storage_error", err.Error())
+		return
+	}
 	if a, ok := s.adapter.(*protocolApplicationAdapter); ok && a.stateEnabled() {
 		ctx, cancel := context.WithTimeout(request.Context(), s.turnTimeout())
 		defer cancel()
@@ -889,10 +903,11 @@ func (s *Server) turnHandler(writer http.ResponseWriter, request *http.Request) 
 	if body == nil {
 		body = input.Body
 	}
-	result, err := s.adapter.Invoke(turnContext, applicationInvocation{TurnID: id, Operation: input.Operation, Method: input.Method, Path: input.Path, Headers: input.Headers, Body: body, MediaType: input.MediaType, IdentityToken: identityToken})
+	result, err := s.adapter.Invoke(turnContext, applicationInvocation{TurnID: id, AttemptID: input.AttemptID, PayloadDigest: input.PayloadDigest, Operation: input.Operation, Method: input.Method, Path: input.Path, Headers: input.Headers, Body: body, MediaType: input.MediaType, IdentityToken: identityToken})
 	turn.Code, turn.Headers, turn.Body, turn.MediaType, turn.ExitCode = result.Code, result.Headers, result.Body, result.MediaType, result.ExitCode
 	turn.OutputContractStatus = s.outputContractStatus(operationID, result.MediaType, result.Body)
 	turn.Finished = time.Now().UTC()
+	turn.EvidencePartial = s.pendingEvidence(id)
 	if err != nil {
 		turn.Status, turn.Error = "error", err.Error()
 	} else {
@@ -901,6 +916,8 @@ func (s *Server) turnHandler(writer http.ResponseWriter, request *http.Request) 
 	if len(turn.Body) > 0 {
 		if object, storeErr := s.blobs.Put(request.Context(), bytes.NewReader(turn.Body)); storeErr == nil {
 			turn.OutputDigest = object.Digest
+		} else {
+			s.recorder.Fail(storeErr)
 		}
 	}
 	s.turnMu.Lock()
@@ -917,6 +934,12 @@ func (s *Server) turnHandler(writer http.ResponseWriter, request *http.Request) 
 	}
 	_, _ = s.recorder.Append(recording.Draft{Channel: recording.Attack, Layer: "application_bridge", Kind: "turn_completed", Provenance: recording.Application, TurnID: id, AttemptID: turn.AttemptID, PayloadDigest: turn.PayloadDigest, RawRef: turn.OutputDigest, Semantic: semantic})
 	_ = s.recorder.Flush()
+	if evidenceErr := s.evidenceError(); evidenceErr != nil {
+		turn.Status, turn.Error, turn.EvidencePartial = "error", evidenceErr.Error(), true
+	}
+	s.turnMu.Lock()
+	s.turns[id] = turn
+	s.turnMu.Unlock()
 	writeJSON(writer, http.StatusOK, turn)
 }
 
@@ -1367,6 +1390,9 @@ func (s *Server) createSnapshotHandler(writer http.ResponseWriter, request *http
 }
 
 func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommittedBytes snapshot.ByteAllowance, checkpointMetadata snapshot.Metadata) (snapshot.Checkpoint, error) {
+	if err := s.evidenceError(); err != nil {
+		return snapshot.Checkpoint{}, err
+	}
 	stateAdapter, hasState := s.adapter.(*protocolApplicationAdapter)
 	hasState = hasState && stateAdapter.stateEnabled()
 	if hasState {
@@ -1395,6 +1421,9 @@ func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommit
 		return snapshot.Checkpoint{}, err
 	}
 	defer s.activityMu.Unlock()
+	if err := s.evidenceError(); err != nil {
+		return snapshot.Checkpoint{}, err
+	}
 	if !s.blueprint.Application.Persistence.SnapshotCapable {
 		return snapshot.Checkpoint{}, errors.New("application is not snapshot capable")
 	}
@@ -1872,6 +1901,9 @@ func (s *Server) replayManagedState() error {
 }
 
 func (s *Server) evaluate() (evaluation.Report, error) {
+	if err := s.evidenceError(); err != nil {
+		return evaluation.Report{}, err
+	}
 	events, err := recording.VerifyFile(s.paths.Events)
 	if err != nil {
 		return evaluation.Report{}, err

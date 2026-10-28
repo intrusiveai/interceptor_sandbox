@@ -370,3 +370,20 @@ Embedding calls preserve their model usage and vector metadata in protected
 evidence. They do not confirm generation injection delivery. See the
 [remote embeddings example](../examples/remote-embeddings/README.md) for startup
 batch embedding and query embedding during later invocations.
+
+
+## Native observation windows
+
+Interceptor opens an observation window when an adapter actually begins an
+invocation, after waiting for capacity, and closes it on return or cancellation.
+Python, Node, HTTP, command, REPL/stdio, and external interfaces use the same
+supervisor-owned mechanism. No application header propagation or HTTP-client
+changes are required. Concurrent invocations remain supported; requests received
+while multiple invocations execute have no guessed turn association. Work that
+continues independently after an invocation returns can only be described by the
+window in which it was observed, not by its initiating turn.
+
+If required native evidence cannot be stored, the session rejects further
+invocations and reports incomplete evidence even when the target catches the
+individual model/service error and returns normally. See
+[injection and evaluation semantics](injections-and-evaluation.md#observed-turns-and-incomplete-evidence).

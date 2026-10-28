@@ -303,3 +303,9 @@ including after stop. Use both source session and checkpoint ID to inspect or
 restore an earlier baseline. The harness receives a safe metadata projection,
 including campaign ID and description, through Operator tools; it never reads
 raw checkpoint storage. Restoring a checkpoint does not edit its metadata.
+
+Required evidence-storage failure blocks new snapshots. The session's
+`evidence_incomplete` taint means a new checkpoint cannot claim a complete
+observation history. Previously completed snapshots retain their original
+scope. State-save and restore hooks run outside application-turn observation
+windows; their model/service activity is not assigned a synthetic turn.

@@ -120,7 +120,7 @@ func counter(root, id string, want int) {
 	must(json.Unmarshal(data, &count))
 	require(count.Count == want, fmt.Sprintf("%s counter=%d want=%d", id, count.Count, want))
 }
-func evidence(output, id string, maximum int64) {
+func evidence(output, id string, maximum int64, partial ...bool) {
 	raw, _ := json.Marshal(map[string]string{"api_version": localapi.Version, "campaign_id": campaign, "session_id": id})
 	r, err := client.Post("http://127.0.0.1:8080/v1/evidence", "application/json", bytes.NewReader(raw))
 	must(err)
@@ -162,7 +162,11 @@ func evidence(output, id string, maximum int64) {
 	}
 	require(seen["execution.json"] && seen["state.jsonl"] && seen["events.jsonl"] && seen["manifest.json"], "missing protected evidence members")
 	require(bundle.SessionID == id && bundle.CampaignID == campaign, "evidence scope mismatch")
-	require(bundle.Completeness.State == "complete", fmt.Sprintf("partial evidence: %+v gaps=%v", bundle.Completeness, bundle.CoverageGaps))
+	expectedState := "complete"
+	if len(partial) > 0 && partial[0] {
+		expectedState = "partial"
+	}
+	require(bundle.Completeness.State == expectedState, fmt.Sprintf("partial evidence: %+v gaps=%v", bundle.Completeness, bundle.CoverageGaps))
 	must(file.Sync())
 	must(file.Close())
 	must(os.Rename(file.Name(), filepath.Join(output, id+".tar")))
@@ -170,6 +174,7 @@ func evidence(output, id string, maximum int64) {
 }
 func main() {
 	output := flag.String("output", "", "directory for evidence and result JSON")
+	evidenceFailure := flag.Bool("evidence-failure", false, "test required evidence failure after state qualification; requires isolated --data-root")
 	stateSnapshots := flag.Bool("state-snapshots", false, "qualify packaged application state snapshot and restore")
 	commandOnly := flag.Bool("command-only", false, "qualify a minimal command target's echo operation without snapshots or model calls")
 	adapterOnly := flag.Bool("adapter-only", false, "qualify the stateful invocation-adapter example without snapshots or model calls")
@@ -191,7 +196,7 @@ func main() {
 	limit := min(*maximumEvidence, attached.EvidenceMaxBytes)
 	first := attached.Binding
 	if *stateSnapshots {
-		qualifyStateSnapshots(first, *output, limit)
+		qualifyStateSnapshots(first, *output, limit, *evidenceFailure, *root)
 		return
 	}
 	if *adapterOnly {

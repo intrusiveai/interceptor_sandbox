@@ -60,6 +60,12 @@ capabilities and AEF consumption rules without redefining these schemas.
 Python and Node state adapters, their save/restore lifecycle, compatibility
 requirements, and end-to-end qualification contract.
 
+## Observed turn evidence
+
+[`observed-turn-evidence.md`](observed-turn-evidence.md) defines supervisor-owned
+observation windows, their attribution limits, and consistent handling of
+required evidence-storage failures.
+
 ## Change discipline
 
 [`delivery-contracts.md`](delivery-contracts.md) is normative for Blueprint and

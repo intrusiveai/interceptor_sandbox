@@ -129,6 +129,8 @@ func (s *Server) feedbackView(ctx context.Context, r adaptive.OperationRequest, 
 		}
 		object, err := s.blobs.Put(ctx, bytes.NewReader(content))
 		if err != nil {
+			s.recorder.Fail(err)
+			_ = s.evidenceError()
 			entry.Availability, entry.Reason = "unavailable", "content_storage_failed"
 			v.CollectionState = "partial"
 		} else {
@@ -193,7 +195,7 @@ func (s *Server) feedbackView(ctx context.Context, r adaptive.OperationRequest, 
 			}
 		}
 	}
-	if err != nil || v.ThroughEventSeq == 0 {
+	if err != nil || v.ThroughEventSeq == 0 || s.evidenceError() != nil || turn.EvidencePartial {
 		v.CollectionState = "partial"
 		for _, kind := range []string{"injection_delivery", "oracle_outcome"} {
 			if selected(kind) {
@@ -209,10 +211,10 @@ func (s *Server) feedbackView(ctx context.Context, r adaptive.OperationRequest, 
 			if e.Seq > v.ThroughEventSeq {
 				break
 			}
-			if e.AttemptID != a.AttemptID {
+			if e.AttemptID != a.AttemptID && e.Attribution.ObservedAttemptID != a.AttemptID {
 				continue
 			}
-			if e.InjectionID != "" && selected("injection_delivery") {
+			if e.InjectionID != "" && e.AttemptID == a.AttemptID && selected("injection_delivery") {
 				if _, ok := deliveries[e.InjectionID]; !ok {
 					deliveries[e.InjectionID] = nil
 				}
@@ -229,7 +231,7 @@ func (s *Server) feedbackView(ctx context.Context, r adaptive.OperationRequest, 
 				continue
 			}
 			attributed = append(attributed, e)
-			if e.InjectionID != "" && selected("injection_delivery") {
+			if e.InjectionID != "" && e.AttemptID == a.AttemptID && selected("injection_delivery") {
 				disposition := ""
 				switch e.Kind {
 				case "injection_applied", "injection_delivered":
@@ -297,6 +299,8 @@ func (s *Server) feedbackView(ctx context.Context, r adaptive.OperationRequest, 
 		}
 	}
 	if err := adaptive.SaveFeedback(s.paths.Root, v); err != nil {
+		s.recorder.Fail(err)
+		_ = s.evidenceError()
 		return adaptive.OperationError(503, "feedback_persistence_failed")
 	}
 	return adaptive.RetainedFeedback(s.paths.Root, r, id)

@@ -2,6 +2,7 @@ package services
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -208,7 +209,7 @@ func (h *FixtureHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		}
 		responseBody, contentType, responseErr := h.responseBody(rule.Response)
 		if responseErr != nil {
-			h.record(recording.Evaluation, "fixture_error", map[string]any{"rule": rule.ID, "error": responseErr.Error()})
+			h.record(request.Context(), recording.Evaluation, "fixture_error", map[string]any{"rule": rule.ID, "error": responseErr.Error()})
 			http.Error(writer, "sealed fixture is invalid", http.StatusInternalServerError)
 			return
 		}
@@ -217,7 +218,7 @@ func (h *FixtureHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		}
 		writer.WriteHeader(rule.Response.Status)
 		_, _ = writer.Write(responseBody)
-		h.record(recording.Evaluation, "fixture_hit", map[string]any{"rule": rule.ID, "method": request.Method, "path": request.URL.Path, "status": rule.Response.Status})
+		h.record(request.Context(), recording.Evaluation, "fixture_hit", map[string]any{"rule": rule.ID, "method": request.Method, "path": request.URL.Path, "status": rule.Response.Status})
 		return
 	}
 	h.writeGap(writer, request, body, http.StatusNotImplemented, "no sealed fixture matched request")
@@ -241,7 +242,7 @@ func (h *FixtureHandler) writeGap(writer http.ResponseWriter, request *http.Requ
 	h.mu.Lock()
 	h.coverage.Gaps[signature]++
 	h.mu.Unlock()
-	h.record(recording.Evaluation, "coverage_gap", map[string]any{"service": h.serviceID, "method": request.Method, "path": request.URL.Path, "message": message})
+	h.record(request.Context(), recording.Evaluation, "coverage_gap", map[string]any{"service": h.serviceID, "method": request.Method, "path": request.URL.Path, "message": message})
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(status)
 	_ = json.NewEncoder(writer).Encode(map[string]any{"error": map[string]any{"code": "coverage_gap", "message": message, "request_id": fmt.Sprintf("req-%d", serviceRequestSequence.Add(1))}})
@@ -265,11 +266,11 @@ func (h *FixtureHandler) responseBody(response FixtureResponse) ([]byte, string,
 	}
 }
 
-func (h *FixtureHandler) record(channel recording.Channel, kind string, semantic any) {
+func (h *FixtureHandler) record(ctx context.Context, channel recording.Channel, kind string, semantic any) {
 	if h.recorder == nil {
 		return
 	}
-	_, _ = h.recorder.Append(recording.Draft{Channel: channel, Layer: "fixture_service", Kind: kind, Provenance: recording.EnvironmentSealed, Semantic: semantic})
+	_, _ = h.recorder.AppendContext(ctx, recording.Draft{Channel: channel, Layer: "fixture_service", Kind: kind, Provenance: recording.EnvironmentSealed, Semantic: semantic})
 }
 
 func fixtureMatches(match FixtureMatch, request *http.Request, body []byte) (bool, error) {

@@ -111,7 +111,7 @@ func WithResponseInjection(serviceID, kind string, next http.Handler, manager *i
 							}
 						}
 						attemptID, payloadDigest := manager.Attribution(ids)
-						_, _ = recorder.Append(recording.Draft{Channel: recording.Evaluation, Layer: "service_ingress", Kind: "response_rewritten", Provenance: recording.HarnessInjected, AttemptID: attemptID, PayloadDigest: payloadDigest, Semantic: map[string]any{"service": serviceID, "surface": surface, "tool_name": tool, "method": request.Method, "path": request.URL.Path, "request_digest": digest.Bytes(requestBody), "original_digest": digest.Bytes(capture.body.Bytes()), "result_digest": digest.Bytes(body), "injections": results}})
+						_, _ = recorder.AppendContext(request.Context(), recording.Draft{Channel: recording.Evaluation, Layer: "service_ingress", Kind: "response_rewritten", Provenance: recording.HarnessInjected, AttemptID: attemptID, PayloadDigest: payloadDigest, Semantic: map[string]any{"service": serviceID, "surface": surface, "tool_name": tool, "method": request.Method, "path": request.URL.Path, "request_digest": digest.Bytes(requestBody), "original_digest": digest.Bytes(capture.body.Bytes()), "result_digest": digest.Bytes(body), "injections": results}})
 					}
 				}
 			}

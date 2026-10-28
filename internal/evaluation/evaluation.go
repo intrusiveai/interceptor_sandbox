@@ -124,7 +124,7 @@ func evaluateOracle(oracle environment.Oracle, input Input) (OracleResult, error
 			}
 		case "model_output_contains":
 			if event.Kind == "model_exchange" {
-				content, err := readBlob(input.Blobs, textValue(semantic["response_ref"]))
+				content, err := readRequiredBlob(input.Blobs, textValue(semantic["response_ref"]))
 				if err != nil {
 					return result, err
 				}
@@ -133,7 +133,7 @@ func evaluateOracle(oracle environment.Oracle, input Input) (OracleResult, error
 		case "tool_call_match":
 			if event.Kind == "model_exchange" {
 				toolName := textValue(oracle.Match["tool_name"])
-				content, err := readBlob(input.Blobs, textValue(semantic["request_ref"]))
+				content, err := readRequiredBlob(input.Blobs, textValue(semantic["request_ref"]))
 				if err != nil {
 					return result, err
 				}
@@ -367,4 +367,11 @@ func appendUnique(values []string, additions ...string) []string {
 		}
 	}
 	return values
+}
+
+func readRequiredBlob(store *blobstore.Store, reference string) (string, error) {
+	if store == nil || reference == "" {
+		return "", fmt.Errorf("required evidence content unavailable")
+	}
+	return readBlob(store, reference)
 }
