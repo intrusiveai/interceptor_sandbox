@@ -1,6 +1,7 @@
 package postgresql
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -104,6 +105,23 @@ func TestNativePostgreSQL(t *testing.T) {
 		return conn
 	}
 	a, b := connect(), connect()
+	for _, mode := range []string{"wrong-password", "wrong-hostname", "management-role"} {
+		bad := a.Config().Copy()
+		bad.TLSConfig = bad.TLSConfig.Clone()
+		switch mode {
+		case "wrong-password":
+			bad.Password = "invalid-password"
+		case "wrong-hostname":
+			bad.TLSConfig.ServerName = "elsewhere.test"
+		case "management-role":
+			bad.User = "interceptor_admin"
+		}
+		conn, x := pgx.ConnectConfig(ctx, bad)
+		if x == nil {
+			conn.Close(ctx)
+			t.Fatalf("accepted %s", mode)
+		}
+	}
 	var body string
 	if err = a.QueryRow(ctx, "SELECT body FROM documents WHERE id=$1", "one").Scan(&body); err != nil || body != "benign" {
 		t.Fatalf("seed: %s %v", body, err)
@@ -216,6 +234,19 @@ func TestNativePostgreSQL(t *testing.T) {
 	value, err := restored.Oracle(ctx, "SELECT body FROM documents WHERE id='one'")
 	if err != nil || string(value) != `[["benign injected"]]` {
 		t.Fatalf("restore: %s %v", value, err)
+	}
+	fresh := &Engine{ID: "database", Config: cfg, Root: filepath.Join(root, "fresh"), Bin: e.Bin, Recorder: rec, Journal: journal, Blobs: blobs}
+	if err = fresh.Start(ctx, root, nil); err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Close()
+	value, err = fresh.Oracle(ctx, "SELECT body FROM documents ORDER BY id")
+	if err != nil || string(value) != `[["benign"],["second"]]` {
+		t.Fatalf("fresh session contaminated: %s %v", value, err)
+	}
+	events, _ := os.ReadFile(filepath.Join(root, "events"))
+	if bytes.Contains(events, []byte("synthetic-password")) || bytes.Contains(events, []byte("invalid-password")) {
+		t.Fatal("authentication secret recorded")
 	}
 	if _, err = recording.VerifyFile(filepath.Join(root, "events")); err != nil {
 		t.Fatal(err)

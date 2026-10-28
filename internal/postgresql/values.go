@@ -42,7 +42,7 @@ func encodeCell(f pgproto3.FieldDescription, original []byte, v any) ([]byte, er
 	if reflect.DeepEqual(decodeCell(f, original), v) {
 		return original, nil
 	}
-	if original == nil || v == nil {
+	if original == nil || v == nil && f.DataTypeOID != 114 && f.DataTypeOID != 3802 {
 		return nil, errors.New("database response placement cannot change NULL semantics")
 	}
 	switch f.DataTypeOID {

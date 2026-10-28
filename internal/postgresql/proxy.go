@@ -219,6 +219,10 @@ authenticated:
 			err = forwardErr
 		}
 	}
+	if state.timedOut.Load() {
+		err = errors.New("PostgreSQL query exceeded query_timeout_ms; connection closed, transaction outcome unconfirmed")
+	}
+	_ = p.Engine.Record(context.Background(), "database_connection_closed", recording.SandboxControl, map[string]any{"connection": connID, "last_observed_transaction_status": string([]byte{state.txStatus}), "rollback_confirmed": false}, nil)
 	if err != nil && !errors.Is(err, io.EOF) {
 		_ = p.Engine.Record(context.Background(), "database_connection_failed", recording.SandboxControl, map[string]any{"connection": connID, "reason": err.Error(), "transaction_outcome": "unconfirmed"}, nil)
 		_ = fatal(c, err)
@@ -282,6 +286,8 @@ type connection struct {
 	p          *Proxy
 	id         uint64
 	next       uint64
+	timedOut   atomic.Bool
+	txStatus   byte
 	mu         sync.Mutex
 	statements map[string]*statement
 	portals    map[string]*portal
@@ -289,7 +295,7 @@ type connection struct {
 }
 
 func newConnection(p *Proxy, id uint64) *connection {
-	return &connection{p: p, id: id, statements: map[string]*statement{}, portals: map[string]*portal{}, cursors: map[string]cursor{}}
+	return &connection{p: p, id: id, txStatus: 'I', statements: map[string]*statement{}, portals: map[string]*portal{}, cursors: map[string]cursor{}}
 }
 func cloneFields(fields []pgproto3.FieldDescription) []pgproto3.FieldDescription {
 	copied := append([]pgproto3.FieldDescription(nil), fields...)
@@ -412,7 +418,7 @@ func (s *connection) forward(ctx context.Context, b *pgproto3.Backend, up net.Co
 			}
 			s.p.Engine.gate.RLock()
 			r.ctx = observed
-			timer := time.AfterFunc(time.Duration(s.p.Engine.Config.QueryTimeoutMS)*time.Millisecond, func() { up.Close() })
+			timer := time.AfterFunc(time.Duration(s.p.Engine.Config.QueryTimeoutMS)*time.Millisecond, func() { s.timedOut.Store(true); up.Close() })
 			r.done = func() { timer.Stop(); s.p.Engine.gate.RUnlock(); done() }
 			if err = s.p.Engine.Check(ctx); err != nil {
 				r.finish()
@@ -432,11 +438,15 @@ func (s *connection) forward(ctx context.Context, b *pgproto3.Backend, up net.Co
 			s.mu.Unlock()
 			raw, _ := msg.Encode(nil)
 			detail := map[string]any{"connection": s.id, "execution": r.id, "query": r.sql}
-			if r.portal != nil {
-				detail["parameters"] = r.portal.params
-				detail["parameter_formats"] = r.portal.formats
-				if r.portal.statement != nil {
-					detail["parameter_types"] = r.portal.statement.types
+			bound := r.portal
+			if r.origin != nil {
+				bound = r.origin
+			}
+			if bound != nil {
+				detail["parameters"] = bound.params
+				detail["parameter_formats"] = bound.formats
+				if bound.statement != nil {
+					detail["parameter_types"] = bound.statement.types
 				}
 			}
 			if err = s.p.Engine.Record(r.ctx, "database_request", recording.Application, detail, raw); err != nil {
@@ -487,6 +497,7 @@ func (s *connection) responses(ctx context.Context, f *pgproto3.Frontend, c net.
 		if err != nil {
 			return err
 		}
+		_ = c.SetWriteDeadline(time.Now().Add(time.Duration(s.p.Engine.Config.QueryTimeoutMS) * time.Millisecond))
 		// Notices and asynchronous parameter changes do not consume command replies.
 		switch m.(type) {
 		case *pgproto3.NoticeResponse, *pgproto3.ParameterStatus, *pgproto3.NotificationResponse:
@@ -606,6 +617,12 @@ func (s *connection) responses(ctx context.Context, f *pgproto3.Frontend, c net.
 				skip = true
 			}
 		case *pgproto3.ReadyForQuery:
+			s.txStatus = v.TxStatus
+			if v.TxStatus == 'I' {
+				_ = c.SetReadDeadline(time.Time{})
+			} else {
+				_ = c.SetReadDeadline(time.Now().Add(time.Duration(s.p.Engine.Config.QueryTimeoutMS) * time.Millisecond))
+			}
 			s.mu.Lock()
 			for i := len(undo) - 1; i >= 0; i-- {
 				undo[i]()

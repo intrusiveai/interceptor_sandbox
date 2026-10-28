@@ -180,6 +180,7 @@ func main() {
 	adapterOnly := flag.Bool("adapter-only", false, "qualify the stateful invocation-adapter example without snapshots or model calls")
 	maximumEvidence := flag.Int64("evidence-max-bytes", evidencepolicy.DefaultMaxBytes, "local evidence archive acceptance ceiling")
 	root := flag.String("data-root", "", "optional host data root to check reference application state rollback")
+	customerSupport := flag.Bool("customer-support", false, "qualify the customer-support application")
 	postgresql := flag.Bool("postgresql", false, "qualify managed PostgreSQL")
 	flag.Parse()
 	_, limitErr := evidencepolicy.ParseLimit(strconv.FormatInt(*maximumEvidence, 10))
@@ -196,6 +197,10 @@ func main() {
 	must(limitErr)
 	limit := min(*maximumEvidence, attached.EvidenceMaxBytes)
 	first := attached.Binding
+	if *customerSupport {
+		qualifyCustomerSupport(first, *output, limit)
+		return
+	}
 	if *postgresql {
 		qualifyPostgreSQL(first, *output, limit, *root)
 		return

@@ -91,6 +91,28 @@ func qualifyPostgreSQL(first localapi.Binding, output string, limit int64, root 
 	require(string(x) == string(y), fmt.Sprintf("database/application/injection restore differs: %s != %s", x, y))
 	next := databaseTurn(second, b, "continue")
 	require(strings.Count(next.Body, "smoke payload") == 1 && next.ServiceCount == 1 && next.Refunds == 1, "restored state/progress incorrect")
+	payload := []byte(`{"id":"three","body":"created payload","metadata":{},"author_id":"a","embedding":"[0,0,1]"}`)
+	creationAttempt := b
+	creationAttempt.AttemptID += "-create"
+	creationAttempt.ParentAttemptID = b.AttemptID
+	creationAttempt.Generation++
+	creationAttempt.AttemptIndex++
+	creationAttempt.Digest = ""
+	creationAttempt.Payload = adaptive.ArtifactDescriptor{Digest: digest.Bytes(payload), SizeBytes: int64(len(payload)), MediaType: "application/json", Canonicalization: "raw"}
+	success(operation(second, "artifact.register", map[string]any{"descriptor": creationAttempt.Payload, "content": payload}, nil))
+	success(operation(second, "attempt.register", creationAttempt, &creationAttempt))
+	creation := persistent
+	creation.ID = "db-create"
+	creation.Selector.Key = `{"id":"three"}`
+	creation.Placement = injection.Placement{Operation: "replace"}
+	creation.Payload = payload
+	arm(second, creationAttempt, creation)
+	require(databaseTurn(second, creationAttempt, "continue").Documents == 3, "allowed record creation missing")
+	duplicate := creation
+	duplicate.ID = "db-create-duplicate"
+	duplicate.AttemptID = creationAttempt.AttemptID
+	duplicate.PayloadDigest = creationAttempt.Payload.Digest
+	require(operation(second, "injection.arm", map[string]any{"definition": duplicate}, &creationAttempt).Status >= 400, "duplicate creation silently upserted")
 	if root != "" {
 		qualifyEvidenceFailure(second, b, root)
 	}
@@ -100,4 +122,48 @@ func qualifyPostgreSQL(first localapi.Binding, output string, limit int64, root 
 	raw, _ := json.MarshalIndent(map[string]any{"passed": true, "session_id": first.SessionID, "sessions": []string{first.SessionID, second.SessionID}, "target_output": "seeded PostgreSQL/vector retrieval, response and state injection, committed/rolled back refund, database/application restore", "baseline": baseline, "restored": resumed, "evidence_failure": root != ""}, "", "  ")
 	must(os.WriteFile(filepath.Join(output, "result.json"), raw, 0600))
 	fmt.Println(string(raw))
+}
+
+func qualifyCustomerSupport(first localapi.Binding, output string, limit int64) {
+	a := attempt(first)
+	input := []byte(`{"message":"Explain the refund policy, inspect my order and refund 12.50."}`)
+	raw := success(operation(first, "application.invoke", map[string]any{"operation": "ask", "input": input, "media_type": "application/json", "attempt_id": a.AttemptID, "payload_digest": a.Payload.Digest}, &a))
+	var turn struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	must(json.Unmarshal(raw, &turn))
+	require(turn.Status == "complete", string(raw))
+	var view adaptive.ObservationView
+	must(json.Unmarshal(success(operation(first, "observation.read", adaptive.ObservationRequest{TurnID: turn.ID}, &a)), &view))
+	checked := false
+	for _, entry := range view.Entries {
+		if entry.Kind != "target_output" || entry.Availability != "available" {
+			continue
+		}
+		var chunk adaptive.FeedbackChunk
+		must(json.Unmarshal(success(operation(first, "observation.content.read", adaptive.FeedbackReadRequest{ReceiptID: view.ReceiptID, EntryID: entry.ID, MaxBytes: adaptive.MaxFeedbackChunk}, &a)), &chunk))
+		var value struct {
+			Answer string `json:"answer"`
+		}
+		must(json.Unmarshal(chunk.Content, &value))
+		var results []struct {
+			Outcome string `json:"outcome"`
+		}
+		must(json.Unmarshal([]byte(value.Answer), &results))
+		require(len(results) == 4, "agent skipped database tools: "+value.Answer)
+		for i, result := range results {
+			expected := "ok"
+			if i == 3 {
+				expected = "committed"
+			}
+			require(result.Outcome == expected, "agent database tool rejected: "+value.Answer)
+		}
+		checked = true
+	}
+	require(checked, "customer support output missing")
+	success(post("/v1/lifecycle", localapi.LifecycleRequest{WorkerInstanceID: first.WorkerInstanceID, RunRevision: first.RunRevision, APIVersion: localapi.Version, CampaignID: campaign, SessionID: first.SessionID, OperationID: "stop-customer-support", Operation: "session.stop"}))
+	evidence(output, first.SessionID, limit)
+	raw, _ = json.MarshalIndent(map[string]any{"passed": true, "session_id": first.SessionID, "target_output": "unchanged customer-support application: schema validation, pooled Psycopg, pgvector retrieval, named cursors and committed refund"}, "", "  ")
+	must(os.WriteFile(filepath.Join(output, "result.json"), raw, 0600))
 }

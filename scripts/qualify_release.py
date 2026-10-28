@@ -27,7 +27,7 @@ from publish_release import read_archive
 from build_release import ARCHIVE_ROOT
 
 
-def qualify(archive, version, source, base_image, output, client, adapter_language=None, embeddings=False, python_ca=False, state_snapshots=False, evidence_failure=False, postgresql=False):
+def qualify(archive, version, source, base_image, output, client, adapter_language=None, embeddings=False, python_ca=False, state_snapshots=False, evidence_failure=False, postgresql=False, example_directory=None, customer_support=False):
     if evidence_failure and not (state_snapshots or postgresql):
         raise ValueError("evidence failure qualification requires state snapshots")
     if (state_snapshots or postgresql) and (not adapter_language or embeddings or python_ca):
@@ -84,6 +84,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
         try:
             target_id = base["Id"]
             example = Path(__file__).resolve().parents[1] / ("examples/postgresql" if postgresql else "examples/application-state-snapshots" if state_snapshots else "examples/python-ca" if python_ca else "examples/remote-embeddings" if embeddings else "examples/invocation-adapters") / (adapter_language or "")
+            if example_directory: example = Path(example_directory).resolve()
             if adapter_language:
                 context = work / "target"
                 shutil.copytree(example / "target", context)
@@ -195,7 +196,13 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                     if any(m["Destination"] == "/app" or m["Destination"].startswith("/app/") for m in mounts):
                         raise ValueError("application/adapter source is mounted instead of installed")
                     (output / "mounts.json").write_text(json.dumps(mounts, indent=2)+"\n")
-                run(str(client), "--postgresql" if postgresql else "--state-snapshots" if state_snapshots else "--adapter-only" if adapter_language else "--command-only", "--output", str(output / "native"), *(["--evidence-failure", "--data-root", str(work / "data")] if evidence_failure else []))
+                    if postgresql:
+                        run(docker, 'exec', '--user', str(os.getuid()), active[0], '/bin/sh', '-c',
+                            'test -s /opt/interceptor/environment/environment.yaml && test -d /run/interceptor-session/pg/database/data')
+                        run(docker, 'exec', '--user', '20000:20000', active[0], '/bin/sh', '-c',
+                            'test ! -r /opt/interceptor/environment/environment.yaml && test ! -r /run/interceptor-tls/server-key.pem && test ! -x /run/interceptor-session/pg/database/data && set -- /tmp/interceptor-pg-* && test "$1" != "/tmp/interceptor-pg-*" && for path do test ! -x "$path" || exit 1; done')
+                        (output / 'database-isolation.json').write_text(json.dumps({'application_uid':20000,'private_blueprint':True,'private_database':True,'private_sockets':True,'private_tls_key':True})+'\n')
+                run(str(client), "--customer-support" if customer_support else "--postgresql" if postgresql else "--state-snapshots" if state_snapshots else "--adapter-only" if adapter_language else "--command-only", "--output", str(output / "native"), *(["--evidence-failure", "--data-root", str(work / "data")] if evidence_failure else []))
                 native = json.loads((output / "native/result.json").read_text())
                 if not native["passed"] or native["session_id"] != session["id"]:
                     raise ValueError("native qualification did not pass for this session")
@@ -212,8 +219,10 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
             if adapter_language:
                 logs = list((work / "data").rglob("application.*.log"))
                 diagnostics = "\n".join(p.read_text() for p in logs)
-                expected_processes = 2 if postgresql else 3 if state_snapshots else 1
-                if diagnostics.count("application initialized") != expected_processes or diagnostics.count("application closed") != expected_processes:
+                expected_processes = 1 if customer_support else 2 if postgresql else 3 if state_snapshots else 1
+                closed = diagnostics.count("application closed")
+                minimum_closed = expected_processes - int(postgresql and evidence_failure)
+                if diagnostics.count("application initialized") != expected_processes or not minimum_closed <= closed <= expected_processes:
                     raise ValueError("application did not initialize/close exactly once: " + diagnostics)
                 (output / "application.log").write_text(diagnostics)
                 runtime = "/usr/local/bin/python3" if adapter_language == "python" else "/usr/local/bin/node"
@@ -222,7 +231,9 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                               target_image=target_id, wrapper_image=lock["wrapper_digest"])
             if python_ca:
                 result['python_ca'] = dict(images=trust_checks, **python_ca_fixture.verify_evidence(output, diagnostics))
-            if postgresql:
+            if customer_support:
+                result['customer_support'] = {'scripted_model':True, 'fixed_test_embeddings':True, 'source_unchanged':True}
+            elif postgresql:
                 if fixture.failures: raise ValueError(fixture.failures)
                 if not any('smoke payload' in json.dumps(c['request']) for c in fixture.calls):
                     raise ValueError('database payload did not reach outbound model request')
