@@ -197,8 +197,10 @@ jobs:
           ARCH: ${{ matrix.arch }}
           RELEASE_VERSION: ${{ needs.context.outputs.version }}
         run: |
+          CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/postgresql-test" ./internal/postgresql
           python3 scripts/qualify_release.py --archive "dist/archives/interceptor_sandbox-v${RELEASE_VERSION}-linux_${ARCH}.tar.gz" \
             --version "$RELEASE_VERSION" --source "$GITHUB_SHA" --adapter-language python --postgresql --evidence-failure \
+            --database-test "$RUNNER_TEMP/postgresql-test" \
             --image python:3.12-slim --client "$RUNNER_TEMP/local-api-smoke" --output dist/qualification/python-postgresql
           python3 scripts/qualify_release.py --archive "dist/archives/interceptor_sandbox-v${RELEASE_VERSION}-linux_${ARCH}.tar.gz" \
             --version "$RELEASE_VERSION" --source "$GITHUB_SHA" --adapter-language node --postgresql --evidence-failure \

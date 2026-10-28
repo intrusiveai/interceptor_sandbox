@@ -81,13 +81,27 @@ Storage is checked at admission and every 100 ms while running; it is a watchdog
 not an exact filesystem quota, so a running write may briefly overshoot the limit.
 Protocol messages are bounded to 1 MiB on ingress. Keep database and snapshot
 budgets large enough for PostgreSQL's catalog and WAL overhead.
+Each connection permits up to 256 tracked statements, portals, and SQL cursors.
+Close unused prepared statements and cursors. Expired protocol portals are
+released at transaction end. Cancellation has bounded handshake capacity even
+when the application connection pool has reached `max_connections`.
+
+Names use ASCII letters, digits and underscores, start with a letter or
+underscore, and contain at most 63 characters. Application roles exclude reserved
+`pg_`/`interceptor_` names and `postgres`. Declare 1–16 roles with 8–256 byte
+synthetic passwords, at least one schema asset, and at most 128 schema/seed
+assets combined. Table policies require 1–8 key fields and 1–64 writable fields;
+keys cannot also be writable fields. Creation requires `max_records` from
+1 through 100000.
 
 The wrapper records the database versions and builder's supervisor UID in its
 existing application lock. Rebuild if running under a different host UID.
-Application execution retains its separate restricted UID. Database data, evidence, TLS keys and the Blueprint are mounted beneath a
+Application execution retains its separate restricted UID. Database data,
+evidence, TLS keys and the Blueprint are mounted beneath a
 supervisor-owned Linux directory; their ordinary paths resolve through fixed
 symlinks. This protects them even when Docker Desktop remaps bind-mount ownership.
-Management sockets use a separate supervisor-only directory on container tmpfs. Runtime executables use their
+Management sockets use a separate supervisor-only directory on container tmpfs.
+Runtime executables use their
 packaged musl library, independent of the target image's C library.
 
 ## Injection and committed-state checks

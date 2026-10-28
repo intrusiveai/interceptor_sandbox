@@ -38,5 +38,23 @@ restores database/application/injection state, induces a capture failure, export
 evidence, and removes its test containers and images. Licenses are inspected in
 the final image. Results identify the actual archive and host architecture.
 
+To include native protocol regression checks, compile `internal/postgresql` with
+`GOOS=linux GOARCH=<wrapper-architecture> CGO_ENABLED=0 go test -c -o /tmp/postgresql-test ./internal/postgresql`
+and add `--database-test /tmp/postgresql-test`. These checks run inside the actual
+wrapper and include cancellation at a full pool, independent transactions,
+partial portal fetches, pipelining, typed rewrites and fresh-session isolation.
+
+An optional runner exercises an unchanged local customer-support agent checkout:
+
+```sh
+python3 scripts/qualify_postgresql_agent.py --agent ../customer_support_agent_langchain \
+  --archive <native-release-archive> --version <version> --source <archive-source-commit> \
+  --image python:3.12-slim --client /tmp/local-api-smoke --output <new-output-directory>
+```
+
+It uses the agent's model/embedder hooks for deterministic fixtures and its normal
+schema validation, database tools, document checks and refund transaction. It
+does not modify the agent checkout or use agent-authored evidence for verdicts.
+
 See the [database guide](../../docs/postgresql.md) for configuration, limits,
 injection selectors, trust settings and compatibility details.

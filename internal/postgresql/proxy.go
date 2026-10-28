@@ -648,6 +648,11 @@ func (s *connection) responses(ctx context.Context, f *pgproto3.Frontend, c net.
 				undo[i]()
 			}
 			undo = nil
+			if v.TxStatus == 'I' {
+				// Native portals expire at transaction end. Retaining their
+				// metadata would exhaust the object ceiling in a long-lived pool.
+				clear(s.portals)
+			}
 			s.mu.Unlock()
 			if v.TxStatus == 'I' && s.p.After != nil {
 				if err = s.p.After(r.ctx); err != nil {

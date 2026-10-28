@@ -199,7 +199,11 @@ func (s *connection) cursorQuery(sql string, execution ...*execution) string {
 		}
 	}
 	if strings.EqualFold(t[0], "CLOSE") && len(t) > 1 {
-		delete(s.cursors, cursorName(t[1]))
+		if strings.EqualFold(t[1], "ALL") {
+			clear(s.cursors)
+		} else {
+			delete(s.cursors, cursorName(t[1]))
+		}
 	}
 	return sql
 }

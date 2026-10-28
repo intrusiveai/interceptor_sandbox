@@ -95,6 +95,11 @@ func TestSQLCursorAndUnsupportedFlowLexing(t *testing.T) {
 	if got := c.cursorQuery(`FETCH ALL FROM "docs"`); got == declaration {
 		t.Fatal("closed cursor retained")
 	}
+	c.cursorQuery(declaration)
+	c.cursorQuery(`CLOSE ALL`)
+	if len(c.cursors) != 0 {
+		t.Fatal("CLOSE ALL retained cursor metadata")
+	}
 	for _, sql := range []string{`SELECT 'COPY'`, `/* COPY */ SELECT $$COPY$$`, `SELECT "COPY"`} {
 		tokens, err := sqlTokens(sql)
 		if err != nil {

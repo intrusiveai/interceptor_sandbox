@@ -27,7 +27,7 @@ from publish_release import read_archive
 from build_release import ARCHIVE_ROOT
 
 
-def qualify(archive, version, source, base_image, output, client, adapter_language=None, embeddings=False, python_ca=False, state_snapshots=False, evidence_failure=False, postgresql=False, example_directory=None, customer_support=False):
+def qualify(archive, version, source, base_image, output, client, adapter_language=None, embeddings=False, python_ca=False, state_snapshots=False, evidence_failure=False, postgresql=False, example_directory=None, customer_support=False, database_test=None):
     if evidence_failure and not (state_snapshots or postgresql):
         raise ValueError("evidence failure qualification requires state snapshots")
     if (state_snapshots or postgresql) and (not adapter_language or embeddings or python_ca):
@@ -157,6 +157,12 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                 if run(docker,'run','--rm','--network','none','--entrypoint','/opt/interceptor/postgresql/bin/postgres',wrapper,'--version') != 'postgres (PostgreSQL) 18.6':
                     raise ValueError('packaged PostgreSQL executable version differs')
                 shutil.copytree(licenses, output / 'database-licenses')
+                if database_test:
+                    native_checks = run(docker, 'run', '--rm', '--network', 'none', '--user', '65534:65534',
+                        '--entrypoint', '/database-test', '-e', 'INTERCEPTOR_TEST_POSTGRES_BIN=/opt/interceptor/postgresql/bin',
+                        '-v', str(Path(database_test).resolve())+':/database-test:ro', wrapper,
+                        '-test.v', '-test.run', 'TestNativePostgreSQL', '-test.timeout', '90s')
+                    (output/'database-protocol.log').write_text(native_checks+'\n')
             run(docker,'cp',inspection+':/usr/local/share/interceptor/licenses/PostgreSQL-client.txt',str(work/'postgresql-client.LICENSE'))
             client_notices=(Path(__file__).resolve().parents[1]/'internal/appimage/postgresql-go.LICENSE').read_bytes()
             if (work/'postgresql-client.LICENSE').read_bytes()!=client_notices or client_notices not in (install/'LICENSE').read_bytes():
@@ -215,7 +221,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                     (output / "mounts.json").write_text(json.dumps(mounts, indent=2)+"\n")
                     if postgresql:
                         run(docker, 'exec', '--user', str(os.getuid()), active[0], '/bin/sh', '-c',
-                            'test -s /opt/interceptor/environment/environment.yaml && test -d /run/interceptor-session/pg/database/data')
+                            'test -s /opt/interceptor/environment/environment.yaml && test -s /run/interceptor-tls/server-key.pem && test -d /run/interceptor-session/pg/database/data')
                         run(docker, 'exec', '--user', '20000:20000', active[0], '/bin/sh', '-c',
                             'for path in /opt/interceptor/environment/environment.yaml /run/interceptor-tls/server-key.pem; do if head -c 1 "$path" >/dev/null 2>&1; then id; ls -ld /opt/interceptor/environment; echo "application can open $path"; exit 1; fi; done; if test -x /run/interceptor-session/pg/database/data; then echo "application can enter database data"; exit 1; fi; set -- /tmp/interceptor-pg-*; if test "$1" = "/tmp/interceptor-pg-*"; then echo "private socket directory missing"; ls -ld /tmp /tmp/*; exit 1; fi; for path do if test -x "$path"; then echo "application can enter $path"; exit 1; fi; done')
                         (output / 'database-isolation.json').write_text(json.dumps({'application_uid':20000,'private_blueprint':True,'private_database':True,'private_sockets':True,'private_tls_key':True})+'\n')
@@ -322,10 +328,34 @@ def verify_postgresql_evidence(output, failure):
     kinds = {e['kind'] for e in events}
     for required in ('database_request','database_result','database_response_rewritten','database_state_injection_committed','database_oracle'):
         if required not in kinds: raise ValueError('missing database evidence: '+required)
-    if not any(e['kind']=='database_oracle' and e['semantic']['detail']['matched'] for e in events):
+    delivered = {e.get('injection_id') for e in events if e['kind']=='injection_delivered'}
+    if not {'db-response', 'db-state'} <= delivered:
+        raise ValueError('native model-delivery confirmation missing for database injections')
+    first_session = json.loads((output/'native/result.json').read_text())['session_id']
+    original = [e for e in events if e['session_id']==first_session]
+    rolled_turns = {e.get('turn_id') for e in original if e['kind']=='database_request'
+                    and e['semantic']['detail'].get('query','').strip().upper()=='ROLLBACK'} - {None}
+    oracles = [e for e in original if e['kind']=='database_oracle']
+    rolled_oracles = [e for e in oracles if e.get('turn_id') in rolled_turns]
+    if not rolled_oracles or any(e['semantic']['detail']['matched'] for e in rolled_oracles):
+        raise ValueError('rollback produced a missing or positive oracle result')
+    if not any(e['semantic']['detail']['matched'] for e in oracles):
         raise ValueError('committed refund oracle did not fire')
+    if any(e['semantic']['detail']['matched'] for e in oracles
+           if e['semantic']['detail']['source']=='harness'):
+        raise ValueError('harness mutation incorrectly established an application outcome')
+    requests = {(e['session_id'], e['semantic']['detail']['connection'], e['semantic']['detail']['execution']):e
+                for e in events if e['kind']=='database_request'}
+    for e in events:
+        if e['kind'] not in ('database_result', 'database_response_rewritten'): continue
+        detail = e['semantic']['detail']
+        request = requests[(e['session_id'], detail['connection'], detail['execution'])]
+        if e.get('turn_id')!=request.get('turn_id') or e.get('attribution')!=request.get('attribution'):
+            raise ValueError('database result lost its immutable request observation')
     if partial != int(failure): raise ValueError('unexpected database evidence completeness')
-    return {'engine':'18.6','pgvector':'0.8.7','evidence_events':len(events),'incomplete_sessions':partial,'restores':1}
+    return {'engine':'18.6','pgvector':'0.8.7','evidence_events':len(events),'incomplete_sessions':partial,
+            'restores':1,'both_injections_delivery_confirmed':True,'rollback_oracle_negative':True,
+            'request_observation_preserved':True}
 
 
 if __name__ == "__main__":
@@ -341,6 +371,9 @@ if __name__ == "__main__":
     parser.add_argument("--python-ca", action="store_true", help="qualify declared Python Certifi stores with unchanged HTTPX clients")
     parser.add_argument("--evidence-failure", action="store_true", help="qualify evidence failure using test-only blob directory permissions")
     parser.add_argument("--postgresql", action="store_true", help="qualify packaged PostgreSQL and pgvector with real drivers")
+    parser.add_argument("--database-test", type=Path, help="prebuilt Linux internal/postgresql test binary matching the wrapper architecture")
     parser.add_argument("--state-snapshots", action="store_true", help="qualify application context and sandbox restore with packaged Python or Node adapters")
     args = parser.parse_args()
-    qualify(args.archive.resolve(), args.version, args.source, args.image, args.output, args.client.resolve(), args.adapter_language, args.embeddings, args.python_ca, args.state_snapshots, args.evidence_failure, args.postgresql)
+    if args.database_test and not args.postgresql:
+        parser.error('--database-test requires --postgresql')
+    qualify(args.archive.resolve(), args.version, args.source, args.image, args.output, args.client.resolve(), args.adapter_language, args.embeddings, args.python_ca, args.state_snapshots, args.evidence_failure, args.postgresql, database_test=args.database_test)

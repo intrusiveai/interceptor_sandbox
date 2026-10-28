@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net"
 	"os"
@@ -23,6 +24,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/recording"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/statejournal"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgproto3"
 )
 
 func testTLS(t *testing.T) (*tls.Config, *tls.Config) {
@@ -136,6 +138,70 @@ func TestNativePostgreSQL(t *testing.T) {
 	}
 	if err = <-queryDone; err == nil {
 		t.Fatal("full-pool cancellation did not cancel query")
+	}
+	// Exercise native simple-query multiple results and common SQL semantics.
+	results, err := a.PgConn().Exec(ctx, `SELECT id FROM documents WHERE id='one' UNION SELECT id FROM documents WHERE id='two' ORDER BY id LIMIT 1; SELECT count(*) FROM documents GROUP BY metadata->>'source' ORDER BY count(*)`).ReadAll()
+	if err != nil || len(results) != 2 || len(results[0].Rows) != 1 || string(results[0].Rows[0][0]) != "one" || len(results[1].Rows) != 2 {
+		t.Fatalf("multiple SQL results: %#v %v", results, err)
+	}
+	for _, format := range []int16{0, 1} {
+		for column, pointer := range map[string]string{"text": "/rows/0/0", "json": "/rows/0/1/body"} {
+			d := injection.Definition{ID: fmt.Sprintf("typed-%d-%s", format, column), Surface: "database_response", Mode: "simulation", Scope: "once", Enabled: true, Selector: injection.Selector{Service: "database", CallOrdinal: "first", RequestBodyPointer: "/query", RequestBodyContain: "typed_result"}, Placement: injection.Placement{Operation: "append_text", Pointer: pointer}, Payload: json.RawMessage(`" injected"`)}
+			if err = manager.Arm(d, ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+		rows, x := a.Query(ctx, `SELECT 'original'::text AS typed_result, '{"body":"old"}'::jsonb, NULL::text, 42::int4`, pgx.QueryResultFormats{format, format, format, format})
+		if x != nil {
+			t.Fatal(x)
+		}
+		if !rows.Next() {
+			t.Fatal("typed result absent", rows.Err())
+		}
+		values, x := rows.Values()
+		rows.Close()
+		if x != nil || values[0] != "original injected" || values[1].(map[string]any)["body"] != "old injected" || values[2] != nil || values[3] != int32(42) {
+			t.Fatalf("typed result format %d: %#v %v", format, values, x)
+		}
+	}
+	// Real extended-protocol portal pagination, pipelined within each Sync
+	// group. More than 256 successive transactions must not retain dead portals.
+	frontend := a.PgConn().Frontend()
+	for i := 0; i < 260; i++ {
+		name := fmt.Sprintf("portal-%d", i)
+		frontend.SendParse(&pgproto3.Parse{Query: "SELECT generate_series(1,2)::text AS item"})
+		frontend.SendBind(&pgproto3.Bind{DestinationPortal: name})
+		frontend.SendDescribe(&pgproto3.Describe{ObjectType: 'P', Name: name})
+		frontend.SendExecute(&pgproto3.Execute{Portal: name, MaxRows: 1})
+		frontend.SendExecute(&pgproto3.Execute{Portal: name})
+		frontend.SendSync(&pgproto3.Sync{})
+		if err = frontend.Flush(); err != nil {
+			t.Fatal(err)
+		}
+		count, suspended := 0, false
+	readPortal:
+		for {
+			message, x := frontend.Receive()
+			if x != nil {
+				t.Fatal(x)
+			}
+			switch m := message.(type) {
+			case *pgproto3.ErrorResponse:
+				t.Fatalf("portal %d: %#v", i, m)
+			case *pgproto3.DataRow:
+				count++
+				if string(m.Values[0]) != fmt.Sprint(count) {
+					t.Fatal("portal result ordering changed")
+				}
+			case *pgproto3.PortalSuspended:
+				suspended = true
+			case *pgproto3.ReadyForQuery:
+				break readPortal
+			}
+		}
+		if count != 2 || !suspended {
+			t.Fatal("partial portal fetch missing")
+		}
 	}
 	var body string
 	if err = a.QueryRow(ctx, "SELECT body FROM documents WHERE id=$1", "one").Scan(&body); err != nil || body != "benign" {
