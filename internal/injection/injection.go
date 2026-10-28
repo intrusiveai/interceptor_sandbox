@@ -115,32 +115,32 @@ func Validate(definition Definition) error {
 	if definition.ID == "" || strings.ContainsAny(definition.ID, "/\\") {
 		return errors.New("injection id is required and may not contain path separators")
 	}
-	if definition.Surface != "model_tool_result" && definition.Surface != "environment_state" && definition.Surface != "service_response" && definition.Surface != "mcp_tool_result" {
+	if definition.Surface != "model_tool_result" && definition.Surface != "environment_state" && definition.Surface != "service_response" && definition.Surface != "mcp_tool_result" && definition.Surface != "database_response" {
 		return fmt.Errorf("unsupported injection surface %q", definition.Surface)
 	}
-	if (definition.Surface == "model_tool_result" || definition.Surface == "service_response" || definition.Surface == "mcp_tool_result") && definition.Mode != "simulation" || definition.Surface == "environment_state" && definition.Mode != "fidelity" {
+	if (definition.Surface == "model_tool_result" || definition.Surface == "service_response" || definition.Surface == "mcp_tool_result" || definition.Surface == "database_response") && definition.Mode != "simulation" || definition.Surface == "environment_state" && definition.Mode != "fidelity" {
 		return fmt.Errorf("mode %q is invalid for surface %q", definition.Mode, definition.Surface)
 	}
 	if definition.Scope != "once" && definition.Scope != "next_turn" && definition.Scope != "standing" {
 		return fmt.Errorf("unsupported injection scope %q", definition.Scope)
 	}
-	if (definition.Surface == "service_response" || definition.Surface == "mcp_tool_result") && definition.Scope == "next_turn" {
+	if (definition.Surface == "service_response" || definition.Surface == "mcp_tool_result" || definition.Surface == "database_response") && definition.Scope == "next_turn" {
 		return errors.New("response injection does not support turn-scoped delivery")
 	}
 	if len(definition.Payload) == 0 || !json.Valid(definition.Payload) {
 		return errors.New("payload must be valid JSON")
 	}
-	if definition.Surface == "model_tool_result" || definition.Surface == "mcp_tool_result" || definition.Surface == "service_response" {
+	if definition.Surface == "model_tool_result" || definition.Surface == "mcp_tool_result" || definition.Surface == "service_response" || definition.Surface == "database_response" {
 		if definition.Surface != "model_tool_result" && definition.Selector.TurnID != "" {
 			return errors.New("response injection cannot select an untrusted turn ID")
 		}
-		if definition.Surface != "service_response" && definition.Selector.ToolName == "" {
+		if definition.Surface != "service_response" && definition.Surface != "database_response" && definition.Selector.ToolName == "" {
 			return errors.New("tool-result selector requires tool_name")
 		}
 		if definition.Surface != "model_tool_result" && definition.Selector.Service == "" {
 			return errors.New("response selector requires stable service ID")
 		}
-		if definition.Surface == "service_response" && definition.Selector.ToolName != "" {
+		if (definition.Surface == "service_response" || definition.Surface == "database_response") && definition.Selector.ToolName != "" {
 			return errors.New("service response selector may not name a tool")
 		}
 		ordinal := definition.Selector.CallOrdinal
@@ -151,11 +151,19 @@ func Validate(definition Definition) error {
 			}
 		}
 	}
+	if definition.Surface == "database_response" {
+		if definition.Selector.Method != "" || definition.Selector.Path != "" || len(definition.Selector.HeadersEqual) > 0 || len(definition.Selector.QueryEqual) > 0 || definition.Selector.ArgumentsPointer != "" || len(definition.Selector.ArgumentsEqual) > 0 || definition.Selector.ArgumentsContain != "" {
+			return errors.New("database_response uses request_body predicates, not HTTP or tool selectors")
+		}
+		if err := validateHTTPSelector(definition.Selector); err != nil {
+			return err
+		}
+	}
 	if definition.Surface == "service_response" {
 		if err := validateHTTPSelector(definition.Selector); err != nil {
 			return err
 		}
-	} else if definition.Surface != "environment_state" && (definition.Selector.Path != "" || definition.Selector.Method != "" || len(definition.Selector.QueryEqual) > 0 || len(definition.Selector.HeadersEqual) > 0 || definition.Selector.RequestBodyPointer != "" || len(definition.Selector.RequestBodyEqual) > 0 || definition.Selector.RequestBodyContain != "") {
+	} else if definition.Surface != "environment_state" && definition.Surface != "database_response" && (definition.Selector.Path != "" || definition.Selector.Method != "" || len(definition.Selector.QueryEqual) > 0 || len(definition.Selector.HeadersEqual) > 0 || definition.Selector.RequestBodyPointer != "" || len(definition.Selector.RequestBodyEqual) > 0 || definition.Selector.RequestBodyContain != "") {
 		return errors.New("HTTP request predicates are valid only for service_response")
 	}
 	if definition.Surface != "environment_state" && (definition.Selector.Collection != "" || definition.Selector.Key != "") {
@@ -183,7 +191,7 @@ func Validate(definition Definition) error {
 	switch definition.Placement.Operation {
 	case "replace", "append_text", "prepend_text":
 	case "insert_array":
-		if definition.Surface == "service_response" || definition.Surface == "mcp_tool_result" {
+		if definition.Surface == "service_response" || definition.Surface == "mcp_tool_result" || definition.Surface == "database_response" {
 			return errors.New("response injection does not support insert_array")
 		}
 		if definition.Placement.Index < 0 || definition.Placement.Index > 10000 {
@@ -276,7 +284,13 @@ func httpHeaderName(value string) string {
 // RewriteResponse applies simulation-mode ingress mutation after a successful
 // managed service or native MCP operation and before the application sees it.
 func (m *Manager) RewriteResponse(surface, service, tool string, request ResponseContext, candidate any) (any, []Result, error) {
-	if surface != "service_response" && surface != "mcp_tool_result" {
+	return m.RewriteResponseChecked(surface, service, tool, request, candidate, nil)
+}
+
+// RewriteResponseChecked validates native result encodings before marking an
+// injection applied, consumed, or eligible for model-delivery confirmation.
+func (m *Manager) RewriteResponseChecked(surface, service, tool string, request ResponseContext, candidate any, validate func(any) error) (any, []Result, error) {
+	if surface != "service_response" && surface != "mcp_tool_result" && surface != "database_response" {
 		return nil, nil, errors.New("invalid response-injection surface")
 	}
 	m.mu.Lock()
@@ -307,6 +321,9 @@ func (m *Manager) RewriteResponse(surface, service, tool string, request Respons
 		result := Result{InjectionID: definition.ID, Matched: true}
 		item.evaluation.Matched = true
 		value, err := Apply(updated, definition.Placement, definition.Payload)
+		if err == nil && validate != nil {
+			err = validate(value)
+		}
 		if err != nil {
 			result.Error = err.Error()
 		} else {
@@ -431,7 +448,14 @@ func (m *Manager) ArmTransaction(definition Definition, eligibleTurn string, ext
 	}}
 	if apply != nil {
 		if err := apply(); err != nil {
-			return fmt.Errorf("apply committed fidelity mutation: %w", err)
+			if definition.Selector.Service != "" && len(extra) == 0 {
+				item := m.items[definition.ID]
+				item.evaluation.DeliveryObservable = false
+				if x := m.persistDisabled(item); x != nil {
+					return errors.Join(err, x)
+				}
+			}
+			return fmt.Errorf("apply fidelity mutation: %w", err)
 		}
 	}
 	m.record("injection_armed", definition.ID, map[string]any{"surface": definition.Surface, "mode": definition.Mode, "scope": definition.Scope})
@@ -717,7 +741,7 @@ func (m *Manager) ObservableResponseIDs() []string {
 	defer m.mu.Unlock()
 	result := []string{}
 	for _, item := range m.orderedItems() {
-		if (item.definition.Surface == "service_response" || item.definition.Surface == "mcp_tool_result") && item.evaluation.Fired && item.evaluation.DeliveryObservable {
+		if (item.definition.Surface == "service_response" || item.definition.Surface == "mcp_tool_result" || item.definition.Surface == "database_response") && item.evaluation.Fired && item.evaluation.DeliveryObservable {
 			result = append(result, item.definition.ID)
 		}
 	}

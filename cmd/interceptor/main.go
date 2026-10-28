@@ -82,6 +82,11 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return sandboxdCommand(arguments[1:])
 	case "app-helper":
 		return sandboxd.RunHelper()
+	case "image-postgresql-user":
+		if len(arguments) != 2 {
+			return errors.New("image-postgresql-user requires UID")
+		}
+		return appimage.EnsurePostgreSQLUser(arguments[1])
 	case "image-install-ca":
 		if len(arguments) != 2 {
 			return errors.New("image-install-ca requires one CA path")

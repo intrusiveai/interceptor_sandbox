@@ -66,6 +66,13 @@ requirements, and end-to-end qualification contract.
 observation windows, their attribution limits, and consistent handling of
 required evidence-storage failures.
 
+## Managed PostgreSQL and database injections
+
+[`postgresql-integration.md`](postgresql-integration.md) defines packaged native
+PostgreSQL with pgvector, protocol interception, database-state and
+database-response injections, independent evidence/oracles, and coordinated
+snapshot/restore qualification.
+
 ## Change discipline
 
 [`delivery-contracts.md`](delivery-contracts.md) is normative for Blueprint and

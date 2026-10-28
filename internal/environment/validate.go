@@ -275,11 +275,26 @@ func Validate(directory string) (*ValidationReport, error) {
 	for i, service := range blueprint.Services {
 		prefix := fmt.Sprintf("services[%d]", i)
 		add(validateID(prefix+".id", service.ID, serviceIDs))
-		if service.Kind != "fixture_http" && service.Kind != "stateful_http" && service.Kind != "mcp_http" {
+		if service.Kind != "fixture_http" && service.Kind != "stateful_http" && service.Kind != "mcp_http" && service.Kind != "postgresql" {
 			add(fmt.Errorf("%s.kind %q is unsupported", prefix, service.Kind))
 		}
 		add(validateListen(prefix+".listen", service.Listen, listens, service.ID))
 		add(validateHostnames(prefix, service.Hostnames, hostnames, service.ID))
+		if service.Kind == "postgresql" {
+			add(service.PostgreSQL.Validate())
+			if !blueprint.Network.TLS.Enabled || len(service.Hostnames) == 0 {
+				add(fmt.Errorf("%s PostgreSQL requires network TLS and a declared hostname", prefix))
+			}
+			if service.Authorization != nil || service.Options != nil || service.Seed != "" || service.Routes != "" || service.Tools != "" || service.Fixtures != "" || service.Endpoint != "" {
+				add(fmt.Errorf("%s PostgreSQL cannot use HTTP service configuration", prefix))
+			}
+			if service.PostgreSQL != nil {
+				assetSources = append(assetSources, service.PostgreSQL.Schema...)
+				assetSources = append(assetSources, service.PostgreSQL.Seeds...)
+			}
+		} else if service.PostgreSQL != nil {
+			add(fmt.Errorf("%s.postgresql requires kind postgresql", prefix))
+		}
 		creationCollections := map[string]struct{}{}
 		for policyIndex, policy := range service.Injections.CreateCollections {
 			policyPrefix := fmt.Sprintf("%s.injections.create_collections[%d]", prefix, policyIndex)
@@ -470,6 +485,18 @@ func Validate(directory string) (*ValidationReport, error) {
 		prefix := fmt.Sprintf("oracles[%d]", i)
 		add(validateID(prefix+".id", oracle.ID, oracleIDs))
 		switch oracle.Kind {
+		case "database_query_match":
+			found := false
+			for _, service := range blueprint.Services {
+				if service.ID == oracle.Service && service.Kind == "postgresql" {
+					found = true
+				}
+			}
+			query, ok := oracle.Match["query"].(string)
+			_, hasExpected := oracle.Match["equals"]
+			if !found || !ok || strings.TrimSpace(query) == "" || len(query) > 16384 || !hasExpected || len(oracle.Match) != 2 {
+				add(fmt.Errorf("%s requires PostgreSQL service and match.query/equals", prefix))
+			}
 		case "attacker_sink_match":
 			if _, ok := attackerIDs[oracle.Service]; !ok {
 				add(fmt.Errorf("%s.service references unknown attacker service %q", prefix, oracle.Service))

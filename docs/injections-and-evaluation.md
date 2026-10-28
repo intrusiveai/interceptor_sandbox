@@ -421,3 +421,9 @@ available. Existing evidence remains inspectable/exportable when its integrity
 checks pass. Corrupt storage causes an explicit export error and is not repaired
 silently. Hash verification establishes integrity of retained records, not
 completeness of capture. Repair storage and start a new session to resume work.
+
+## Managed PostgreSQL
+
+See [PostgreSQL and pgvector](postgresql.md) for the managed database Blueprint,
+wrapper packaging, verified driver TLS, database injection surfaces, independent
+committed-state oracles, evidence and coordinated restore contract.

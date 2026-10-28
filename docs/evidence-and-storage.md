@@ -217,3 +217,9 @@ written, and are cleaned when completed, canceled, or expired. A sudden machine
 failure may leave some behind until Interceptor's cleanup runs. Use an encrypted
 local volume where required and do not put real production secrets in an
 Environment Blueprint.
+
+## Managed PostgreSQL
+
+See [PostgreSQL and pgvector](postgresql.md) for the managed database Blueprint,
+wrapper packaging, verified driver TLS, database injection surfaces, independent
+committed-state oracles, evidence and coordinated restore contract.

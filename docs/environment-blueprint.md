@@ -798,3 +798,9 @@ Sealing writes `environment.lock.json`, a receipt containing digital
 fingerprints for the application and approved assets. Inspect compares the
 current directory with that receipt. Any change that could affect behavior
 requires review and resealing.
+
+## Managed PostgreSQL
+
+See [PostgreSQL and pgvector](postgresql.md) for the managed database Blueprint,
+wrapper packaging, verified driver TLS, database injection surfaces, independent
+committed-state oracles, evidence and coordinated restore contract.

@@ -33,6 +33,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/hostlifetime"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/ociruntime"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/postgresql"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/session"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/snapshot"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/statejournal"
@@ -211,6 +212,22 @@ func Restore(ctx context.Context, config Config, sourceSessionID, checkpointID s
 	}
 	if checkpoint.JournalSeq == 0 || checkpoint.JournalSeq > uint64(len(transactions)) || transactions[checkpoint.JournalSeq-1].Hash != checkpoint.JournalHash {
 		return session.Metadata{}, errors.New("checkpoint journal head is missing or inconsistent")
+	}
+	databaseCheckpoints := map[string]bool{}
+	for _, tx := range transactions[:checkpoint.JournalSeq] {
+		for _, op := range tx.Operations {
+			if op.Kind == "database_checkpoint" {
+				if err := postgresql.ValidateCheckpoint(op); err != nil {
+					return session.Metadata{}, err
+				}
+				databaseCheckpoints[op.Service] = true
+			}
+		}
+	}
+	for _, service := range report.Blueprint.Services {
+		if service.Kind == "postgresql" && !databaseCheckpoints[service.ID] {
+			return session.Metadata{}, fmt.Errorf("checkpoint lacks database %s", service.ID)
+		}
 	}
 	blobs, err := blobstore.Open(sourcePaths.Blobs, report.Blueprint.Limits.MaxBlobBytes)
 	if err != nil {
@@ -572,8 +589,12 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 			bridgeErrors <- bridge.ServeSpool(bridgeContext, filepath.Join(paths.Sockets, "model-spool"), connector)
 		}()
 	}
+	runtimeEnvironment, err := privateDatabaseEnvironment(absolute(config.EnvironmentDirectory), paths.Root, blueprint)
+	if err != nil {
+		return metadata, err
+	}
 	mounts := []ociruntime.Mount{
-		{Source: absolute(config.EnvironmentDirectory), Target: "/opt/interceptor/environment", ReadOnly: true},
+		{Source: runtimeEnvironment, Target: "/opt/interceptor/environment", ReadOnly: true},
 		{Source: paths.Root, Target: "/run/interceptor-session"},
 		{Source: paths.Blobs, Target: "/run/interceptor-blobs"},
 	}

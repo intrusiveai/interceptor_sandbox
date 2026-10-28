@@ -22,6 +22,8 @@ import (
 )
 
 type Lock struct {
+	PostgreSQLUID        int       `json:"postgresql_uid,omitempty"`
+	PostgreSQL           string    `json:"postgresql,omitempty"`
 	SchemaVersion        int       `json:"schema_version"`
 	EnvironmentDigest    string    `json:"environment_digest"`
 	SourceImage          string    `json:"source_image"`
@@ -78,7 +80,23 @@ func Build(ctx context.Context, directory, dataRoot, tag, version string, docker
 			sourceReference = localTag
 		}
 	}
-	dockerfile := fmt.Sprintf("FROM %s\nCOPY --chmod=0555 interceptor /usr/local/bin/interceptor\n", sourceReference)
+	databaseStage, databaseCopy, err := databaseBuild(report.Blueprint, temporary)
+	if err != nil {
+		return Lock{}, err
+	}
+	dockerfile := databaseStage + fmt.Sprintf("FROM %s\nCOPY --chmod=0555 interceptor /usr/local/bin/interceptor\n", sourceReference) + databaseCopy
+	if databaseCopy != "" {
+		originalUser, err := docker.ImageUser(ctx, sourceReference)
+		if err != nil {
+			return Lock{}, err
+		}
+		if originalUser == "" {
+			originalUser = "0"
+		}
+		command, _ := json.Marshal([]string{"/usr/local/bin/interceptor", "image-postgresql-user", fmt.Sprint(os.Getuid())})
+		dockerfile += "USER 0:0\nRUN --network=none " + string(command) + "\nUSER " + originalUser + "\n"
+	}
+
 	if code := report.Blueprint.Application.Interface.Code; code != nil && code.AdapterAsset != "" {
 		volumes, err := docker.ImageVolumes(ctx, sourceReference)
 		if err != nil {
@@ -159,7 +177,10 @@ func Build(ctx context.Context, directory, dataRoot, tag, version string, docker
 		SourceImage: report.Blueprint.Application.Image, SourceDigest: environmentLock.ApplicationDigest,
 		WrapperImage: tag, WrapperDigest: wrapperDigest, InterceptorVersion: version,
 		InterceptorBinary: digest.Bytes(binary), BlueprintSchema: report.Blueprint.APIVersion,
-		JournalSchemaVersion: 1, TLS: tlsLock, ConstructedAt: time.Now().UTC(),
+		JournalSchemaVersion: 1, TLS: tlsLock, PostgreSQL: databaseVersions(report.Blueprint), ConstructedAt: time.Now().UTC(),
+	}
+	if databaseCopy != "" {
+		lock.PostgreSQLUID = os.Getuid()
 	}
 	if report.Blueprint.Network.TLS.Enabled {
 		if err := persistTLSMaterial(dataRoot, report.Blueprint, material); err != nil {
@@ -196,6 +217,9 @@ func Load(path string) (Lock, error) {
 }
 
 func Verify(ctx context.Context, lock Lock, environmentLock *environment.Lock, docker ociruntime.Docker) error {
+	if lock.PostgreSQL != "" && lock.PostgreSQLUID != os.Getuid() {
+		return errors.New("PostgreSQL wrapper belongs to a different supervisor UID; rebuild with interceptor app build on this host")
+	}
 	supportedBlueprint := lock.BlueprintSchema == environment.APIVersion || lock.BlueprintSchema == environment.DeliveryAPIVersion
 	if lock.EnvironmentDigest != environmentLock.EnvironmentDigest || lock.SourceDigest != environmentLock.ApplicationDigest || !supportedBlueprint || lock.JournalSchemaVersion != 1 {
 		return errors.New("application lock is incompatible with Sealed Environment")

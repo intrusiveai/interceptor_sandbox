@@ -250,3 +250,9 @@ Before relying on an environment:
 7. If snapshots are enabled, mutate both service and file state, snapshot,
    restore, and verify the application sees the restored values.
 8. Confirm unsnapshotted in-memory state is not required after restart.
+
+## Managed PostgreSQL
+
+See [PostgreSQL and pgvector](postgresql.md) for the managed database Blueprint,
+wrapper packaging, verified driver TLS, database injection surfaces, independent
+committed-state oracles, evidence and coordinated restore contract.
