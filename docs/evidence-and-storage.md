@@ -223,3 +223,10 @@ Environment Blueprint.
 See [PostgreSQL and pgvector](postgresql.md) for the managed database Blueprint,
 wrapper packaging, verified driver TLS, database injection surfaces, independent
 committed-state oracles, evidence and coordinated restore contract.
+
+Database checkpoint exports include the logical backup blobs referenced by the
+current journal and retained restore-source history, along with historical file
+blobs from those journals. Each blob appears once. Export verifies its digest and
+recorded size; a missing or corrupt blob fails the export and leaves any previous
+output archive intact. Export uses retained bytes and never reconnects to a live
+database to reconstruct missing evidence.

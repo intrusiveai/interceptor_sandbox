@@ -446,6 +446,13 @@ the existing checkpoint/blob integrity and usage accounting. Engine/extension
 compatibility MUST be recorded and verified before restoring. Private runtime
 credentials MUST remain outside public snapshot/export views.
 
+Evidence export MUST include every backup blob referenced by `database_checkpoint`
+operations in both the current state journal and retained restore-source journal.
+It MUST also include historical file blobs referenced by either journal, even
+when absent from the current file manifest. The exporter MUST verify content
+digests and recorded sizes, deduplicate shared blobs, and fail without replacing
+an existing archive if any required blob is missing, corrupt, or inconsistent.
+
 The coordinator MUST first block new application invocations and allow configured
 application quiescence/state-save hooks to finish their database calls. It MUST
 then prevent new database work and drain in-flight work to a bounded, consistent
