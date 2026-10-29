@@ -48,9 +48,8 @@ producer-neutral interfaces for adaptive harnesses, capability
 discovery, filtered feedback, attempt-indexed evidence, and a secure operations
 Operator boundary. It is normative for those extension interfaces and augments
 the local MVP contract. Section 13 specifies campaign-based access, worker/revision
-attribution, terminal execution closure and campaign reporting. The native
-implementation and localhost API are covered by the current
-[validation record](../docs/local-api-validation.md).
+attribution, terminal execution closure and campaign reporting. The
+[local API guide](../docs/local-api.md) describes the native integration interface.
 `interceptor-improvements.md` describes the cross-project integration
 capabilities and AEF consumption rules without redefining these schemas.
 

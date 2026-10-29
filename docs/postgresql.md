@@ -146,9 +146,26 @@ oracles:
 Results are arrays of rows. Checks run at initialization and idle transaction
 boundaries. A verdict requires a result different from the baseline and equal to
 `equals`. Harness mutations reset the baseline, so a harness-created record alone
-does not establish an application outcome. Verdicts are cumulative; observed
-turn association is not causal proof. This conservative comparison cannot assign
-causality among concurrent application transactions.
+does not establish an application outcome. Session-wide verdicts are cumulative;
+observed turn association is not causal proof. This conservative comparison cannot
+assign causality among concurrent application transactions.
+
+To receive database outcomes between attempts, include `oracle-assisted` in the
+Blueprint's `adaptive.feedback_profiles` and start the session with
+`--feedback-profile oracle-assisted`. Register attempts with that same profile and
+include `oracle_outcome` if using an explicit observation selection. After the turn
+completes, read its ordinary `observation.read` feedback before starting the next
+attempt. No session export or additional database query is needed.
+
+Live feedback uses only recorded application observations bound to that turn and
+attempt, through its completion boundary. It does not reuse a cumulative verdict
+from an earlier turn or restored checkpoint. A positive result means the condition
+was observed, not that this attempt caused a new change. Missing, incomplete or
+ambiguous evidence is unavailable/partial, not a negative verdict. A complete
+collection without a positive result also does not prove attack failure. SQL,
+private results and credentials remain hidden; black-box and diagnostic profiles
+withhold oracle outcomes. See [live feedback](feedback.md) for receipt and category
+semantics.
 
 ## Evidence and restore
 
@@ -157,7 +174,7 @@ SQLSTATE errors, command tags and transaction status. Credentials/authentication
 exchanges are excluded. Harness mutation records remain distinct from application
 traffic. Successful UPDATE inside an open transaction is not proof of commit.
 Delivery confirmation still requires the payload in the outbound model request.
-Oracles use retained independent query results for offline evaluation.
+Oracles use retained independent query results for live and offline evaluation.
 
 Required capture failures latch `evidence_storage_error`, stop further work and
 block new snapshots. Already forwarded writes may have committed; Interceptor

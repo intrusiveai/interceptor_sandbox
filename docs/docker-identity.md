@@ -50,5 +50,3 @@ cleanup rather than guessing from a name or the current Docker context. Finalize
 and purge old sessions with the prior build on their original daemon before upgrading,
 or manually reconcile their containers and retained files on that daemon. Missing
 bindings are never automatically filled from the currently selected context.
-
-See [validation](docker-identity-validation.md) for the exercised recovery cases.

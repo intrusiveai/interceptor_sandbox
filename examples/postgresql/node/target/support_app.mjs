@@ -13,6 +13,7 @@ export class SupportApplication {
         const db = await this.pool.connect();
         let body,count,nearest,docs,refunds;
         try {
+            if (value.message === 'clear_refunds') await db.query('DELETE FROM refunds');
             if (value.message === 'change') await db.query("UPDATE counters SET count=count+1 WHERE id='counter'");
             if (['refund','rollback'].includes(value.message)) {
                 await db.query('BEGIN');

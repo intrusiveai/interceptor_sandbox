@@ -109,17 +109,25 @@ func evaluateOracle(oracle environment.Oracle, input Input) (OracleResult, error
 			var value struct {
 				Service string `json:"service"`
 				Detail  struct {
-					Oracle  string `json:"oracle"`
-					Matched bool   `json:"matched"`
+					Oracle  string          `json:"oracle"`
+					Source  string          `json:"source"`
+					Matched *bool           `json:"matched"`
+					Result  json.RawMessage `json:"result"`
 				} `json:"detail"`
 			}
 			if err := json.Unmarshal(event.Semantic, &value); err != nil {
 				return result, err
 			}
-			if value.Service == oracle.Service && value.Detail.Oracle == oracle.ID {
-				observed = true
+			if value.Service != oracle.Service || value.Detail.Oracle != oracle.ID {
+				continue
 			}
-			if value.Service == oracle.Service && value.Detail.Oracle == oracle.ID && value.Detail.Matched {
+			var rows [][]json.RawMessage
+			if value.Detail.Matched == nil || json.Unmarshal(value.Detail.Result, &rows) != nil || rows == nil ||
+				(value.Detail.Source != "application" && value.Detail.Source != "baseline" && value.Detail.Source != "harness") {
+				return result, errors.New("required database oracle evidence is incomplete")
+			}
+			observed = true
+			if value.Detail.Source == "application" && *value.Detail.Matched {
 				result.Fired = true
 				result.Evidence = append(result.Evidence, fmt.Sprintf("event:%d", event.Seq))
 				if result.FirstEventSeq == 0 {

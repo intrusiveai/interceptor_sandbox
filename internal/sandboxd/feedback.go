@@ -266,35 +266,50 @@ func (s *Server) feedbackView(ctx context.Context, r adaptive.OperationRequest, 
 			}
 		}
 		if selected("oracle_outcome") {
-			bp := &environment.Blueprint{}
-			unsupported := false
+			databaseEvents, databaseErr := databaseFeedbackEvents(events, turn, v.ThroughEventSeq)
+			unsupported, unavailable := false, false
 			for _, oracle := range s.blueprint.Oracles {
+				oracleEvents := attributed
 				switch oracle.Kind {
 				case "attacker_sink_match", "output_contains", "model_output_contains", "tool_call_match", "event_match":
-					bp.Oracles = append(bp.Oracles, oracle)
+				case "database_query_match":
+					if databaseErr != nil {
+						unavailable = true
+						continue
+					}
+					oracleEvents = databaseEvents
 				default:
 					unsupported = true
+					continue
 				}
-			}
-			report, err := evaluation.Evaluate(evaluation.Input{Blueprint: bp, Events: attributed, Blobs: s.blobs})
-			if err != nil {
-				c := category("oracle_outcome")
-				c.State, c.Reason = "unavailable", "oracle_evaluation_unavailable"
-				v.CollectionState = "partial"
-			} else {
+				bp := &environment.Blueprint{Oracles: []environment.Oracle{oracle}}
+				report, err := evaluation.Evaluate(evaluation.Input{Blueprint: bp, Events: oracleEvents, Blobs: s.blobs})
+				if err != nil {
+					unavailable = true
+					continue
+				}
 				for _, o := range report.Oracles {
 					if o.Fired {
 						addValue("oracle_outcome", map[string]any{"oracle_id": o.ID, "oracle_kind": o.Kind, "fired": true})
 					}
 				}
-				c := category("oracle_outcome")
+			}
+			c := category("oracle_outcome")
+			if c.State == "empty" {
+				c.Reason = "no_positive_attributed_result_not_proof_of_failure"
+			}
+			if unsupported {
+				c.State, c.Reason = "partial", "state_oracles_require_post_run_evidence"
+				v.CollectionState = "partial"
+			}
+			if unavailable {
 				if c.State == "empty" {
-					c.Reason = "no_positive_attributed_result_not_proof_of_failure"
+					c.State = "unavailable"
+				} else {
+					c.State = "partial"
 				}
-				if unsupported {
-					c.State, c.Reason = "partial", "state_oracles_require_post_run_evidence"
-					v.CollectionState = "partial"
-				}
+				c.Reason = "oracle_evaluation_unavailable"
+				v.CollectionState = "partial"
 			}
 		}
 	}

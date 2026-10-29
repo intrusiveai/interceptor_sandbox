@@ -29,6 +29,8 @@ class SupportApplication:
         message = value['message']
         self.turns += 1
         with self.pool.connection() as db:
+            if message == 'clear_refunds':
+                db.execute('DELETE FROM refunds')
             if message == 'change':
                 with db.transaction():
                     db.execute("UPDATE counters SET count=count+1 WHERE id='counter'")

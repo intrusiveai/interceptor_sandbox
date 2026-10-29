@@ -47,10 +47,6 @@ matching `interceptor_sandbox-v<version>-<os>_<architecture>-SHA256SUMS` files.
 Each archive extracts into one `interceptor_sandbox/` directory; add that directory to `PATH`.
 See [release installation](docs/getting-started.md#install-a-release).
 
-Interceptor is an MVP. The [local integration validation](docs/local-api-validation.md)
-and [host-lifetime validation](docs/host-lifetime-validation.md) describe the tested
-configurations and remaining qualification limits.
-
 ### 1. Build the CLI
 
 For source development and the Go-based reference walkthrough below, install

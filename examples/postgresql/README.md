@@ -18,7 +18,9 @@ interceptor run --environment <environment-directory> <model-provider-options>
 ```
 
 Use the `ask` operation with `{"message":"continue"}`, `change`, `refund`, or
-`rollback`. A configured model must accept the example's `chat-fixture` identifier.
+`rollback`, or `clear_refunds`. Start with `--feedback-profile oracle-assisted`
+to read the recorded refund oracle through live feedback between attempts.
+A configured model must accept the example's `chat-fixture` identifier.
 For an entirely offline deterministic model fixture, use the existing qualification
 runner instead (it needs build-time network access for image dependencies):
 
@@ -33,8 +35,10 @@ python3 scripts/qualify_release.py --archive <native-release-archive> \
 Pull the base image first. For Node, use `--adapter-language node` and
 `--image node:22-bookworm-slim`. The runner extracts the archive outside the source
 checkout, removes Go from the CLI's PATH, builds the wrapper, exercises native
-SQL/TLS and both injections, verifies committed versus rolled-back refunds,
-restores database/application/injection state, induces a capture failure, exports
+SQL/TLS and both injections, reads live committed versus rolled-back refund
+outcomes, restores database/application/injection state, checks a harness-authored
+refund does not produce an application-success verdict, verifies earlier receipts
+are unchanged, induces a capture failure, exports
 evidence, and removes its test containers and images. Licenses are inspected in
 the final image. Results identify the actual archive and host architecture.
 

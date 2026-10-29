@@ -367,6 +367,77 @@ specific business condition without the independent state check. Existing
 cumulative/latched outcomes and causal-attribution limits MUST remain intact.
 Evaluation failure or incomplete capture MUST be unavailable/error, not false.
 
+### Amendment: database oracle outcomes in live feedback
+
+After a completed turn, an authorized Harness MUST be able to obtain recorded
+database oracle outcomes through the existing observation/feedback API before
+starting its next attempt, without ending or exporting the session. The
+implementation MUST extend the existing `oracle_outcome` category under the
+`oracle-assisted` profile and existing observation selection; it MUST NOT add a
+second feedback channel or relax black-box/diagnostic visibility restrictions.
+
+The implementation MUST update `internal/sandboxd/feedback.go` and reuse the
+`database_query_match` evaluator in `internal/evaluation`. Recorded database
+oracle observations MUST no longer be excluded merely because they concern
+database state. Other state-based oracle kinds MUST retain their existing
+restrictions unless they independently satisfy the same recorded-evidence
+contract.
+
+Live evaluation MUST use integrity-verified, already captured `database_oracle`
+events through the requested turn's recorded completion boundary. It MUST NOT
+query the current database to reconstruct an earlier turn, use later events, or
+substitute session-wide cumulative/latched outcomes for that turn's observations.
+Repeated receipt reads MUST return the same retained result, including after
+subsequent database changes or snapshot restore.
+
+The implementation MUST verify that oracle capture preserves the initiating
+database operation's immutable observed turn/attempt association, and that
+eligible observations are durably recorded before the completion boundary.
+Filtering MUST bind both the requested turn and attempt using the established
+observed-attribution rules. Observations outside a turn, with ambiguous ownership,
+from another turn/attempt, or completed after the boundary MUST NOT become a
+positive result for the requested turn. Observation during an attempt MUST NOT
+be described as proof that its injection caused the database outcome.
+
+Seed state and harness-authored database changes MUST retain the existing
+baseline exclusions. A response injection, rolled-back write, successful COMMIT
+alone, or an inherited positive result MUST NOT establish a new business outcome.
+Live and retained evaluation of the same eligible evidence MUST agree, while
+session-wide historical evaluation MAY include observations from other turns.
+
+Feedback MUST preserve the existing positive-observation contract: a positive
+result identifies the oracle and its kind; absence of a positive observation is
+not proof of failure. Missing, corrupt, incomplete, or unattributable required
+evidence MUST produce an explicit unavailable/partial category and reason,
+not a negative verdict or a complete empty result. Evidence persistence failures
+MUST retain the existing fail-closed behavior. Public feedback MUST NOT expose
+sealed SQL, raw private query results, oracle definitions, or credentials.
+
+Focused tests MUST cover permitted/withheld/unrequested feedback, a committed
+positive outcome, a complete nonmatching observation, rollback, seeded and
+harness-authored matches, and multiple oracles including unchanged unsupported
+state-oracle kinds. They MUST also cover earlier/later turns in the same attempt,
+other attempts, late/outside/ambiguous observations, missing/corrupt evidence,
+required storage failures, cumulative results across restore, and immutable
+receipt replay after further writes. Tests MUST assert category availability as
+well as verdict content so omitted observations cannot silently look complete.
+
+The existing Docker qualification MUST exercise the packaged wrapper with a real
+PostgreSQL driver and the same public feedback API used by Harness. Before
+session export, it MUST obtain a committed business outcome through live
+oracle-assisted feedback, show that a rollback and harness-only write do not
+produce that outcome, and execute a subsequent attempt while the session remains
+running. It MUST compare the live result against retained evidence at the same
+boundary, verify an old receipt is unchanged after later writes, and clean up
+created resources. Component tests alone MUST NOT establish this workflow.
+
+The implementation MUST update the adaptive feedback contract and database
+guide to explain live availability, profile restrictions, observation boundaries,
+and unavailable outcomes. It MUST remove any blanket claim that database oracle
+verdicts require post-run evidence, while retaining the documented restrictions
+for other unsupported state oracles. No new Blueprint option or agent-authored
+evidence requirement is needed.
+
 ## Coordinated snapshots and restore
 
 Snapshots MUST include database contents/schema, pgvector data/indexes, required

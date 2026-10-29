@@ -112,11 +112,24 @@ Missing/invalid event recording makes those categories unavailable. A successful
 invocation is not proof that an injection fired or an objective was achieved.
 
 Oracle-assisted collection evaluates only attributed events through that cutoff
-using supported event-backed detector kinds. It returns positive normalized
-outcomes; no positive observation is not a negative verdict. State-only detectors
-are marked as requiring post-run evidence; they are not re-evaluated against later
-mutable target state. No raw evidence, detector match expressions or secret values
-are disclosed. This MVP does not wait for asynchronous activity after completion.
+using supported event-backed detector kinds, including `database_query_match`.
+Database outcomes use independent committed-state observations already recorded
+during the requested turn and observed attempt. They are available before the
+session ends; reading feedback never runs SQL against current database state.
+Baseline/harness observations, other turns, later events and inherited cumulative
+verdicts cannot substitute for this turn's observations. An observed outcome does
+not prove that the attempt's injection caused it.
+
+Feedback returns positive normalized outcomes (`oracle_id`, `oracle_kind`,
+`fired`); no positive observation is not a negative verdict. Missing, incomplete
+or ambiguous required database observations produce `oracle_evaluation_unavailable`
+with an unavailable/partial category. Valid outcomes from other oracles can remain
+available in a partial collection. Inspect category state as well as entries.
+Other state-only detectors still require post-run evidence; they are not
+re-evaluated against later mutable state. No raw query results, SQL, detector match
+expressions or credentials are disclosed. The same profile/selection restrictions
+apply to all oracle outcomes. Collection does not wait for asynchronous activity
+after completion, and a retained receipt never changes after later writes or restore.
 
 ## Read actual bytes
 
