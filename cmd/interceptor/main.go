@@ -794,9 +794,27 @@ func exportEvidence(ctx context.Context, dataRoot string, metadata session.Metad
 			references[reference] = struct{}{}
 		}
 	}
-	for _, transaction := range transactions {
-		for _, operation := range transaction.Operations {
-			if operation.Kind == "file_upsert" {
+	// Restore-source history is part of the exported evidence even when the
+	// replacement journal no longer references the source's files or backups.
+	journals := [][]statejournal.Transaction{transactions}
+	if metadata.ParentSessionID != "" {
+		source, err := statejournal.VerifyFile(filepath.Join(paths.Root, "restore-source", "state.jsonl"))
+		if err != nil {
+			return err
+		}
+		journals = append(journals, source)
+	}
+	journalSizes := map[string]int64{}
+	for _, history := range journals {
+		for _, transaction := range history {
+			for _, operation := range transaction.Operations {
+				if operation.Kind != "file_upsert" && operation.Kind != "database_checkpoint" {
+					continue
+				}
+				if size, exists := journalSizes[operation.Blob]; exists && size != operation.Size {
+					return errors.New("journal blob has conflicting recorded sizes")
+				}
+				journalSizes[operation.Blob] = operation.Size
 				references[operation.Blob] = struct{}{}
 			}
 		}
@@ -966,6 +984,10 @@ func exportEvidence(ctx context.Context, dataRoot string, metadata session.Metad
 		reader, object, err := store.Open(reference)
 		if err != nil {
 			return err
+		}
+		if size, exists := journalSizes[reference]; exists && size != object.Size {
+			reader.Close()
+			return errors.New("journal blob size does not match retained bytes")
 		}
 		name := "blobs/sha256/" + strings.TrimPrefix(reference, "sha256:")
 		copyErr := addReader(name, reader, object.Size, 0o640)
