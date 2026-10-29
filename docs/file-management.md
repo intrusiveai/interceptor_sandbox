@@ -1,6 +1,5 @@
 # Spool file management and evidence purge
 
-Status: implemented; see [validation](file-management-validation.md).
 The normative rules are [spool management](../specs/mvp.md#432-host-spool-file-management)
 and [purge](../specs/mvp.md#87-administrative-evidence-purge).
 

@@ -3,6 +3,10 @@
 These instructions are for Interceptor Sandbox maintainers publishing and
 promoting releases. They are not part of installing or running Interceptor.
 
+Store local qualification reports and testing logs in
+`../maintainers/interceptor_sandbox/`, outside this source repository and its
+public documentation. Keep reusable qualification tools and tests in this repo.
+
 ## Candidate releases and promotion
 
 Push to `candidate-v1.2.3`, including by merging another branch into it, to run
