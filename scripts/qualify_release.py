@@ -197,7 +197,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                     "--allow-embedding-model", "embed-timeout"]
             with (output / "run.log").open("w") as log:
                 process = subprocess.Popen([cli, "run", "--environment", str(blueprint),
-                    *provider_args],
+                    *provider_args, *(["--feedback-profile", "oracle-assisted"] if postgresql and not customer_support else [])],
                     cwd=outside, env=env, stdout=log, stderr=subprocess.STDOUT)
                 deadline = time.monotonic() + 60
                 session = None
@@ -353,9 +353,22 @@ def verify_postgresql_evidence(output, failure):
         if e.get('turn_id')!=request.get('turn_id') or e.get('attribution')!=request.get('attribution'):
             raise ValueError('database result lost its immutable request observation')
     if partial != int(failure): raise ValueError('unexpected database evidence completeness')
+    views = json.loads((output/'native/database-live-feedback.json').read_text())
+    if len(views) != 5: raise ValueError('missing live database feedback checks')
+    for view in views:
+        observed = [e for e in events if e['session_id'] == view['session_id']
+                    and e['seq'] <= view['through_event_seq'] and e['kind'] == 'database_oracle'
+                    and e.get('turn_id') == view['turn_id']
+                    and e.get('attribution', {}).get('window') == 'observed'
+                    and e['attribution'].get('observed_attempt_id') == view['attempt_id']
+                    and e['semantic']['detail']['source'] == 'application']
+        if not observed: raise ValueError('live verdict has no recorded turn-bound database evidence')
+        expected = {e['semantic']['detail']['oracle'] for e in observed if e['semantic']['detail']['matched']}
+        actual = {o['value']['oracle_id'] for o in view['observations'] if o['kind'] == 'oracle_outcome' and o['value']['fired']}
+        if expected != actual: raise ValueError('live and retained database oracle evidence differ')
     return {'engine':'18.6','pgvector':'0.8.7','evidence_events':len(events),'incomplete_sessions':partial,
             'restores':1,'both_injections_delivery_confirmed':True,'rollback_oracle_negative':True,
-            'request_observation_preserved':True}
+            'request_observation_preserved':True,'live_oracle_feedback_matches_evidence':True}
 
 
 if __name__ == "__main__":

@@ -82,11 +82,14 @@ func operation(b localapi.Binding, name string, body any, attempt *adaptive.Atte
 	}
 	return postRaw("/v1/operations", adaptive.EncodeOperation(request, raw))
 }
-func attempt(b localapi.Binding) adaptive.AttemptContext {
+func attempt(b localapi.Binding, profile ...string) adaptive.AttemptContext {
 	payload := []byte(`"smoke payload"`)
 	descriptor := adaptive.ArtifactDescriptor{Digest: digest.Bytes(payload), SizeBytes: int64(len(payload)), MediaType: "application/json", Canonicalization: "raw"}
 	success(operation(b, "artifact.register", map[string]any{"descriptor": descriptor, "content": payload}, nil))
 	a := adaptive.AttemptContext{APIVersion: adaptive.AttemptContextVersion, CampaignID: campaign, ThreadID: "smoke-thread", AttemptID: fmt.Sprintf("smoke-attempt-%d", b.RunRevision), Generation: b.RunRevision, AttemptIndex: b.RunRevision, Payload: descriptor, Generator: adaptive.Generator{Kind: "custom-harness"}, FeedbackProfile: "black-box", CreatedAt: time.Now().UTC()}
+	if len(profile) > 0 {
+		a.FeedbackProfile = profile[0]
+	}
 	if b.RunRevision > 1 {
 		a.ParentAttemptID = fmt.Sprintf("smoke-attempt-%d", b.RunRevision-1)
 	}

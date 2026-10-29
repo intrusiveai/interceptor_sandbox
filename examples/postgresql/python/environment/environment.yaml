@@ -1,6 +1,8 @@
 ---
 api_version: interceptor.dev/v1alpha1
 kind: Environment
+adaptive:
+  feedback_profiles: [black-box, oracle-assisted]
 metadata:
   name: adapter-python
   version: '1'

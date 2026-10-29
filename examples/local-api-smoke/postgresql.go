@@ -16,10 +16,11 @@ import (
 
 type databaseOutput struct {
 	stateOutput
-	Body      string   `json:"body"`
-	Documents int      `json:"documents"`
-	Refunds   int      `json:"refunds"`
-	Nearest   []string `json:"nearest"`
+	Body      string                   `json:"body"`
+	Documents int                      `json:"documents"`
+	Refunds   int                      `json:"refunds"`
+	Nearest   []string                 `json:"nearest"`
+	Feedback  adaptive.ObservationView `json:"-"`
 }
 
 func databaseTurn(b localapi.Binding, a adaptive.AttemptContext, message string) databaseOutput {
@@ -41,13 +42,40 @@ func databaseTurn(b localapi.Binding, a adaptive.AttemptContext, message string)
 		must(json.Unmarshal(success(operation(b, "observation.content.read", adaptive.FeedbackReadRequest{ReceiptID: view.ReceiptID, EntryID: entry.ID, MaxBytes: adaptive.MaxFeedbackChunk}, &a)), &chunk))
 		var output databaseOutput
 		must(json.Unmarshal(chunk.Content, &output))
+		output.Feedback = view
 		return output
 	}
 	panic("database target output missing")
 }
 func qualifyPostgreSQL(first localapi.Binding, output string, limit int64, root string) {
-	a := attempt(first)
+	a := attempt(first, "oracle-assisted")
+	views := []adaptive.ObservationView{}
+	checkOracle := func(result databaseOutput, want bool) {
+		view := result.Feedback
+		state := "empty"
+		if want {
+			state = "available"
+		}
+		require(view.CollectionState == "complete", fmt.Sprintf("incomplete live database feedback: %+v", view.Categories))
+		found, fired := false, false
+		for _, category := range view.Categories {
+			if category.Kind == "oracle_outcome" {
+				found = true
+				require(category.State == state, fmt.Sprintf("oracle category: %+v", category))
+			}
+		}
+		for _, observation := range view.Observations {
+			if observation.Kind != "oracle_outcome" {
+				continue
+			}
+			value, _ := observation.Value.(map[string]any)
+			fired = fired || value["oracle_id"] == "refund-committed" && value["fired"] == true
+		}
+		require(found && fired == want, "incorrect live database oracle verdict")
+		views = append(views, view)
+	}
 	seed := databaseTurn(first, a, "continue")
+	checkOracle(seed, false)
 	require(seed.Body == "benign" && seed.Documents == 2 && strings.Join(seed.Nearest, ",") == "one,Alice" && seed.Refunds == 0, "seed/join/vector retrieval failed")
 	arm := func(b localapi.Binding, a adaptive.AttemptContext, d injection.Definition) {
 		d.AttemptID = a.AttemptID
@@ -69,8 +97,10 @@ func qualifyPostgreSQL(first localapi.Binding, output string, limit int64, root 
 	require(strings.Contains(databaseTurn(first, a, "continue").Body, "smoke payload"), "persistent mutation missing")
 	rolled := databaseTurn(first, a, "rollback")
 	require(rolled.Refunds == 0, "rollback persisted refund")
+	checkOracle(rolled, false)
 	committed := databaseTurn(first, a, "refund")
 	require(committed.Refunds == 1, "committed refund absent")
+	checkOracle(committed, true)
 	databaseTurn(first, a, "change")
 	response.ID = "db-after-checkpoint"
 	arm(first, a, response)
@@ -84,7 +114,7 @@ func qualifyPostgreSQL(first localapi.Binding, output string, limit int64, root 
 	}
 	must(json.Unmarshal(success(post("/v1/lifecycle", localapi.LifecycleRequest{WorkerInstanceID: first.WorkerInstanceID, RunRevision: first.RunRevision, APIVersion: localapi.Version, CampaignID: campaign, SessionID: first.SessionID, OperationID: "restore-database", Operation: "snapshot.restore", CheckpointID: checkpoint.ID})), &restored))
 	second := restored.Binding
-	b := attempt(second)
+	b := attempt(second, "oracle-assisted")
 	resumed := databaseTurn(second, b, "continue")
 	x, _ := json.Marshal(baseline)
 	y, _ := json.Marshal(resumed)
@@ -113,13 +143,41 @@ func qualifyPostgreSQL(first localapi.Binding, output string, limit int64, root 
 	duplicate.AttemptID = creationAttempt.AttemptID
 	duplicate.PayloadDigest = creationAttempt.Payload.Digest
 	require(operation(second, "injection.arm", map[string]any{"definition": duplicate}, &creationAttempt).Status >= 400, "duplicate creation silently upserted")
+	// A subsequent attempt may create matching state, but that harness write is
+	// not an application success. Restored cumulative verdicts cannot replace it.
+	checkOracle(databaseTurn(second, creationAttempt, "clear_refunds"), false)
+	harnessPayload := []byte(`{"id":"harness-refund","amount":42}`)
+	harnessAttempt := creationAttempt
+	harnessAttempt.AttemptID += "-refund"
+	harnessAttempt.ParentAttemptID = creationAttempt.AttemptID
+	harnessAttempt.Generation++
+	harnessAttempt.AttemptIndex++
+	harnessAttempt.Digest = ""
+	harnessAttempt.Payload = adaptive.ArtifactDescriptor{Digest: digest.Bytes(harnessPayload), SizeBytes: int64(len(harnessPayload)), MediaType: "application/json", Canonicalization: "raw"}
+	success(operation(second, "artifact.register", map[string]any{"descriptor": harnessAttempt.Payload, "content": harnessPayload}, nil))
+	success(operation(second, "attempt.register", harnessAttempt, &harnessAttempt))
+	harnessRefund := creation
+	harnessRefund.ID = "db-harness-refund"
+	harnessRefund.Selector.Collection = "refunds"
+	harnessRefund.Selector.Key = `{"id":"harness-refund"}`
+	harnessRefund.Payload = harnessPayload
+	arm(second, harnessAttempt, harnessRefund)
+	harnessResult := databaseTurn(second, harnessAttempt, "continue")
+	require(harnessResult.Refunds == 1, "harness refund missing")
+	checkOracle(harnessResult, false)
+	var retained adaptive.ObservationView
+	must(json.Unmarshal(success(operation(first, "observation.read", adaptive.ObservationRequest{ReceiptID: committed.Feedback.ReceiptID}, &a)), &retained))
+	require(retained.Hash == committed.Feedback.Hash, "committed receipt changed after later writes and restore")
+	viewBytes, err := json.MarshalIndent(views, "", "  ")
+	must(err)
+	must(os.WriteFile(filepath.Join(output, "database-live-feedback.json"), viewBytes, 0600))
 	if root != "" {
 		qualifyEvidenceFailure(second, b, root)
 	}
 	success(post("/v1/lifecycle", localapi.LifecycleRequest{WorkerInstanceID: second.WorkerInstanceID, RunRevision: second.RunRevision, APIVersion: localapi.Version, CampaignID: campaign, SessionID: second.SessionID, OperationID: "stop-database", Operation: "session.stop"}))
 	evidence(output, first.SessionID, limit)
 	evidence(output, second.SessionID, limit, root != "")
-	raw, _ := json.MarshalIndent(map[string]any{"passed": true, "session_id": first.SessionID, "sessions": []string{first.SessionID, second.SessionID}, "target_output": "seeded PostgreSQL/vector retrieval, response and state injection, committed/rolled back refund, database/application restore", "baseline": baseline, "restored": resumed, "evidence_failure": root != ""}, "", "  ")
+	raw, _ := json.MarshalIndent(map[string]any{"passed": true, "session_id": first.SessionID, "sessions": []string{first.SessionID, second.SessionID}, "target_output": "seeded PostgreSQL/vector retrieval, response and state injection, committed/rolled back refund, live oracle feedback, database/application restore", "baseline": baseline, "restored": resumed, "evidence_failure": root != "", "live_oracle_feedback": true, "retained_receipt_unchanged": true}, "", "  ")
 	must(os.WriteFile(filepath.Join(output, "result.json"), raw, 0600))
 	fmt.Println(string(raw))
 }
