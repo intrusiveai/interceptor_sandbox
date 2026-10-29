@@ -18,6 +18,7 @@ import platform
 import shutil
 import signal
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -277,6 +278,20 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                 result['embeddings'] = fixture.verify(output)
             (output / "result.json").write_text(json.dumps(result, indent=2)+"\n")
             print(json.dumps(result))
+        except Exception:
+            # Keep test-only diagnostics before the isolated data root is purged.
+            try:
+                diagnostics = output / "failure-diagnostics"
+                diagnostics.mkdir(exist_ok=True)
+                for path in (work / "data").rglob("*.log"):
+                    relative = path.relative_to(work / "data")
+                    destination = diagnostics / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(path, destination)
+                (diagnostics / "sessions.json").write_text(run(cli, "list", "--json")+"\n")
+            except Exception as diagnostic_error:
+                print(f"Could not retain failure diagnostics: {diagnostic_error}", file=sys.stderr)
+            raise
         finally:
             if process is not None and process.poll() is None:
                 process.send_signal(signal.SIGINT)
@@ -354,7 +369,7 @@ def verify_postgresql_evidence(output, failure):
             raise ValueError('database result lost its immutable request observation')
     if partial != int(failure): raise ValueError('unexpected database evidence completeness')
     views = json.loads((output/'native/database-live-feedback.json').read_text())
-    if len(views) != 5: raise ValueError('missing live database feedback checks')
+    if len(views) != 6: raise ValueError('missing live database feedback checks')
     for view in views:
         observed = [e for e in events if e['session_id'] == view['session_id']
                     and e['seq'] <= view['through_event_seq'] and e['kind'] == 'database_oracle'

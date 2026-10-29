@@ -47,6 +47,20 @@ func databaseTurn(b localapi.Binding, a adaptive.AttemptContext, message string)
 	}
 	panic("database target output missing")
 }
+
+func databaseAttempt(b localapi.Binding, parent adaptive.AttemptContext, suffix string, payload []byte) adaptive.AttemptContext {
+	a := parent
+	a.AttemptID += "-" + suffix
+	a.ParentAttemptID = parent.AttemptID
+	a.Generation++
+	a.AttemptIndex++
+	a.Digest = ""
+	a.Payload = adaptive.ArtifactDescriptor{Digest: digest.Bytes(payload), SizeBytes: int64(len(payload)), MediaType: "application/json", Canonicalization: "raw"}
+	success(operation(b, "artifact.register", map[string]any{"descriptor": a.Payload, "content": payload}, nil))
+	success(operation(b, "attempt.register", a, &a))
+	return a
+}
+
 func qualifyPostgreSQL(first localapi.Binding, output string, limit int64, root string) {
 	a := attempt(first, "oracle-assisted")
 	views := []adaptive.ObservationView{}
@@ -101,7 +115,10 @@ func qualifyPostgreSQL(first localapi.Binding, output string, limit int64, root 
 	committed := databaseTurn(first, a, "refund")
 	require(committed.Refunds == 1, "committed refund absent")
 	checkOracle(committed, true)
-	databaseTurn(first, a, "change")
+	// Continue the campaign after receiving the positive verdict, before any
+	// snapshot/restore, stop, or export of this session.
+	followup := databaseAttempt(first, a, "next", []byte(`"smoke payload"`))
+	checkOracle(databaseTurn(first, followup, "change"), true)
 	response.ID = "db-after-checkpoint"
 	arm(first, a, response)
 	var checkpoint snapshot.Checkpoint
@@ -114,7 +131,7 @@ func qualifyPostgreSQL(first localapi.Binding, output string, limit int64, root 
 	}
 	must(json.Unmarshal(success(post("/v1/lifecycle", localapi.LifecycleRequest{WorkerInstanceID: first.WorkerInstanceID, RunRevision: first.RunRevision, APIVersion: localapi.Version, CampaignID: campaign, SessionID: first.SessionID, OperationID: "restore-database", Operation: "snapshot.restore", CheckpointID: checkpoint.ID})), &restored))
 	second := restored.Binding
-	b := attempt(second, "oracle-assisted")
+	b := databaseAttempt(second, followup, "restored", []byte(`"smoke payload"`))
 	resumed := databaseTurn(second, b, "continue")
 	x, _ := json.Marshal(baseline)
 	y, _ := json.Marshal(resumed)
@@ -122,15 +139,7 @@ func qualifyPostgreSQL(first localapi.Binding, output string, limit int64, root 
 	next := databaseTurn(second, b, "continue")
 	require(strings.Count(next.Body, "smoke payload") == 1 && next.ServiceCount == 1 && next.Refunds == 1, "restored state/progress incorrect")
 	payload := []byte(`{"id":"three","body":"created payload","metadata":{},"author_id":"a","embedding":"[0,0,1]"}`)
-	creationAttempt := b
-	creationAttempt.AttemptID += "-create"
-	creationAttempt.ParentAttemptID = b.AttemptID
-	creationAttempt.Generation++
-	creationAttempt.AttemptIndex++
-	creationAttempt.Digest = ""
-	creationAttempt.Payload = adaptive.ArtifactDescriptor{Digest: digest.Bytes(payload), SizeBytes: int64(len(payload)), MediaType: "application/json", Canonicalization: "raw"}
-	success(operation(second, "artifact.register", map[string]any{"descriptor": creationAttempt.Payload, "content": payload}, nil))
-	success(operation(second, "attempt.register", creationAttempt, &creationAttempt))
+	creationAttempt := databaseAttempt(second, b, "create", payload)
 	creation := persistent
 	creation.ID = "db-create"
 	creation.Selector.Key = `{"id":"three"}`
@@ -147,15 +156,7 @@ func qualifyPostgreSQL(first localapi.Binding, output string, limit int64, root 
 	// not an application success. Restored cumulative verdicts cannot replace it.
 	checkOracle(databaseTurn(second, creationAttempt, "clear_refunds"), false)
 	harnessPayload := []byte(`{"id":"harness-refund","amount":42}`)
-	harnessAttempt := creationAttempt
-	harnessAttempt.AttemptID += "-refund"
-	harnessAttempt.ParentAttemptID = creationAttempt.AttemptID
-	harnessAttempt.Generation++
-	harnessAttempt.AttemptIndex++
-	harnessAttempt.Digest = ""
-	harnessAttempt.Payload = adaptive.ArtifactDescriptor{Digest: digest.Bytes(harnessPayload), SizeBytes: int64(len(harnessPayload)), MediaType: "application/json", Canonicalization: "raw"}
-	success(operation(second, "artifact.register", map[string]any{"descriptor": harnessAttempt.Payload, "content": harnessPayload}, nil))
-	success(operation(second, "attempt.register", harnessAttempt, &harnessAttempt))
+	harnessAttempt := databaseAttempt(second, creationAttempt, "refund", harnessPayload)
 	harnessRefund := creation
 	harnessRefund.ID = "db-harness-refund"
 	harnessRefund.Selector.Collection = "refunds"

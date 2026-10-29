@@ -1,5 +1,8 @@
 # PostgreSQL integration qualification
 
+For the subsequent live-feedback correction, see
+[Live oracle feedback qualification](#live-oracle-feedback-qualification).
+
 Qualification date: 2026-10-28. Implementation revision:
 `c6c3da449a954777cfd8a757a4910d6c007a5370`.
 The subsequent qualification-report commit changes documentation only.
@@ -104,3 +107,66 @@ COPY, replication, and required SCRAM channel binding are explicitly unsupported
 Response mutation supports text/varchar and JSON/JSONB values; other native types,
 including vectors, pass through unchanged. See the [database guide](../../docs/postgresql.md)
 for limits and configuration.
+
+## Live oracle feedback qualification
+
+Date: 2026-10-29. Runtime implementation and tested archive source:
+`eafed3bd288a0cb5293141ab3a2758055efbd448`. Subsequent changes extend qualification
+and this report; they do not change the shipped runtime. The work is on
+`feat/postgresql-live-oracle-feedback`, targeting `candidate-v0.1.3`.
+
+The locally built `interceptor_sandbox-v0.1.3-darwin_arm64.tar.gz` had SHA-256
+`acb5cea2a2fabab65037065ebd9e690ede17104e2b0e6e4b349ddfeb60929a2f`.
+Its packaged Linux ARM64 companion had SHA-256
+`da304ad36db2b45411008e7cd1f4d8a56429f47d7a85243727b2b89d34a7b50b`.
+The existing archive verifier checked integrity, and wrapper inspection confirmed
+the installed companion's exact bytes. The CLI ran outside the source checkout
+with no Go executable on its PATH.
+
+Both final Docker qualifications passed against that archive:
+
+| Client | Runtime | Native evidence events | Restore / intentional partial sessions |
+| --- | --- | --- | --- |
+| Psycopg 3.2.10 with pgvector 0.4.1 | Python 3.12.16 | 1164 | 1 / 1 |
+| `pg` 8.16.3 | Node 22.23.4 | 571 | 1 / 1 |
+
+The clients used the public local API to collect six live oracle views before
+export: initial nonmatching state, rolled-back refund, committed refund, a new
+attempt in the original running session, cleared refunds after restore, and a
+harness-created refund. The commit produced a positive result; rollback and
+harness-only matching state did not. A fresh recorded check in the next attempt
+still observed the committed condition, without claiming a new causal effect.
+The original positive receipt remained byte-identical after further writes and
+restore. Each view agreed with the independently retained database observations
+at its exact turn/attempt/completion boundary. No live model provider was used.
+
+The same runs exercised both injection modes, TLS, seeded relational/vector
+queries, required evidence failure, blocked subsequent work and snapshotting,
+partial evidence export, private-path isolation and test-resource cleanup.
+Temporary result bundles are `/tmp/interceptor-live-oracle-qa-python-final/` and
+`/tmp/interceptor-live-oracle-qa-node-final/`; each contains the six views in
+`native/database-live-feedback.json`. These local files are not permanent release
+evidence.
+
+`make test`, `go vet ./...`, and race checks for sandboxd, evaluation and adaptive
+operations passed. Focused regressions cover profile/selection restrictions,
+private outcome content, turn and attempt exclusion, ambiguous/late/missing or
+corrupt observations, incomplete captures, inherited cumulative state, retained
+receipts, mixed supported/unsupported oracles, and evidence/feedback storage
+failures. Final qualification-helper changes were compiled and exercised by both
+Docker runs; the script tests and service-state restriction test passed again.
+
+Earlier local runs encountered one restore failure without retained diagnostics
+and two PostgreSQL startup failures reporting that the data directory had wrong
+ownership. One startup failure occurred under macOS's default temporary root and
+one under `/private/tmp`; changing the temporary root is not a demonstrated fix.
+The final runs both used `TMPDIR=/private/tmp` and passed without a database runtime
+change. The intermittent Docker Desktop ownership failure remains unresolved.
+The qualifier now retains test logs and session summaries before cleaning up a
+failed run, to support diagnosis without retaining live containers.
+
+GitHub Actions and native AMD64 execution were not run for this correction. The
+existing packaged-runtime job already invokes the amended Python and Node
+qualifier on CI-produced Linux AMD64/ARM64 archives; workflow triggers and
+publication conditions are unchanged. No branch was pushed or release published
+as part of this implementation.

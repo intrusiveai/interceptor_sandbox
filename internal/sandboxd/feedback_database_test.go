@@ -160,7 +160,7 @@ func TestDatabaseFeedbackProfilesAndIndependentOracles(t *testing.T) {
 			s, g, a := feedbackFixture(t, profile, selection)
 			s.blueprint.Oracles = []environment.Oracle{{ID: "refund", Kind: "database_query_match", Service: "database"}}
 			if name == "mixed" {
-				s.blueprint.Oracles = append(s.blueprint.Oracles, environment.Oracle{ID: "state", Kind: "state_match"})
+				s.blueprint.Oracles = append(s.blueprint.Oracles, environment.Oracle{ID: "state", Kind: "service_state_match"})
 			}
 			if name == "missing_oracle" {
 				s.blueprint.Oracles = append(s.blueprint.Oracles, environment.Oracle{ID: "missing", Kind: "database_query_match", Service: "database"})
