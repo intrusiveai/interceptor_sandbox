@@ -435,7 +435,6 @@ rules:
       query: {email: alice@example.test}
       headers: {Accept: application/json}
     response:
-      mode: static
       status: 200
       headers: {X-Fixture: find-alice}
       json: {id: user-1, email: alice@example.test}

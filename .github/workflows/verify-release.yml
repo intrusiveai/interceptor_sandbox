@@ -189,9 +189,10 @@ jobs:
           ARCH: ${{ matrix.arch }}
           RELEASE_VERSION: ${{ needs.context.outputs.version }}
         run: |
+          docker pull python:3.13-slim
           python3 scripts/qualify_release.py --archive "dist/archives/interceptor_sandbox-v${RELEASE_VERSION}-linux_${ARCH}.tar.gz" \
             --version "$RELEASE_VERSION" --source "$GITHUB_SHA" --adapter-language python --python-ca \
-            --image python:3.12-slim --client "$RUNNER_TEMP/local-api-smoke" --output dist/qualification/python-ca
+            --image python:3.13-slim --client "$RUNNER_TEMP/local-api-smoke" --output dist/qualification/python-ca
       - name: Qualify packaged PostgreSQL and pgvector with Python and Node drivers
         env:
           ARCH: ${{ matrix.arch }}
