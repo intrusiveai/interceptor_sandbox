@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.13-slim
 WORKDIR /app
 COPY requirements.txt ./
 RUN python -m venv /app/.venv && python -m venv /opt/worker-venv \

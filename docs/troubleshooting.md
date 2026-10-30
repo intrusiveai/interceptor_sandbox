@@ -227,6 +227,11 @@ application-lock digests. HTTPS URLs must use a declared hostname and the
 `network.tls.listen` port rather than `127.0.0.1` or an internal plaintext
 service port.
 
+For `Missing Authority Key Identifier`, rebuild the wrapper with an updated
+Interceptor CLI using `interceptor app build`. This regenerates the server
+certificate with its issuer's key identifier and installs the matching CA.
+Start a new session from the rebuilt wrapper with certificate verification enabled.
+
 For `auto`, confirm the runtime honors its system PEM store or one of the
 injected trust variables. For `bundle`, configure the client to consume
 `INTERCEPTOR_CA_BUNDLE`. JVM, pinned, and other custom trust implementations

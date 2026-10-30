@@ -47,7 +47,7 @@ go build -o /tmp/local-api-smoke ./examples/local-api-smoke
 python3 scripts/qualify_release.py \
   --archive /path/to/interceptor_sandbox-v0.1.3-darwin_arm64.tar.gz \
   --version 0.1.3 --source COMMIT_SHA \
-  --adapter-language python --python-ca --image python:3.12-slim \
+  --adapter-language python --python-ca --image python:3.13-slim \
   --client /tmp/local-api-smoke --output /tmp/python-ca-qualification
 ```
 

@@ -88,6 +88,12 @@ func generateTLSMaterial(now time.Time, hostnames []string) (tlsMaterial, error)
 	if err != nil {
 		return tlsMaterial{}, err
 	}
+	// CreateCertificate generates the CA's SubjectKeyId in DER without updating
+	// the template. Use the parsed issuer so the leaf receives AuthorityKeyId.
+	ca, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		return tlsMaterial{}, err
+	}
 	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return tlsMaterial{}, err
@@ -101,7 +107,7 @@ func generateTLSMaterial(now time.Time, hostnames []string) (tlsMaterial, error)
 		NotBefore: now.Add(-time.Hour), NotAfter: now.AddDate(2, 0, 0),
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
-	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, caTemplate, &leafKey.PublicKey, caKey)
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, ca, &leafKey.PublicKey, caKey)
 	if err != nil {
 		return tlsMaterial{}, err
 	}
