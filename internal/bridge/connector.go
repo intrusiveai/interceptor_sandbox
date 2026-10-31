@@ -116,16 +116,16 @@ func (c *HostConnector) Forward(ctx context.Context, frame ModelFrame) (ModelRes
 		return ModelResult{}, fmt.Errorf("connector rejected codec %q", frame.Codec)
 	}
 	provider, allowedModels, bodyLimit := c.provider, c.config.AllowedModel, c.config.MaxBodyBytes
-	if frame.Codec == CodecOpenAIEmbeddings {
+	if isEmbeddingCodec(frame.Codec) {
 		provider, allowedModels = c.config.EmbeddingsProvider, c.config.AllowedEmbeddingModels
 		if provider == nil {
 			return ModelResult{}, errors.New("embeddings are not configured; enable --embeddings-provider and its endpoint, authentication, and model allowlist")
 		}
 		bodyLimit = min(bodyLimit, maxEmbeddingBodyBytes)
-		if frame.Path != "/v1/embeddings" {
+		if frame.Codec == CodecOpenAIEmbeddings && frame.Path != "/v1/embeddings" {
 			return ModelResult{}, errors.New("unsupported embeddings route")
 		}
-		if _, err := validateEmbeddingRequest(frame.Body); err != nil {
+		if _, err := validateEmbeddingCodec(frame.Codec, frame.Body); err != nil {
 			return ModelResult{}, err
 		}
 	}
@@ -165,8 +165,8 @@ func (c *HostConnector) Forward(ctx context.Context, frame ModelFrame) (ModelRes
 	if response.Status < 100 || response.Status > 599 || int64(len(response.Body)) > bodyLimit || int64(len(response.RequestBody)) > bodyLimit || int64(len(response.RawBody)) > bodyLimit {
 		return ModelResult{}, errors.New("provider returned an invalid or oversized response")
 	}
-	if frame.Codec == CodecOpenAIEmbeddings && response.Status >= 200 && response.Status < 300 {
-		if _, err := embeddingResponseMetadata(frame.Body, response.Body); err != nil {
+	if isEmbeddingCodec(frame.Codec) && response.Status >= 200 && response.Status < 300 {
+		if _, err := embeddingCodecMetadata(frame.Codec, frame.Body, response.Body); err != nil {
 			return ModelResult{}, err
 		}
 	}
@@ -195,6 +195,8 @@ func (c *HostConnector) Forward(ctx context.Context, frame ModelFrame) (ModelRes
 
 func modelIdentifier(codec, requestPath string, body []byte) (string, error) {
 	switch codec {
+	case CodecTitanEmbeddings:
+		return titanModel(requestPath)
 	case CodecOpenAIChat, CodecOpenAIResponses, CodecAnthropicMessages, CodecOpenAIEmbeddings:
 		var envelope struct {
 			Model string `json:"model"`

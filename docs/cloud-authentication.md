@@ -116,3 +116,18 @@ modes are also available; see [Remote embeddings](model-providers.md#remote-embe
 Real keys stay in the host process and are not part of a Blueprint, container,
 snapshot, or public export. Managed target replacement retains the host provider
 configuration; remote provider state is not snapshotted.
+
+### Titan embeddings AWS identity
+
+`--embeddings-provider bedrock-titan` requires an explicit `--embeddings-auth`
+selection of `workload-identity`, `aws-profile`, or `aws-environment`, using the
+same AWS selection rules above. Its independent `--embeddings-aws-region` and
+`--embeddings-aws-profile` settings do not inherit generation overrides. A profile
+is required only for `aws-profile`. Host AWS environment credentials require
+`aws-environment`; they are never copied into the application container.
+
+Grant the identity `bedrock:InvokeModel` on the selected Titan foundation model
+in the selected region. Embeddings require their own exact model allowlist.
+HTTP endpoint/key flags, secret-store bearer keys, and `none` authentication do
+not apply to this provider. See [Titan embeddings](model-providers.md#amazon-titan-text-embeddings-v2)
+for commands and synthetic application credentials.

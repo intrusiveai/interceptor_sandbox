@@ -12,17 +12,41 @@ import (
 type embeddingsOptions struct {
 	provider, baseURL, auth, credentialConfig, credentialID, keyEnv string
 	models                                                          stringList
+	awsRegion, awsProfile                                           string
 }
 
 func (o embeddingsOptions) resolve(ctx context.Context, production bool, stored func(context.Context, string, string) (string, error)) (string, error) {
 	if o.provider == "" {
-		if o.baseURL != "" || o.auth != "" || o.credentialConfig != "" || o.credentialID != "" || o.keyEnv != "" || len(o.models) != 0 {
-			return "", errors.New("embeddings options require --embeddings-provider openai-compatible")
+		if o.baseURL != "" || o.auth != "" || o.credentialConfig != "" || o.credentialID != "" || o.keyEnv != "" || o.awsRegion != "" || o.awsProfile != "" || len(o.models) != 0 {
+			return "", errors.New("embeddings options require --embeddings-provider")
 		}
 		return "", nil
 	}
+	if o.provider == bridge.ProviderBedrockTitan {
+		if o.baseURL != "" || o.keyEnv != "" || o.credentialConfig != "" || o.credentialID != "" {
+			return "", errors.New("bedrock-titan uses host AWS identity and accepts no embeddings HTTP endpoint or key options")
+		}
+		if len(o.models) == 0 {
+			return "", errors.New("Titan embeddings require --allow-embedding-model " + bridge.TitanEmbeddingModel)
+		}
+		for _, model := range o.models {
+			if model != bridge.TitanEmbeddingModel {
+				return "", errors.New("unsupported Titan embedding model")
+			}
+		}
+		if o.auth != "workload-identity" && o.auth != "aws-profile" && o.auth != "aws-environment" {
+			return "", errors.New("Titan --embeddings-auth must select workload-identity, aws-profile, or aws-environment")
+		}
+		if (o.auth == "aws-profile") != (o.awsProfile != "") {
+			return "", errors.New("--embeddings-aws-profile is required only for aws-profile authentication")
+		}
+		return "", nil
+	}
+	if o.awsRegion != "" || o.awsProfile != "" {
+		return "", errors.New("embeddings AWS options require bedrock-titan")
+	}
 	if o.provider != bridge.ProviderOpenAICompatible {
-		return "", errors.New("--embeddings-provider must be openai-compatible")
+		return "", errors.New("--embeddings-provider must be openai-compatible or bedrock-titan")
 	}
 	if _, err := bridge.NewOpenAIEmbeddingsProvider(bridge.HTTPProviderConfig{BaseURL: o.baseURL}); err != nil {
 		return "", fmt.Errorf("--embeddings-base-url: %w", err)
