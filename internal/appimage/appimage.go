@@ -136,6 +136,19 @@ func Build(ctx context.Context, directory, dataRoot, tag, version string, docker
 		if err := os.WriteFile(publicCA, material.ca, 0444); err != nil {
 			return Lock{}, err
 		}
+		// Creation modes are filtered by the caller's umask. Normalize only
+		// this public COPY tree, never its private temporary parent or host TLS.
+		for directory := filepath.Dir(publicCA); ; directory = filepath.Dir(directory) {
+			if err := os.Chmod(directory, 0755); err != nil {
+				return Lock{}, err
+			}
+			if directory == publicRoot {
+				break
+			}
+		}
+		if err := os.Chmod(publicCA, 0444); err != nil {
+			return Lock{}, err
+		}
 		dockerfile += "COPY public-ca/ /\n"
 		if report.Blueprint.Network.TLS.TrustMode == "auto" {
 			python := report.Blueprint.Network.TLS.PythonEnvironments

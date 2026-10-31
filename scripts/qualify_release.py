@@ -29,7 +29,11 @@ from publish_release import read_archive
 from build_release import ARCHIVE_ROOT
 
 
-def qualify(archive, version, source, base_image, output, client, adapter_language=None, embeddings=False, python_ca=False, state_snapshots=False, evidence_failure=False, postgresql=False, example_directory=None, customer_support=False, database_test=None, titan=False):
+def qualify(archive, version, source, base_image, output, client, adapter_language=None, embeddings=False, python_ca=False, state_snapshots=False, evidence_failure=False, postgresql=False, example_directory=None, customer_support=False, database_test=None, titan=False, public_ca_umask=None):
+    if public_ca_umask is not None and (public_ca_umask not in ('022', '077') or adapter_language or embeddings or python_ca or state_snapshots or postgresql or titan):
+        raise ValueError('public CA umask qualification requires a standalone command target and mask 022 or 077')
+    if public_ca_umask is not None and os.getuid() == 0:
+        raise ValueError('public CA umask regression must run as a non-root host user')
     if titan and (adapter_language != 'python' or embeddings or python_ca or state_snapshots or postgresql):
         raise ValueError('Titan qualification requires Python and no other qualification mode')
     if evidence_failure and not (state_snapshots or postgresql):
@@ -67,8 +71,8 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
         if shutil.which("go", path=env["PATH"]) is not None:
             raise ValueError("qualification must not expose Go to the CLI")
         cli = str(install / "interceptor")
-        def run(*args):
-            result = subprocess.run(args, cwd=outside, env=env, text=True, capture_output=True, timeout=900 if "build" in args else 180)
+        def run(*args, umask=-1):
+            result = subprocess.run(args, cwd=outside, env=env, text=True, capture_output=True, timeout=900 if "build" in args else 180, umask=umask)
             if result.returncode:
                 raise RuntimeError(f"{args}: {result.stdout}\n{result.stderr}")
             return result.stdout.strip()
@@ -118,6 +122,14 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                 "limits": {"max_turns": 10, "max_tokens": 10000, "max_wall_seconds": 120,
                            "max_snapshots": 1, "max_blob_bytes": 10485760},
             }
+            if public_ca_umask is not None:
+                record['network'] = {'tls': {'enabled': True, 'trust_mode': 'bundle'}}
+                record['services'] = [{'id': 'web', 'kind': 'fixture_http', 'listen': '127.0.0.1:18100',
+                                       'hostnames': ['umask.sandbox.test'], 'fixtures': 'assets/umask.json'}]
+                (blueprint / 'assets').mkdir(exist_ok=True)
+                (blueprint / 'assets/umask.json').write_text(json.dumps({'rules': [
+                    {'id': 'page', 'match': {'method': 'GET', 'path': '/'},
+                     'response': {'status': 200, 'body': 'umask regression'}}]}))
             if adapter_language:
                 shutil.copytree(example / "environment", blueprint, dirs_exist_ok=True)
                 yaml = blueprint / "environment.yaml"
@@ -128,7 +140,8 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                 (blueprint / "environment.yaml").write_text(json.dumps(record))
             run(cli, "environment", "validate", str(blueprint))
             run(cli, "environment", "seal", str(blueprint))
-            lock = json.loads(run(cli, "app", "build", "--environment", str(blueprint), "--tag", wrapper, "--json"))
+            lock = json.loads(run(cli, "app", "build", "--environment", str(blueprint), "--tag", wrapper, "--json",
+                                  umask=int(public_ca_umask, 8) if public_ca_umask is not None else -1))
             run(cli, "app", "verify", "--environment", str(blueprint))
             trust_checks = None
             if python_ca:
@@ -222,6 +235,9 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                     if session and "Interceptor local API:" in (output / "run.log").read_text(): break
                     time.sleep(0.25)
                 if not session: raise RuntimeError("release readiness timed out")
+                public_ca_checks = None
+                if public_ca_umask is not None:
+                    public_ca_checks = verify_public_ca_permissions(run, docker, wrapper, work / 'data', version)
                 if adapter_language:
                     # The Blueprint is mounted for verification, as for every
                     # interface. No separate adapter/application-source mount is
@@ -265,6 +281,8 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                 result.update(adapter_language=adapter_language, adapter_sha256=adapter_digests,
                               runtime=run(docker, "run", "--rm", "--network", "none", "--entrypoint", runtime, target, "--version"),
                               target_image=target_id, wrapper_image=lock["wrapper_digest"])
+            if public_ca_umask is not None:
+                result['public_ca_umask'] = dict(public_ca_checks, build_umask=public_ca_umask)
             if python_ca:
                 result['python_ca'] = dict(images=trust_checks, **python_ca_fixture.verify_evidence(output, diagnostics))
             if customer_support:
@@ -319,6 +337,57 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
             subprocess.run([docker, "rm", "-f", inspection], capture_output=True, timeout=30)
             for image in (wrapper, target):
                 subprocess.run([docker, "image", "rm", image], capture_output=True, timeout=30)
+
+
+def verify_public_ca_permissions(run, docker, wrapper, data, version):
+    """Inspect the actual running wrapper as its non-root supervisor UID."""
+    active = run(docker, 'ps', '--filter', 'ancestor='+wrapper, '--format', '{{.ID}}').splitlines()
+    if len(active) != 1:
+        raise ValueError('expected one running umask qualification container')
+    check = r'''
+import json, os, stat
+from pathlib import Path
+assert os.getuid() != 0
+modes = {}
+for name, expected in [('/opt', 0o755), ('/opt/interceptor', 0o755),
+                       ('/opt/interceptor/tls', 0o755), ('/opt/interceptor/tls/ca.pem', 0o444)]:
+    info = Path(name).stat()
+    assert stat.S_IMODE(info.st_mode) == expected, (name, oct(info.st_mode))
+    assert info.st_uid == 0 and info.st_gid == 0, name
+    modes[name] = format(expected, '04o')
+assert Path('/opt/interceptor/tls/ca.pem').read_bytes().startswith(b'-----BEGIN CERTIFICATE-----')
+assert Path('/opt/interceptor/environment/environment.yaml').read_bytes()
+supervisors = []
+for directory in Path('/proc').iterdir():
+    if not directory.name.isdigit():
+        continue
+    try:
+        if (directory / 'comm').read_text().strip() != 'interceptor':
+            continue
+        if b'sandboxd' not in (directory / 'cmdline').read_bytes().split(b'\0'):
+            continue
+        fields = dict(line.split(':', 1) for line in (directory / 'status').read_text().splitlines() if ':' in line)
+        uid = int(fields['Uid'].split()[1])
+        assert uid == os.getuid() and uid != 0
+        assert int(fields['CapEff'].strip(), 16) & 6 == 0  # No DAC override/read-search.
+        supervisors.append(uid)
+    except FileNotFoundError:
+        continue
+assert supervisors == [os.getuid()], supervisors
+print(json.dumps({'supervisor_uid': supervisors[0], 'mounted_environment_readable': True,
+                  'public_ca_readable': True, 'public_modes': modes, 'dac_override': False}))
+'''
+    result = json.loads(run(docker, 'exec', '--user', f'{os.getuid()}:{os.getgid()}',
+                            active[0], '/usr/local/bin/python3', '-c', check))
+    tls = data / 'apps/release-qualification' / version / 'tls'
+    if tls.stat().st_mode & 0o777 != 0o700:
+        raise ValueError('host TLS directory permissions changed')
+    for name in ('ca.pem', 'server.pem', 'server-key.pem'):
+        if (tls / name).stat().st_mode & 0o777 != 0o600:
+            raise ValueError('host TLS material permissions changed: '+name)
+    result['host_tls_directory_mode'] = '0700'
+    result['host_tls_file_modes'] = '0600'
+    return result
 
 
 def verify_observed_evidence(output, failure):
@@ -412,6 +481,7 @@ if __name__ == "__main__":
     parser.add_argument("--adapter-language", choices=("python", "node"), help="qualify the separately installed adapter example using the supplied runtime image")
     parser.add_argument("--titan", action="store_true", help="qualify native Titan with signed host fixtures and Boto3/LangChain clients")
     parser.add_argument("--embeddings", action="store_true", help="qualify remote embeddings with pinned OpenAI/LangChain clients and separate host fixtures")
+    parser.add_argument("--public-ca-umask", choices=("022", "077"), help="build a TLS wrapper under this umask and verify non-root supervisor access (requires a Python image)")
     parser.add_argument("--python-ca", action="store_true", help="qualify declared Python Certifi stores with unchanged HTTPX clients")
     parser.add_argument("--evidence-failure", action="store_true", help="qualify evidence failure using test-only blob directory permissions")
     parser.add_argument("--postgresql", action="store_true", help="qualify packaged PostgreSQL and pgvector with real drivers")
@@ -420,4 +490,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.database_test and not args.postgresql:
         parser.error('--database-test requires --postgresql')
-    qualify(args.archive.resolve(), args.version, args.source, args.image, args.output, args.client.resolve(), args.adapter_language, args.embeddings, args.python_ca, args.state_snapshots, args.evidence_failure, args.postgresql, database_test=args.database_test, titan=args.titan)
+    qualify(args.archive.resolve(), args.version, args.source, args.image, args.output, args.client.resolve(), args.adapter_language, args.embeddings, args.python_ca, args.state_snapshots, args.evidence_failure, args.postgresql, database_test=args.database_test, titan=args.titan, public_ca_umask=args.public_ca_umask)
