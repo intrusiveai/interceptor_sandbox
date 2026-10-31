@@ -3,6 +3,8 @@ package bridge
 import "context"
 
 const (
+	CodecTitanEmbeddings       = "aws_titan_embeddings"
+	ProviderBedrockTitan       = "bedrock-titan"
 	CodecOpenAIEmbeddings      = "openai_embeddings"
 	ProviderOpenAICompatible   = "openai-compatible"
 	CodecOpenAIChat            = "openai_chat_completions"

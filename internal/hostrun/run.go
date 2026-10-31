@@ -50,6 +50,9 @@ type Config struct {
 	ProviderType           string
 	ProviderURL            string
 	ProviderAPIKey         string
+	EmbeddingsAuth         string
+	EmbeddingsAWSRegion    string
+	EmbeddingsAWSProfile   string
 	EmbeddingsProviderType string
 	EmbeddingsURL          string
 	EmbeddingsAPIKey       string
@@ -558,7 +561,7 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 	if err != nil {
 		return metadata, err
 	}
-	embeddingProvider, err := embeddingsProvider(config)
+	embeddingProvider, err := embeddingsProvider(ctx, config)
 	if err != nil {
 		return metadata, err
 	}
@@ -1140,9 +1143,23 @@ func preserveRestoreSource(paths session.Paths, checkpoint snapshot.Checkpoint, 
 	return fsutil.WriteFile(filepath.Join(directory, "state.jsonl"), prefix.Bytes(), 0600)
 }
 
-func embeddingsProvider(config Config) (bridge.ModelProvider, error) {
+func embeddingsProvider(ctx context.Context, config Config) (bridge.ModelProvider, error) {
 	if config.EmbeddingsProviderType == "" {
 		return nil, nil
+	}
+	if config.EmbeddingsProviderType == bridge.ProviderBedrockTitan {
+		if config.EmbeddingsURL != "" || config.EmbeddingsAPIKey != "" || len(config.AllowedEmbeddingModels) == 0 {
+			return nil, errors.New("Titan embeddings require AWS identity and an explicit model allowlist, without HTTP endpoint/key options")
+		}
+		for _, model := range config.AllowedEmbeddingModels {
+			if model != bridge.TitanEmbeddingModel {
+				return nil, errors.New("unsupported Titan embedding model")
+			}
+		}
+		if config.EmbeddingsAuth != "aws-environment" && config.EmbeddingsAuth != "aws-profile" && config.EmbeddingsAuth != "workload-identity" {
+			return nil, errors.New("Titan embeddings require an explicit AWS authentication mode")
+		}
+		return bridge.LoadTitanProvider(ctx, bridge.BedrockProviderConfig{Authentication: config.EmbeddingsAuth, Region: config.EmbeddingsAWSRegion, Profile: config.EmbeddingsAWSProfile})
 	}
 	if config.EmbeddingsProviderType != bridge.ProviderOpenAICompatible {
 		return nil, errors.New("unsupported embeddings provider")

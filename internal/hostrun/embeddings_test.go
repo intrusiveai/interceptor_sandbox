@@ -36,7 +36,7 @@ func TestRetainedProviderConfigurationSupportsReplacementSessions(t *testing.T) 
 		if err != nil {
 			t.Fatal(err)
 		}
-		embedding, err := embeddingsProvider(config)
+		embedding, err := embeddingsProvider(context.Background(), config)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -60,5 +60,33 @@ func TestRetainedProviderConfigurationSupportsReplacementSessions(t *testing.T) 
 	}
 	if calls != 4 {
 		t.Fatal(calls)
+	}
+}
+
+func TestTitanHostConfiguration(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "test-access")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test-secret")
+	t.Setenv("AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "http://127.0.0.1:9")
+	base := Config{EmbeddingsProviderType: bridge.ProviderBedrockTitan, EmbeddingsAuth: "aws-environment", EmbeddingsAWSRegion: "us-west-2", AllowedEmbeddingModels: []string{bridge.TitanEmbeddingModel}, AWSProfile: "generation-profile", AWSRegion: "other-region", ProviderAuthMode: "aws-profile"}
+	for _, mutate := range []func(*Config){
+		func(c *Config) { c.EmbeddingsURL = "https://example.com" }, func(c *Config) { c.EmbeddingsAPIKey = "key" },
+		func(c *Config) { c.AllowedEmbeddingModels = nil }, func(c *Config) { c.AllowedEmbeddingModels = []string{"other"} },
+		func(c *Config) { c.EmbeddingsAuth = "" }, func(c *Config) { c.EmbeddingsAWSProfile = "unexpected" },
+	} {
+		config := base
+		mutate(&config)
+		if _, err := embeddingsProvider(context.Background(), config); err == nil {
+			t.Fatal("accepted invalid Titan configuration")
+		}
+	}
+	for range 2 {
+		provider, err := embeddingsProvider(context.Background(), base)
+		if err != nil || !provider.SupportsCodec(bridge.CodecTitanEmbeddings) {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+	if _, err := embeddingsProvider(context.Background(), base); err == nil {
+		t.Fatal("missing credential accepted")
 	}
 }

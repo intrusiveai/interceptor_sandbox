@@ -114,3 +114,35 @@ func TestEmbeddingStoredCredentialsReuseAuditedResolver(t *testing.T) {
 		}
 	}
 }
+
+func TestTitanEmbeddingsConfiguration(t *testing.T) {
+	stored := func(context.Context, string, string) (string, error) {
+		t.Fatal("Titan used secret-store bearer key")
+		return "", nil
+	}
+	base := embeddingsOptions{provider: bridge.ProviderBedrockTitan, auth: "aws-environment", awsRegion: "us-west-2", models: stringList{bridge.TitanEmbeddingModel}}
+	for _, auth := range []string{"aws-environment", "aws-profile", "workload-identity"} {
+		options := base
+		options.auth = auth
+		if auth == "aws-profile" {
+			options.awsProfile = "embedding-profile"
+		}
+		if key, err := options.resolve(context.Background(), true, stored); err != nil || key != "" {
+			t.Fatal(key, err)
+		}
+	}
+	for _, mutate := range []func(*embeddingsOptions){
+		func(o *embeddingsOptions) { o.models = nil }, func(o *embeddingsOptions) { o.models = stringList{"other"} },
+		func(o *embeddingsOptions) { o.auth = "" }, func(o *embeddingsOptions) { o.auth = "none" },
+		func(o *embeddingsOptions) { o.auth = "aws-profile" }, func(o *embeddingsOptions) { o.awsProfile = "unexpected" },
+		func(o *embeddingsOptions) { o.baseURL = "https://example.com" }, func(o *embeddingsOptions) { o.credentialID = "key" },
+		func(o *embeddingsOptions) { o.credentialConfig = "keys.yaml" }, func(o *embeddingsOptions) { o.keyEnv = "KEY" },
+		func(o *embeddingsOptions) { o.provider = "" }, func(o *embeddingsOptions) { o.provider = bridge.ProviderOpenAICompatible },
+	} {
+		options := base
+		mutate(&options)
+		if _, err := options.resolve(context.Background(), true, stored); err == nil {
+			t.Fatalf("accepted %+v", options)
+		}
+	}
+}

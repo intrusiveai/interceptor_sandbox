@@ -9,6 +9,7 @@ Only uniquely named test images/containers and an isolated data root are removed
 import argparse
 from contextlib import nullcontext
 from embedding_fixture import EmbeddingFixture
+from titan_fixture import TitanFixture
 import python_ca_fixture
 import hashlib
 import json
@@ -28,7 +29,9 @@ from publish_release import read_archive
 from build_release import ARCHIVE_ROOT
 
 
-def qualify(archive, version, source, base_image, output, client, adapter_language=None, embeddings=False, python_ca=False, state_snapshots=False, evidence_failure=False, postgresql=False, example_directory=None, customer_support=False, database_test=None):
+def qualify(archive, version, source, base_image, output, client, adapter_language=None, embeddings=False, python_ca=False, state_snapshots=False, evidence_failure=False, postgresql=False, example_directory=None, customer_support=False, database_test=None, titan=False):
+    if titan and (adapter_language != 'python' or embeddings or python_ca or state_snapshots or postgresql):
+        raise ValueError('Titan qualification requires Python and no other qualification mode')
     if evidence_failure and not (state_snapshots or postgresql):
         raise ValueError("evidence failure qualification requires state snapshots")
     if (state_snapshots or postgresql) and (not adapter_language or embeddings or python_ca):
@@ -52,7 +55,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
     suffix = uuid.uuid4().hex
     target, wrapper = "interceptor-release-target:"+suffix, "interceptor-release-wrapper:"+suffix
     inspection = "interceptor-release-check-"+suffix
-    with (EmbeddingFixture() if (embeddings or state_snapshots or postgresql) else nullcontext()) as fixture, tempfile.TemporaryDirectory(prefix="interceptor-release-qa-") as temporary:
+    with (TitanFixture() if titan else EmbeddingFixture() if (embeddings or state_snapshots or postgresql) else nullcontext()) as fixture, tempfile.TemporaryDirectory(prefix="interceptor-release-qa-") as temporary:
         work = Path(temporary).resolve()
         install, outside, bin_dir = (work / name for name in ("install", "outside", "bin"))
         for directory in (install, outside, bin_dir): directory.mkdir()
@@ -84,7 +87,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
         process = None
         try:
             target_id = base["Id"]
-            example = Path(__file__).resolve().parents[1] / ("examples/postgresql" if postgresql else "examples/application-state-snapshots" if state_snapshots else "examples/python-ca" if python_ca else "examples/remote-embeddings" if embeddings else "examples/invocation-adapters") / (adapter_language or "")
+            example = Path(__file__).resolve().parents[1] / ("examples/titan-embeddings" if titan else "examples/postgresql" if postgresql else "examples/application-state-snapshots" if state_snapshots else "examples/python-ca" if python_ca else "examples/remote-embeddings" if embeddings else "examples/invocation-adapters") / (adapter_language or "")
             if example_directory: example = Path(example_directory).resolve()
             if adapter_language:
                 context = work / "target"
@@ -196,6 +199,15 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                     "--embeddings-base-url", fixture.urls['embeddings'],
                     "--allow-embedding-model", "text-embedding-3-small", "--allow-embedding-model", "embed-error",
                     "--allow-embedding-model", "embed-timeout"]
+            if titan:
+                env.update(AWS_ACCESS_KEY_ID=fixture.access_key,
+                           AWS_SECRET_ACCESS_KEY=fixture.keys['embeddings'],
+                           AWS_SESSION_TOKEN=fixture.session_token,
+                           AWS_ENDPOINT_URL_BEDROCK_RUNTIME=fixture.urls['embeddings'])
+                provider_args = provider_args[:provider_args.index('--embeddings-provider')] + [
+                    '--embeddings-provider', 'bedrock-titan', '--embeddings-auth', 'aws-environment',
+                    '--embeddings-aws-region', 'us-west-2',
+                    '--allow-embedding-model', 'amazon.titan-embed-text-v2:0']
             with (output / "run.log").open("w") as log:
                 process = subprocess.Popen([cli, "run", "--environment", str(blueprint),
                     *provider_args, *(["--feedback-profile", "oracle-assisted"] if postgresql and not customer_support else [])],
@@ -283,6 +295,9 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
             try:
                 diagnostics = output / "failure-diagnostics"
                 diagnostics.mkdir(exist_ok=True)
+                if fixture:
+                    (diagnostics / 'provider-checks.json').write_text(json.dumps(
+                        {'failures': fixture.failures, 'calls': fixture.calls}, indent=2)+'\n')
                 for path in (work / "data").rglob("*.log"):
                     relative = path.relative_to(work / "data")
                     destination = diagnostics / relative
@@ -395,6 +410,7 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--client", type=Path, required=True, help="prebuilt examples/local-api-smoke qualification client")
     parser.add_argument("--adapter-language", choices=("python", "node"), help="qualify the separately installed adapter example using the supplied runtime image")
+    parser.add_argument("--titan", action="store_true", help="qualify native Titan with signed host fixtures and Boto3/LangChain clients")
     parser.add_argument("--embeddings", action="store_true", help="qualify remote embeddings with pinned OpenAI/LangChain clients and separate host fixtures")
     parser.add_argument("--python-ca", action="store_true", help="qualify declared Python Certifi stores with unchanged HTTPX clients")
     parser.add_argument("--evidence-failure", action="store_true", help="qualify evidence failure using test-only blob directory permissions")
@@ -404,4 +420,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.database_test and not args.postgresql:
         parser.error('--database-test requires --postgresql')
-    qualify(args.archive.resolve(), args.version, args.source, args.image, args.output, args.client.resolve(), args.adapter_language, args.embeddings, args.python_ca, args.state_snapshots, args.evidence_failure, args.postgresql, database_test=args.database_test)
+    qualify(args.archive.resolve(), args.version, args.source, args.image, args.output, args.client.resolve(), args.adapter_language, args.embeddings, args.python_ca, args.state_snapshots, args.evidence_failure, args.postgresql, database_test=args.database_test, titan=args.titan)

@@ -147,17 +147,20 @@ for `openai-chat`, Responses for `openai-responses`, Converse for
 `bedrock-converse`, and either supported OpenAI-compatible route for `litellm`.
 The optional independent embeddings group accepts:
 
-- `--embeddings-provider openai-compatible`
+- `--embeddings-provider openai-compatible|bedrock-titan`
 - `--embeddings-base-url URL`
 - `--allow-embedding-model ID` (repeatable, at least one required)
-- `--embeddings-auth secret-store|api-key-env|none`
+- `--embeddings-auth secret-store|api-key-env|none` for OpenAI-compatible providers;
+  `workload-identity|aws-profile|aws-environment` for Titan.
+- `--embeddings-aws-region REGION` and `--embeddings-aws-profile PROFILE` for Titan;
+  the profile is required only with `aws-profile`.
 - `--embeddings-credential-config FILE` and `--embeddings-credential-id ID`
   for stored credentials, or `--embeddings-api-key-env NAME` for environment keys.
 
 Partial groups and conflicting authentication options are rejected. Only a supplied
 credential ID defaults authentication to `secret-store`; otherwise select it
 explicitly. Embeddings never inherit generation keys or model permissions.
-Requests use the existing local `/v1/embeddings` endpoint, with at most 128 inputs
+OpenAI-compatible requests use the existing local `/v1/embeddings` endpoint, with at most 128 inputs
 and 4 MiB per request/response (or the smaller Blueprint blob limit).
 
 See [Model providers](model-providers.md) for endpoint setup, authentication,
@@ -170,6 +173,11 @@ The public API is fixed at `127.0.0.1:8080`; only one instance is supported.
 The private bridge defaults to `spool`; select `unix` only on a supported native
 Linux host. `run` stays attached after target stop for status/evidence. Ctrl+C
 ends the service and any remaining target.
+
+Titan embeddings use native `POST /model/{modelId}/invoke` and accept only
+`amazon.titan-embed-text-v2:0` in their independent model allowlist. Titan does not
+accept `--embeddings-base-url` or HTTP key options. See
+[Titan configuration and limits](model-providers.md#amazon-titan-text-embeddings-v2).
 
 ## Capabilities and integrated local API
 
