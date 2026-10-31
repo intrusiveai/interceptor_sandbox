@@ -31,7 +31,15 @@ An incompatible pairing fails explicitly. For example, a Responses request is
 not converted to Bedrock Converse, and a Bedrock Converse request is not
 converted to Chat Completions.
 
-All requested model IDs must exactly match a repeated `--allow-model` value.
+Generation model IDs must exactly match a repeated `--allow-model` value.
+Embeddings are configured independently with `--embeddings-provider` and
+`--allow-embedding-model`:
+
+| Application API | Local route | Embeddings provider |
+| --- | --- | --- |
+| OpenAI-compatible embeddings | `POST /v1/embeddings` | `openai-compatible` |
+| Titan Text Embeddings | `POST /model/{modelId}/invoke` | `bedrock-titan` |
+
 For HTTP providers, the application cannot choose the upstream server: the
 operator supplies one fixed `--provider-base-url`, and cross-origin redirects
 are rejected.

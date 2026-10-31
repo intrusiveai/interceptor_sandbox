@@ -295,6 +295,9 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
             try:
                 diagnostics = output / "failure-diagnostics"
                 diagnostics.mkdir(exist_ok=True)
+                if fixture:
+                    (diagnostics / 'provider-checks.json').write_text(json.dumps(
+                        {'failures': fixture.failures, 'calls': fixture.calls}, indent=2)+'\n')
                 for path in (work / "data").rglob("*.log"):
                     relative = path.relative_to(work / "data")
                     destination = diagnostics / relative

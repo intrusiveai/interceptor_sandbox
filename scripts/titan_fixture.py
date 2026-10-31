@@ -6,6 +6,7 @@ import json
 import tarfile
 import threading
 import uuid
+from urllib.parse import quote
 
 from embedding_fixture import EmbeddingFixture
 
@@ -36,11 +37,11 @@ class TitanFixture(EmbeddingFixture):
                 try:
                     fixture.verify_signature(self, raw)
                     request = json.loads(raw)
-                    assert self.path == '/model/amazon.titan-embed-text-v2%3A0/invoke'
+                    assert self.path == '/model/amazon.titan-embed-text-v2%3A0/invoke', 'unexpected InvokeModel path'
                     assert self.headers.get('Accept') == 'application/json'
                     assert self.headers.get('Content-Type') == 'application/json'
                 except Exception as error:
-                    fixture.failures.append('native request/signature check failed: '+type(error).__name__)
+                    fixture.failures.append('native request/signature check failed: '+str(error))
                     self.send_error(403)
                     return
                 fixture.calls.append({'provider': 'embeddings', 'model': MODEL,
@@ -90,8 +91,8 @@ class TitanFixture(EmbeddingFixture):
         signed = fields['SignedHeaders']
         headers = ''.join(name+':'+ ' '.join(handler.headers[name].split())+'\n'
                           for name in signed.split(';'))
-        # Bedrock's SDK signer does not double-encode its already escaped path.
-        canonical = '\n'.join(['POST', handler.path, '', headers, signed,
+        # SigV4 canonicalizes the escaped wire path again (unlike S3 signing).
+        canonical = '\n'.join(['POST', quote(handler.path, safe='/~'), '', headers, signed,
                                hashlib.sha256(body).hexdigest()])
         string_to_sign = '\n'.join([algorithm, handler.headers['X-Amz-Date'], scope,
                                     hashlib.sha256(canonical.encode()).hexdigest()])
@@ -99,7 +100,7 @@ class TitanFixture(EmbeddingFixture):
         for item in (date, region, service, end):
             signing_key = hmac.new(signing_key, item.encode(), hashlib.sha256).digest()
         expected = hmac.new(signing_key, string_to_sign.encode(), hashlib.sha256).hexdigest()
-        assert hmac.compare_digest(expected, fields['Signature'])
+        assert hmac.compare_digest(expected, fields['Signature']), 'signature mismatch'
 
     def verify(self, output):
         if self.failures:
