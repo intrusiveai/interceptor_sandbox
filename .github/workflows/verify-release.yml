@@ -192,6 +192,16 @@ jobs:
           python3 scripts/qualify_release.py --archive "dist/archives/interceptor_sandbox-v${RELEASE_VERSION}-linux_${ARCH}.tar.gz" \
             --version "$RELEASE_VERSION" --source "$GITHUB_SHA" --adapter-language python --titan \
             --image python:3.12-slim --client "$RUNNER_TEMP/local-api-smoke" --output dist/qualification/titan-embeddings
+      - name: Regress public CA permissions with normal and restrictive build umasks
+        env:
+          ARCH: ${{ matrix.arch }}
+          RELEASE_VERSION: ${{ needs.context.outputs.version }}
+        run: |
+          for mask in 022 077; do
+            python3 scripts/qualify_release.py --archive "dist/archives/interceptor_sandbox-v${RELEASE_VERSION}-linux_${ARCH}.tar.gz" \
+              --version "$RELEASE_VERSION" --source "$GITHUB_SHA" --public-ca-umask "$mask" \
+              --image python:3.12-slim --client "$RUNNER_TEMP/local-api-smoke" --output "dist/qualification/public-ca-$mask"
+          done
       - name: Qualify Python CA trust from the downloaded archive
         env:
           ARCH: ${{ matrix.arch }}

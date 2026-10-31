@@ -391,6 +391,15 @@ sessions and uniquely named Docker resources and retains result/evidence files.
 It does not publish a release. Retain the CI run URL, archive SHA-256, result and
 evidence; distinguish native macOS testing from the Linux CI qualification.
 
+For the public CA permission regression, use a local Python image (for example
+`python:3.12-slim`) and run the same qualification command twice with
+`--public-ca-umask 022` and `--public-ca-umask 077`, each with a separate output
+under `../maintainers/interceptor_sandbox/`. Run as a non-root host user. This
+builds a TLS-enabled wrapper with the selected umask applied only to the build
+subprocess, then verifies supervisor identity, mounted environment access,
+public CA modes, private host TLS modes, target execution, and evidence.
+The release workflow runs both cases against downloaded archives.
+
 ## Updating the local publisher
 
 `tools/release-publisher` is the complete catalog-only export from reviewed
