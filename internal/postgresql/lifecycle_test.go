@@ -29,6 +29,25 @@ type lifecycleFixture struct {
 	events   string
 }
 
+func TestAttachDuringShutdown(t *testing.T) {
+	client, peer := net.Pipe()
+	defer peer.Close()
+	life := newLifecycle(client)
+	defer life.cancel()
+	defer client.Close()
+	// Reproduce the interval between stop marking closing and cancelling ctx.
+	life.closing = true
+	upstream, backend := net.Pipe()
+	defer backend.Close()
+	attached, err := life.attach(upstream)
+	if attached != nil || !errors.Is(err, errLocalClose) {
+		t.Fatalf("shutdown attachment: %v, %v", attached, err)
+	}
+	if _, err = backend.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("unattached upstream was not closed: %v", err)
+	}
+}
+
 func startLifecycle(t *testing.T, timeout int, after func(context.Context) error) *lifecycleFixture {
 	t.Helper()
 	root, err := os.MkdirTemp("/tmp", "pg-life-")
@@ -357,7 +376,7 @@ func TestProxyConnectionLifecycle(t *testing.T) {
 		x := startLifecycle(t, 5000, func(ctx context.Context) error {
 			close(entered)
 			<-ctx.Done()
-			return errors.New("independent oracle failure")
+			return errors.Join(errors.New("independent oracle failure"), ctx.Err())
 		})
 		x.query(t, "COMMIT")
 		x.reply(t, "COMMIT", 'I')

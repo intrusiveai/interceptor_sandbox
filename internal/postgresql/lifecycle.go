@@ -63,7 +63,8 @@ func (l *connectionLifecycle) attach(up net.Conn) (*ownedSocket, error) {
 	defer l.mu.Unlock()
 	if l.closing {
 		socket.Close()
-		return nil, l.ctx.Err()
+		// stop marks closing before it cancels the context outside the lock.
+		return nil, errLocalClose
 	}
 	l.upstream = socket
 	return socket, nil
@@ -73,9 +74,10 @@ func (l *connectionLifecycle) complete(origin string, err error) {
 	switch {
 	case errors.Is(err, errLocalClose):
 		err = nil
-	case errors.Is(err, context.Canceled) && l.ctx.Err() != nil:
+	case err == context.Canceled && l.ctx.Err() != nil:
 		// This context belongs only to this lifecycle; a substantive cause is saved
 		// before cancellation, and unrelated errors after cancellation are retained.
+		// Only a bare ctx.Err() is expected: joined causes must not be discarded.
 		err = nil
 	case origin == "client" && (err == nil || errors.Is(err, errClientDisconnect)):
 		reason, err = "client_disconnect", nil
