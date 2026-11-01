@@ -178,7 +178,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                     native_checks = run(docker, 'run', '--rm', '--network', 'none', '--user', '65534:65534',
                         '--entrypoint', '/database-test', '-e', 'INTERCEPTOR_TEST_POSTGRES_BIN=/opt/interceptor/postgresql/bin',
                         '-v', str(Path(database_test).resolve())+':/database-test:ro', wrapper,
-                        '-test.v', '-test.run', 'TestNativePostgreSQL', '-test.timeout', '90s')
+                        '-test.v', '-test.run', 'TestNativePostgreSQL|TestProxyConnectionLifecycle', '-test.timeout', '90s')
                     (output/'database-protocol.log').write_text(native_checks+'\n')
             run(docker,'cp',inspection+':/usr/local/share/interceptor/licenses/PostgreSQL-client.txt',str(work/'postgresql-client.LICENSE'))
             client_notices=(Path(__file__).resolve().parents[1]/'internal/appimage/postgresql-go.LICENSE').read_bytes()
@@ -326,17 +326,49 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                 print(f"Could not retain failure diagnostics: {diagnostic_error}", file=sys.stderr)
             raise
         finally:
-            if process is not None and process.poll() is None:
-                process.send_signal(signal.SIGINT)
-                try: process.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    process.kill(); process.wait()
-            # This newly created data root contains only this test's sessions.
-            if (work / "data").exists():
-                run(cli, "purge", "--all")
-            subprocess.run([docker, "rm", "-f", inspection], capture_output=True, timeout=30)
-            for image in (wrapper, target):
-                subprocess.run([docker, "image", "rm", image], capture_output=True, timeout=30)
+            cleanup_qualification(process, run, cli, docker, inspection, (wrapper, target),
+                                  work / 'data', evidence_failure, sys.exc_info()[1])
+
+
+def cleanup_qualification(process, run, cli, docker, inspection, images, data, evidence_failure, primary_error):
+    """Attempt every cleanup step without replacing the qualification failure."""
+    failures = []
+
+    def attempt(action):
+        try:
+            action()
+        except Exception as error:
+            failures.append(error)
+            print(f"Qualification cleanup failed: {error}", file=sys.stderr)
+
+    def stop():
+        if process is not None and process.poll() is None:
+            process.send_signal(signal.SIGINT)
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=30)
+
+    def purge():
+        # Only this disposable qualification root is touched. A killed Go client
+        # cannot run its deferred chmod after the deliberate mode-0000 fault.
+        if evidence_failure:
+            for directory in data.glob('sessions/*/blobs'):
+                if directory.parent.is_symlink() or directory.is_symlink() or not directory.is_dir():
+                    continue
+                if directory.stat().st_mode & 0o777 == 0:
+                    directory.chmod(0o700)
+        if data.exists():
+            run(cli, 'purge', '--all')
+
+    attempt(stop)
+    attempt(purge)
+    attempt(lambda: subprocess.run([docker, 'rm', '-f', inspection], capture_output=True, timeout=30))
+    for image in images:
+        attempt(lambda: subprocess.run([docker, 'image', 'rm', image], capture_output=True, timeout=30))
+    if failures and primary_error is None:
+        raise RuntimeError('qualification cleanup failed') from failures[0]
 
 
 def verify_public_ca_permissions(run, docker, wrapper, data, version):
@@ -419,12 +451,21 @@ def verify_observed_evidence(output, failure):
 
 def verify_postgresql_evidence(output, failure):
     events = []
+    complete_events = []
     partial = 0
     for path in (output / 'native').glob('*.tar'):
         with tarfile.open(path) as bundle:
-            events.extend(json.loads(line) for line in bundle.extractfile('events.jsonl'))
-            partial += json.load(bundle.extractfile('evidence-bundle.json'))['completeness']['state'] == 'partial'
+            captured = [json.loads(line) for line in bundle.extractfile('events.jsonl')]
+            events.extend(captured)
+            incomplete = json.load(bundle.extractfile('evidence-bundle.json'))['completeness']['state'] == 'partial'
+            partial += incomplete
+            if not incomplete: complete_events.extend(captured)
     kinds = {e['kind'] for e in events}
+    closed = [e['semantic']['detail'] for e in complete_events if e['kind'] == 'database_connection_closed']
+    if not closed or any(not d.get('expected_close') or d.get('transaction_outcome') != 'no_pending_transaction' for d in closed):
+        raise ValueError('normal database session teardown was not classified as expected and idle')
+    if any(e['kind'] == 'database_connection_failed' for e in complete_events):
+        raise ValueError('normal database session recorded a connection failure')
     for required in ('database_request','database_result','database_response_rewritten','database_state_injection_committed','database_oracle'):
         if required not in kinds: raise ValueError('missing database evidence: '+required)
     delivered = {e.get('injection_id') for e in events if e['kind']=='injection_delivered'}
@@ -467,7 +508,8 @@ def verify_postgresql_evidence(output, failure):
         if expected != actual: raise ValueError('live and retained database oracle evidence differ')
     return {'engine':'18.6','pgvector':'0.8.7','evidence_events':len(events),'incomplete_sessions':partial,
             'restores':1,'both_injections_delivery_confirmed':True,'rollback_oracle_negative':True,
-            'request_observation_preserved':True,'live_oracle_feedback_matches_evidence':True}
+            'request_observation_preserved':True,'live_oracle_feedback_matches_evidence':True,
+            'expected_idle_connection_closes':len(closed),'normal_session_connection_failures':0}
 
 
 if __name__ == "__main__":

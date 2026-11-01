@@ -178,8 +178,17 @@ Oracles use retained independent query results for live and offline evaluation.
 
 Required capture failures latch `evidence_storage_error`, stop further work and
 block new snapshots. Already forwarded writes may have committed; Interceptor
-never retries them or asserts rollback without evidence. A failed connection's
-unconfirmed transaction outcome remains explicit.
+never retries them or asserts rollback without evidence.
+
+Deliberate proxy shutdown and client `Terminate` retain
+`database_connection_closed` with a close reason and `expected_close: true`,
+without a failure event. Unexpected upstream loss, timeouts and protocol failures
+retain `database_connection_failed` with the original cause, even if cleanup
+subsequently closes the sockets. A close with an open transaction or unfinished
+exchange records `transaction_outcome: unconfirmed`; an idle close records
+`no_pending_transaction`. Neither claims a commit or rollback, nor changes the
+meaning of earlier observed commits. These classifications apply to new evidence;
+existing journals remain unchanged.
 
 Snapshots drain work and reject open transactions, while allowing idle pools.
 They save a native logical database backup, application state, injection progress

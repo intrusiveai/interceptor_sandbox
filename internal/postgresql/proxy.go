@@ -29,7 +29,8 @@ type Proxy struct {
 	Failure    func(error)
 	listener   net.Listener
 	mu         sync.Mutex
-	clients    map[net.Conn]bool
+	clients    map[net.Conn]*connectionLifecycle
+	closing    bool
 	keys       map[uint32][]byte
 	active     int
 	next       atomic.Uint64
@@ -45,7 +46,8 @@ func (p *Proxy) Start(address string) error {
 		return err
 	}
 	p.listener = l
-	p.clients = map[net.Conn]bool{}
+	p.clients = map[net.Conn]*connectionLifecycle{}
+	p.closing = false
 	p.keys = map[uint32][]byte{}
 	p.wg.Add(1)
 	go func() {
@@ -56,18 +58,19 @@ func (p *Proxy) Start(address string) error {
 				return
 			}
 			p.mu.Lock()
-			if len(p.clients) >= p.Engine.Config.MaxConnections+8 {
+			if p.closing || len(p.clients) >= p.Engine.Config.MaxConnections+8 {
 				p.mu.Unlock()
 				c.Close()
 				continue
 			}
-			p.clients[c] = true
+			life := newLifecycle(c)
+			p.clients[c] = life
 			p.wg.Add(1)
 			p.mu.Unlock()
 			go func() {
 				defer p.wg.Done()
 				defer func() { c.Close(); p.mu.Lock(); delete(p.clients, c); p.mu.Unlock() }()
-				if err := p.serve(c); err != nil && p.Engine.Recorder.Err() != nil && p.Failure != nil {
+				if err := p.serve(life); err != nil && p.Engine.Recorder.Err() != nil && p.Failure != nil {
 					p.Failure(p.Engine.Recorder.Err())
 				}
 			}()
@@ -79,12 +82,17 @@ func (p *Proxy) Close() error {
 	if p.listener == nil {
 		return nil
 	}
-	p.listener.Close()
 	p.mu.Lock()
-	for c := range p.clients {
-		c.Close()
+	p.closing = true
+	clients := make([]*connectionLifecycle, 0, len(p.clients))
+	for _, life := range p.clients {
+		clients = append(clients, life)
 	}
 	p.mu.Unlock()
+	p.listener.Close()
+	for _, life := range clients {
+		life.stop("proxy_shutdown", "", nil, false)
+	}
 	p.wg.Wait()
 	return nil
 }
@@ -109,11 +117,12 @@ func fatal(c net.Conn, err error) error {
 	_ = send(c, &pgproto3.ErrorResponse{Severity: "FATAL", Code: "58000", Message: err.Error()})
 	return err
 }
-func (p *Proxy) serve(raw net.Conn) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+func (p *Proxy) serve(life *connectionLifecycle) error {
+	ctx := life.ctx
+	raw := life.client
+	defer life.stop("connection_cleanup", "", nil, false)
 	raw.SetDeadline(time.Now().Add(10 * time.Second))
-	c := raw
+	var c net.Conn = raw
 	b := pgproto3.NewBackend(c, c)
 	b.SetMaxBodyLen(1 << 20)
 	start, err := b.ReceiveStartupMessage()
@@ -167,11 +176,14 @@ func (p *Proxy) serve(raw net.Conn) error {
 	p.active++
 	p.mu.Unlock()
 	defer func() { p.mu.Lock(); p.active--; p.mu.Unlock() }()
-	upstream, err := net.DialTimeout("unix", p.Engine.socket()+"/.s.PGSQL.5432", 5*time.Second)
+	up, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", p.Engine.socket()+"/.s.PGSQL.5432")
 	if err != nil {
 		return fatal(c, errors.New("private PostgreSQL is unavailable"))
 	}
-	defer upstream.Close()
+	upstream, err := life.attach(up)
+	if err != nil {
+		return err
+	}
 	upstream.SetDeadline(time.Now().Add(10 * time.Second))
 	f := pgproto3.NewFrontend(upstream, upstream)
 	f.SetMaxBodyLen(int(p.Engine.Config.MaxResultBytes))
@@ -221,29 +233,32 @@ authenticated:
 	upstream.SetDeadline(time.Time{})
 	connID := p.next.Add(1)
 	state := newConnection(p, connID)
+	state.life = life
 	requests := make(chan *execution, 128)
-	errorsCh := make(chan error, 1)
-	go func() { err := state.forward(ctx, b, upstream, requests); errorsCh <- err; cancel(); upstream.Close() }()
-	err = state.responses(ctx, f, c, requests)
-	cancel()
-	upstream.Close()
-	// Unblock a reader without closing the TLS write side yet.
-	raw.SetReadDeadline(time.Now())
-	forwardErr := <-errorsCh
-	if forwardErr != nil && !errors.Is(forwardErr, io.EOF) && !errors.Is(forwardErr, context.Canceled) {
-		if n, ok := forwardErr.(net.Error); !ok || !n.Timeout() {
-			err = forwardErr
-		}
+	forwarded := make(chan struct{})
+	go func() {
+		defer close(forwarded)
+		life.complete("client", state.forward(ctx, b, upstream, requests))
+	}()
+	life.complete("upstream", state.responses(ctx, f, c, requests))
+	<-forwarded
+	reason, origin, failure := life.outcome()
+	// ReadyForQuery is evidence of idle/open state, not a retrospective verdict
+	// about earlier transactions. An interrupted exchange can be unresolved even
+	// when the last ReadyForQuery was idle.
+	outcome := "no_pending_transaction"
+	if state.txStatus != 'I' || state.pending.Load() {
+		outcome = "unconfirmed"
 	}
-	if state.timedOut.Load() {
-		err = errors.New("PostgreSQL query exceeded query_timeout_ms; connection closed, transaction outcome unconfirmed")
+	detail := map[string]any{"connection": connID, "last_observed_transaction_status": string([]byte{state.txStatus}),
+		"rollback_confirmed": false, "close_reason": reason, "expected_close": failure == nil,
+		"transaction_outcome": outcome, "exchange_pending": state.pending.Load()}
+	recordErr := p.Engine.Record(context.Background(), "database_connection_closed", recording.SandboxControl, detail, nil)
+	if failure != nil {
+		recordErr = errors.Join(recordErr, p.Engine.Record(context.Background(), "database_connection_failed", recording.SandboxControl,
+			map[string]any{"connection": connID, "reason": failure.Error(), "failure_origin": origin, "transaction_outcome": outcome}, nil))
 	}
-	_ = p.Engine.Record(context.Background(), "database_connection_closed", recording.SandboxControl, map[string]any{"connection": connID, "last_observed_transaction_status": string([]byte{state.txStatus}), "rollback_confirmed": false}, nil)
-	if err != nil && !errors.Is(err, io.EOF) {
-		_ = p.Engine.Record(context.Background(), "database_connection_failed", recording.SandboxControl, map[string]any{"connection": connID, "reason": err.Error(), "transaction_outcome": "unconfirmed"}, nil)
-		_ = fatal(c, err)
-	}
-	c.Close()
+	err = errors.Join(failure, recordErr)
 	// Finish queued observations even when a connection fails mid-pipeline.
 	for r := range requests {
 		r.finish()
@@ -302,7 +317,8 @@ type connection struct {
 	p          *Proxy
 	id         uint64
 	next       uint64
-	timedOut   atomic.Bool
+	pending    atomic.Bool
+	life       *connectionLifecycle
 	txStatus   byte
 	mu         sync.Mutex
 	statements map[string]*statement
@@ -334,6 +350,9 @@ func (s *connection) forward(ctx context.Context, b *pgproto3.Backend, up net.Co
 	for {
 		msg, err := b.Receive()
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return errClientDisconnect
+			}
 			return err
 		}
 		r := &execution{ctx: ctx}
@@ -409,7 +428,9 @@ func (s *connection) forward(ctx context.Context, b *pgproto3.Backend, up net.Co
 			r.kind = 'H'
 		case *pgproto3.Terminate:
 			s.mu.Unlock()
-			return send(up, msg)
+			// Closing our private upstream ends the backend connection. Do not send a
+			// Terminate then race its expected EOF against the response reader.
+			return errClientDisconnect
 		default:
 			s.mu.Unlock()
 			return errors.New("unsupported PostgreSQL protocol message")
@@ -438,8 +459,8 @@ func (s *connection) forward(ctx context.Context, b *pgproto3.Backend, up net.Co
 			}
 			s.p.Engine.gate.RLock()
 			r.ctx = observed
-			timer := time.AfterFunc(time.Duration(s.p.Engine.Config.QueryTimeoutMS)*time.Millisecond, func() { s.timedOut.Store(true); up.Close() })
-			r.done = func() { timer.Stop(); s.p.Engine.gate.RUnlock(); done() }
+			stopTimer := s.life.queryTimer(time.Duration(s.p.Engine.Config.QueryTimeoutMS) * time.Millisecond)
+			r.done = func() { stopTimer(); s.p.Engine.gate.RUnlock(); done() }
 			if err = s.p.Engine.Check(ctx); err != nil {
 				r.finish()
 				return err
@@ -478,6 +499,7 @@ func (s *connection) forward(ctx context.Context, b *pgproto3.Backend, up net.Co
 			r.barrier = make(chan struct{})
 		}
 		if r.kind != 'H' {
+			s.pending.Store(true)
 			select {
 			case q <- r:
 			case <-ctx.Done():
@@ -518,6 +540,24 @@ func (s *connection) responses(ctx context.Context, f *pgproto3.Frontend, c net.
 			return err
 		}
 		_ = c.SetWriteDeadline(time.Now().Add(time.Duration(s.p.Engine.Config.QueryTimeoutMS) * time.Millisecond))
+		// A backend can terminate an idle session with FATAL/PANIC. Do not wait
+		// for a request that will never arrive, or replace that diagnostic with EOF.
+		if fatal, ok := m.(*pgproto3.ErrorResponse); ok && (fatal.Severity == "FATAL" || fatal.Severity == "PANIC") {
+			if r == nil {
+				select {
+				case r = <-q:
+				default:
+				}
+			}
+			observed, provenance := ctx, recording.SandboxControl
+			detail := map[string]any{"connection": s.id, "error": fatal}
+			if r != nil {
+				observed, provenance = r.ctx, recording.Application
+				detail["execution"] = r.id
+			}
+			cause := fmt.Errorf("PostgreSQL %s (%s): %s", fatal.Severity, fatal.Code, fatal.Message)
+			return errors.Join(cause, s.p.Engine.Record(observed, "database_error", provenance, detail, nil))
+		}
 		// Notices and asynchronous parameter changes do not consume command replies.
 		switch m.(type) {
 		case *pgproto3.NoticeResponse, *pgproto3.ParameterStatus, *pgproto3.NotificationResponse:
@@ -638,6 +678,7 @@ func (s *connection) responses(ctx context.Context, f *pgproto3.Frontend, c net.
 			}
 		case *pgproto3.ReadyForQuery:
 			s.txStatus = v.TxStatus
+			s.pending.Store(false)
 			if v.TxStatus == 'I' {
 				_ = c.SetReadDeadline(time.Time{})
 			} else {

@@ -11,11 +11,13 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -316,7 +318,9 @@ func TestNativePostgreSQL(t *testing.T) {
 	if err != nil || string(value) != `[["benign injected"]]` {
 		t.Fatalf("restore: %s %v", value, err)
 	}
-	fresh := &Engine{ID: "database", Config: cfg, Root: filepath.Join(root, "fresh"), Bin: e.Bin, Recorder: rec, Journal: journal, Blobs: blobs}
+	resourceFailure := make(chan error, 1)
+	fresh := &Engine{ID: "database", Config: cfg, Root: filepath.Join(root, "fresh"), Bin: e.Bin, Recorder: rec, Journal: journal, Blobs: blobs,
+		Failure: func(err error) { resourceFailure <- err }}
 	if err = fresh.Start(ctx, root, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -332,4 +336,39 @@ func TestNativePostgreSQL(t *testing.T) {
 	if _, err = recording.VerifyFile(filepath.Join(root, "events")); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("evidence failure does not kill the control path", func(t *testing.T) {
+		rec.Fail(errors.New("test capture storage unavailable"))
+		if err := fresh.Check(ctx); err == nil || !strings.Contains(err.Error(), "evidence_storage_error") {
+			t.Fatalf("database work was not blocked: %v", err)
+		}
+		// Let several watchdog ticks pass: an evidence failure must not trigger
+		// the fatal resource callback before the supervisor can report it.
+		select {
+		case err := <-resourceFailure:
+			t.Fatalf("evidence error incorrectly escalated as resource failure: %v", err)
+		case <-time.After(350 * time.Millisecond):
+		}
+		if err := fresh.admin.Ping(ctx); err != nil {
+			t.Fatalf("evidence failure killed PostgreSQL: %v", err)
+		}
+		// Storage enforcement must still work after capture has failed.
+		path := filepath.Join(fresh.Root, "data", "test-storage-limit")
+		file, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = file.Truncate(fresh.Config.MaxStorageBytes + 1)
+		file.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-resourceFailure:
+			if !strings.Contains(err.Error(), "database storage limit exceeded") {
+				t.Fatalf("wrong resource failure: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("storage watchdog stopped enforcing its limit")
+		}
+	})
 }
