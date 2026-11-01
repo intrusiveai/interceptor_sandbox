@@ -178,7 +178,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                     native_checks = run(docker, 'run', '--rm', '--network', 'none', '--user', '65534:65534',
                         '--entrypoint', '/database-test', '-e', 'INTERCEPTOR_TEST_POSTGRES_BIN=/opt/interceptor/postgresql/bin',
                         '-v', str(Path(database_test).resolve())+':/database-test:ro', wrapper,
-                        '-test.v', '-test.run', 'TestNativePostgreSQL', '-test.timeout', '90s')
+                        '-test.v', '-test.run', 'TestNativePostgreSQL|TestProxyConnectionLifecycle', '-test.timeout', '90s')
                     (output/'database-protocol.log').write_text(native_checks+'\n')
             run(docker,'cp',inspection+':/usr/local/share/interceptor/licenses/PostgreSQL-client.txt',str(work/'postgresql-client.LICENSE'))
             client_notices=(Path(__file__).resolve().parents[1]/'internal/appimage/postgresql-go.LICENSE').read_bytes()
@@ -419,12 +419,21 @@ def verify_observed_evidence(output, failure):
 
 def verify_postgresql_evidence(output, failure):
     events = []
+    complete_events = []
     partial = 0
     for path in (output / 'native').glob('*.tar'):
         with tarfile.open(path) as bundle:
-            events.extend(json.loads(line) for line in bundle.extractfile('events.jsonl'))
-            partial += json.load(bundle.extractfile('evidence-bundle.json'))['completeness']['state'] == 'partial'
+            captured = [json.loads(line) for line in bundle.extractfile('events.jsonl')]
+            events.extend(captured)
+            incomplete = json.load(bundle.extractfile('evidence-bundle.json'))['completeness']['state'] == 'partial'
+            partial += incomplete
+            if not incomplete: complete_events.extend(captured)
     kinds = {e['kind'] for e in events}
+    closed = [e['semantic']['detail'] for e in complete_events if e['kind'] == 'database_connection_closed']
+    if not closed or any(not d.get('expected_close') or d.get('transaction_outcome') != 'no_pending_transaction' for d in closed):
+        raise ValueError('normal database session teardown was not classified as expected and idle')
+    if any(e['kind'] == 'database_connection_failed' for e in complete_events):
+        raise ValueError('normal database session recorded a connection failure')
     for required in ('database_request','database_result','database_response_rewritten','database_state_injection_committed','database_oracle'):
         if required not in kinds: raise ValueError('missing database evidence: '+required)
     delivered = {e.get('injection_id') for e in events if e['kind']=='injection_delivered'}
@@ -467,7 +476,8 @@ def verify_postgresql_evidence(output, failure):
         if expected != actual: raise ValueError('live and retained database oracle evidence differ')
     return {'engine':'18.6','pgvector':'0.8.7','evidence_events':len(events),'incomplete_sessions':partial,
             'restores':1,'both_injections_delivery_confirmed':True,'rollback_oracle_negative':True,
-            'request_observation_preserved':True,'live_oracle_feedback_matches_evidence':True}
+            'request_observation_preserved':True,'live_oracle_feedback_matches_evidence':True,
+            'expected_idle_connection_closes':len(closed),'normal_session_connection_failures':0}
 
 
 if __name__ == "__main__":
