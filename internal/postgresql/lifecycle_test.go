@@ -290,6 +290,35 @@ func TestProxyConnectionLifecycle(t *testing.T) {
 		x.upstream.Close()
 		x.assertEvidence(t, "upstream_failure", "PostgreSQL upstream disconnected", "no_pending_transaction", "I")
 	})
+	for _, pending := range []bool{false, true} {
+		name := "idle fatal database error"
+		if pending {
+			name = "pending fatal database error"
+		}
+		t.Run(name, func(t *testing.T) {
+			x := startLifecycle(t, 5000, nil)
+			outcome := "no_pending_transaction"
+			if pending {
+				x.query(t, "UPDATE accounts SET amount=42")
+				outcome = "unconfirmed"
+			}
+			if err := send(x.upstream, &pgproto3.ErrorResponse{Severity: "FATAL", Code: "57P01", Message: "terminating connection due to administrator command"}); err != nil {
+				t.Fatal(err)
+			}
+			x.upstream.Close()
+			x.assertEvidence(t, "upstream_failure", "PostgreSQL FATAL (57P01): terminating connection due to administrator command", outcome, "I")
+			events, _ := recording.VerifyFile(x.events)
+			observed := false
+			for _, e := range events {
+				if e.Kind == "database_error" && strings.Contains(string(e.Semantic), "57P01") {
+					observed = true
+				}
+			}
+			if !observed {
+				t.Fatal("original fatal database diagnostic missing")
+			}
+		})
+	}
 	t.Run("transaction idle read timeout is a failure", func(t *testing.T) {
 		x := startLifecycle(t, 200, nil)
 		x.query(t, "BEGIN")

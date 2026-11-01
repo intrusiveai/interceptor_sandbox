@@ -540,6 +540,24 @@ func (s *connection) responses(ctx context.Context, f *pgproto3.Frontend, c net.
 			return err
 		}
 		_ = c.SetWriteDeadline(time.Now().Add(time.Duration(s.p.Engine.Config.QueryTimeoutMS) * time.Millisecond))
+		// A backend can terminate an idle session with FATAL/PANIC. Do not wait
+		// for a request that will never arrive, or replace that diagnostic with EOF.
+		if fatal, ok := m.(*pgproto3.ErrorResponse); ok && (fatal.Severity == "FATAL" || fatal.Severity == "PANIC") {
+			if r == nil {
+				select {
+				case r = <-q:
+				default:
+				}
+			}
+			observed, provenance := ctx, recording.SandboxControl
+			detail := map[string]any{"connection": s.id, "error": fatal}
+			if r != nil {
+				observed, provenance = r.ctx, recording.Application
+				detail["execution"] = r.id
+			}
+			cause := fmt.Errorf("PostgreSQL %s (%s): %s", fatal.Severity, fatal.Code, fatal.Message)
+			return errors.Join(cause, s.p.Engine.Record(observed, "database_error", provenance, detail, nil))
+		}
 		// Notices and asynchronous parameter changes do not consume command replies.
 		switch m.(type) {
 		case *pgproto3.NoticeResponse, *pgproto3.ParameterStatus, *pgproto3.NotificationResponse:
