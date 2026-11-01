@@ -256,7 +256,9 @@ func (e *Engine) Start(ctx context.Context, assets string, restore *statejournal
 			case <-e.stop:
 				return
 			case <-ticker.C:
-				if err := e.Check(context.Background()); err != nil {
+				// Capture failure blocks database work through Check, but must not
+				// tear down the supervisor before its failure response is delivered.
+				if err := e.checkStorage(context.Background()); err != nil {
 					if e.Failure != nil {
 						e.Failure(err)
 					}
@@ -331,6 +333,10 @@ func (e *Engine) Check(ctx context.Context) error {
 	if err := e.Recorder.Err(); err != nil {
 		return err
 	}
+	return e.checkStorage(ctx)
+}
+
+func (e *Engine) checkStorage(ctx context.Context) error {
 	var size int64
 	err := filepath.WalkDir(filepath.Join(e.Root, "data"), func(path string, d os.DirEntry, err error) error {
 		if os.IsNotExist(err) {

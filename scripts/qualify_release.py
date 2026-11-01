@@ -326,17 +326,49 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                 print(f"Could not retain failure diagnostics: {diagnostic_error}", file=sys.stderr)
             raise
         finally:
-            if process is not None and process.poll() is None:
-                process.send_signal(signal.SIGINT)
-                try: process.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    process.kill(); process.wait()
-            # This newly created data root contains only this test's sessions.
-            if (work / "data").exists():
-                run(cli, "purge", "--all")
-            subprocess.run([docker, "rm", "-f", inspection], capture_output=True, timeout=30)
-            for image in (wrapper, target):
-                subprocess.run([docker, "image", "rm", image], capture_output=True, timeout=30)
+            cleanup_qualification(process, run, cli, docker, inspection, (wrapper, target),
+                                  work / 'data', evidence_failure, sys.exc_info()[1])
+
+
+def cleanup_qualification(process, run, cli, docker, inspection, images, data, evidence_failure, primary_error):
+    """Attempt every cleanup step without replacing the qualification failure."""
+    failures = []
+
+    def attempt(action):
+        try:
+            action()
+        except Exception as error:
+            failures.append(error)
+            print(f"Qualification cleanup failed: {error}", file=sys.stderr)
+
+    def stop():
+        if process is not None and process.poll() is None:
+            process.send_signal(signal.SIGINT)
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=30)
+
+    def purge():
+        # Only this disposable qualification root is touched. A killed Go client
+        # cannot run its deferred chmod after the deliberate mode-0000 fault.
+        if evidence_failure:
+            for directory in data.glob('sessions/*/blobs'):
+                if directory.parent.is_symlink() or directory.is_symlink() or not directory.is_dir():
+                    continue
+                if directory.stat().st_mode & 0o777 == 0:
+                    directory.chmod(0o700)
+        if data.exists():
+            run(cli, 'purge', '--all')
+
+    attempt(stop)
+    attempt(purge)
+    attempt(lambda: subprocess.run([docker, 'rm', '-f', inspection], capture_output=True, timeout=30))
+    for image in images:
+        attempt(lambda: subprocess.run([docker, 'image', 'rm', image], capture_output=True, timeout=30))
+    if failures and primary_error is None:
+        raise RuntimeError('qualification cleanup failed') from failures[0]
 
 
 def verify_public_ca_permissions(run, docker, wrapper, data, version):
