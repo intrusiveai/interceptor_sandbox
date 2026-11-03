@@ -18,6 +18,16 @@ func TestWriterRequiresChannelAndProvenanceAndDetectsTampering(t *testing.T) {
 	if _, err := writer.Append(Draft{Layer: "test", Kind: "invalid", Semantic: map[string]any{}}); err == nil {
 		t.Fatal("expected invalid draft rejection")
 	}
+	if writer.Err() == nil {
+		t.Fatal("required invalid record did not latch evidence failure")
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	writer, err = Open(path, "sess-test")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := writer.Append(Draft{Channel: Control, Layer: "test", Kind: "created", Provenance: SandboxControl, Semantic: map[string]any{"ok": true}}); err != nil {
 		t.Fatal(err)
 	}

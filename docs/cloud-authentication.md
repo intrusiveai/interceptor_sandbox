@@ -103,3 +103,31 @@ renewal after job end, logout or action post-cleanup. Authentication failure MUS
 use existing terminal/uncertain-outcome handling, never replay or resume execution.
 Synthetic tests establish credential-selection behavior; live cloud/OIDC trust,
 permissions and token-lifetime qualification require the actual runner accounts.
+
+### Independent embeddings credentials
+
+An optional embeddings provider uses its own `--embeddings-auth`,
+`--embeddings-credential-config`, and `--embeddings-credential-id`. The configuration
+format and audited host secret resolver are the same as for generation, including
+AWS Secrets Manager. The two slots can explicitly select the same credential ID,
+but never inherit credentials from one another. Generation workload identity does
+not prevent embeddings from using a stored key. Explicit `api-key-env` and `none`
+modes are also available; see [Remote embeddings](model-providers.md#remote-embeddings).
+Real keys stay in the host process and are not part of a Blueprint, container,
+snapshot, or public export. Managed target replacement retains the host provider
+configuration; remote provider state is not snapshotted.
+
+### Titan embeddings AWS identity
+
+`--embeddings-provider bedrock-titan` requires an explicit `--embeddings-auth`
+selection of `workload-identity`, `aws-profile`, or `aws-environment`, using the
+same AWS selection rules above. Its independent `--embeddings-aws-region` and
+`--embeddings-aws-profile` settings do not inherit generation overrides. A profile
+is required only for `aws-profile`. Host AWS environment credentials require
+`aws-environment`; they are never copied into the application container.
+
+Grant the identity `bedrock:InvokeModel` on the selected Titan foundation model
+in the selected region. Embeddings require their own exact model allowlist.
+HTTP endpoint/key flags, secret-store bearer keys, and `none` authentication do
+not apply to this provider. See [Titan embeddings](model-providers.md#amazon-titan-text-embeddings-v2)
+for commands and synthetic application credentials.

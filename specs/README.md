@@ -48,11 +48,29 @@ producer-neutral interfaces for adaptive harnesses, capability
 discovery, filtered feedback, attempt-indexed evidence, and a secure operations
 Operator boundary. It is normative for those extension interfaces and augments
 the local MVP contract. Section 13 specifies campaign-based access, worker/revision
-attribution, terminal execution closure and campaign reporting. The native
-implementation and localhost API are covered by the current
-[validation record](../docs/local-api-validation.md).
+attribution, terminal execution closure and campaign reporting. The
+[local API guide](../docs/local-api.md) describes the native integration interface.
 `interceptor-improvements.md` describes the cross-project integration
 capabilities and AEF consumption rules without redefining these schemas.
+
+## Application state snapshots
+
+[`application-state-snapshots.md`](application-state-snapshots.md) defines optional
+Python and Node state adapters, their save/restore lifecycle, compatibility
+requirements, and end-to-end qualification contract.
+
+## Observed turn evidence
+
+[`observed-turn-evidence.md`](observed-turn-evidence.md) defines supervisor-owned
+observation windows, their attribution limits, and consistent handling of
+required evidence-storage failures.
+
+## Managed PostgreSQL and database injections
+
+[`postgresql-integration.md`](postgresql-integration.md) defines packaged native
+PostgreSQL with pgvector, protocol interception, database-state and
+database-response injections, independent evidence/oracles, and coordinated
+snapshot/restore qualification.
 
 ## Change discipline
 

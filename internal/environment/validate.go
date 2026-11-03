@@ -126,6 +126,12 @@ func Validate(directory string) (*ValidationReport, error) {
 	if blueprint.Application.Interface.External != nil && blueprint.Application.Interface.External.ConfigAsset != "" {
 		assetSources = append(assetSources, blueprint.Application.Interface.External.ConfigAsset)
 	}
+	if code := blueprint.Application.Interface.Code; code != nil && code.AdapterAsset != "" {
+		add(validateAdapter(root, blueprint))
+		assetSources = append(assetSources, code.AdapterAsset)
+	}
+
+	add(validateCodeState(blueprint))
 
 	mutableRoots := map[string]struct{}{}
 	for i, path := range blueprint.Application.Persistence.MutableRoots {
@@ -224,6 +230,21 @@ func Validate(directory string) (*ValidationReport, error) {
 	} else if blueprint.Network.HTTP.Listen != "" {
 		add(errors.New("network.http.listen requires enabled: true"))
 	}
+	if len(blueprint.Network.TLS.PythonEnvironments) != 0 {
+		if !blueprint.Network.TLS.Enabled || blueprint.Network.TLS.TrustMode != "auto" {
+			add(errors.New("network.tls.python_environments requires TLS enabled with auto trust"))
+		}
+		seen := map[string]bool{}
+		for index, interpreter := range blueprint.Network.TLS.PythonEnvironments {
+			if !path.IsAbs(interpreter) || path.Clean(interpreter) != interpreter || interpreter == "/" || len(interpreter) > 4096 || strings.ContainsAny(interpreter, "\\\x00\r\n\t") {
+				add(fmt.Errorf("network.tls.python_environments[%d] must be an absolute, clean Linux executable path", index))
+			}
+			if seen[interpreter] {
+				add(fmt.Errorf("network.tls.python_environments repeats %q", interpreter))
+			}
+			seen[interpreter] = true
+		}
+	}
 	if blueprint.Network.TLS.Enabled {
 		add(validateListen("network.tls.listen", blueprint.Network.TLS.Listen, listens, "network-tls"))
 		if host, _, err := net.SplitHostPort(blueprint.Network.TLS.Listen); err == nil && host != "127.0.0.1" {
@@ -254,11 +275,26 @@ func Validate(directory string) (*ValidationReport, error) {
 	for i, service := range blueprint.Services {
 		prefix := fmt.Sprintf("services[%d]", i)
 		add(validateID(prefix+".id", service.ID, serviceIDs))
-		if service.Kind != "fixture_http" && service.Kind != "stateful_http" && service.Kind != "mcp_http" {
+		if service.Kind != "fixture_http" && service.Kind != "stateful_http" && service.Kind != "mcp_http" && service.Kind != "postgresql" {
 			add(fmt.Errorf("%s.kind %q is unsupported", prefix, service.Kind))
 		}
 		add(validateListen(prefix+".listen", service.Listen, listens, service.ID))
 		add(validateHostnames(prefix, service.Hostnames, hostnames, service.ID))
+		if service.Kind == "postgresql" {
+			add(service.PostgreSQL.Validate())
+			if !blueprint.Network.TLS.Enabled || len(service.Hostnames) == 0 {
+				add(fmt.Errorf("%s PostgreSQL requires network TLS and a declared hostname", prefix))
+			}
+			if service.Authorization != nil || service.Options != nil || service.Seed != "" || service.Routes != "" || service.Tools != "" || service.Fixtures != "" || service.Endpoint != "" {
+				add(fmt.Errorf("%s PostgreSQL cannot use HTTP service configuration", prefix))
+			}
+			if service.PostgreSQL != nil {
+				assetSources = append(assetSources, service.PostgreSQL.Schema...)
+				assetSources = append(assetSources, service.PostgreSQL.Seeds...)
+			}
+		} else if service.PostgreSQL != nil {
+			add(fmt.Errorf("%s.postgresql requires kind postgresql", prefix))
+		}
 		creationCollections := map[string]struct{}{}
 		for policyIndex, policy := range service.Injections.CreateCollections {
 			policyPrefix := fmt.Sprintf("%s.injections.create_collections[%d]", prefix, policyIndex)
@@ -449,6 +485,18 @@ func Validate(directory string) (*ValidationReport, error) {
 		prefix := fmt.Sprintf("oracles[%d]", i)
 		add(validateID(prefix+".id", oracle.ID, oracleIDs))
 		switch oracle.Kind {
+		case "database_query_match":
+			found := false
+			for _, service := range blueprint.Services {
+				if service.ID == oracle.Service && service.Kind == "postgresql" {
+					found = true
+				}
+			}
+			query, ok := oracle.Match["query"].(string)
+			_, hasExpected := oracle.Match["equals"]
+			if !found || !ok || strings.TrimSpace(query) == "" || len(query) > 16384 || !hasExpected || len(oracle.Match) != 2 {
+				add(fmt.Errorf("%s requires PostgreSQL service and match.query/equals", prefix))
+			}
 		case "attacker_sink_match":
 			if _, ok := attackerIDs[oracle.Service]; !ok {
 				add(fmt.Errorf("%s.service references unknown attacker service %q", prefix, oracle.Service))
@@ -799,7 +847,7 @@ func validateApplicationInterface(value ApplicationInterface) []error {
 			if strings.TrimSpace(value.Code.Module) == "" || strings.TrimSpace(value.Code.Invoke) == "" {
 				add(errors.New("application.interface.code.module and invoke are required"))
 			}
-			if strings.ContainsAny(value.Code.Module+value.Code.Initialize+value.Code.Invoke, "\x00\r\n") {
+			if strings.ContainsAny(value.Code.Module+value.Code.Initialize+value.Code.Invoke+value.Code.Close, "\x00\r\n") {
 				add(errors.New("application.interface.code names contain forbidden control characters"))
 			}
 			if value.Code.InputMode != "" && value.Code.InputMode != "single" && value.Code.InputMode != "kwargs" {

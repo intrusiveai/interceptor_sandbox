@@ -129,6 +129,8 @@ func (s *Server) feedbackView(ctx context.Context, r adaptive.OperationRequest, 
 		}
 		object, err := s.blobs.Put(ctx, bytes.NewReader(content))
 		if err != nil {
+			s.recorder.Fail(err)
+			_ = s.evidenceError()
 			entry.Availability, entry.Reason = "unavailable", "content_storage_failed"
 			v.CollectionState = "partial"
 		} else {
@@ -193,7 +195,7 @@ func (s *Server) feedbackView(ctx context.Context, r adaptive.OperationRequest, 
 			}
 		}
 	}
-	if err != nil || v.ThroughEventSeq == 0 {
+	if err != nil || v.ThroughEventSeq == 0 || s.evidenceError() != nil || turn.EvidencePartial {
 		v.CollectionState = "partial"
 		for _, kind := range []string{"injection_delivery", "oracle_outcome"} {
 			if selected(kind) {
@@ -209,10 +211,10 @@ func (s *Server) feedbackView(ctx context.Context, r adaptive.OperationRequest, 
 			if e.Seq > v.ThroughEventSeq {
 				break
 			}
-			if e.AttemptID != a.AttemptID {
+			if e.AttemptID != a.AttemptID && e.Attribution.ObservedAttemptID != a.AttemptID {
 				continue
 			}
-			if e.InjectionID != "" && selected("injection_delivery") {
+			if e.InjectionID != "" && e.AttemptID == a.AttemptID && selected("injection_delivery") {
 				if _, ok := deliveries[e.InjectionID]; !ok {
 					deliveries[e.InjectionID] = nil
 				}
@@ -229,7 +231,7 @@ func (s *Server) feedbackView(ctx context.Context, r adaptive.OperationRequest, 
 				continue
 			}
 			attributed = append(attributed, e)
-			if e.InjectionID != "" && selected("injection_delivery") {
+			if e.InjectionID != "" && e.AttemptID == a.AttemptID && selected("injection_delivery") {
 				disposition := ""
 				switch e.Kind {
 				case "injection_applied", "injection_delivered":
@@ -264,39 +266,56 @@ func (s *Server) feedbackView(ctx context.Context, r adaptive.OperationRequest, 
 			}
 		}
 		if selected("oracle_outcome") {
-			bp := &environment.Blueprint{}
-			unsupported := false
+			databaseEvents, databaseErr := databaseFeedbackEvents(events, turn, v.ThroughEventSeq)
+			unsupported, unavailable := false, false
 			for _, oracle := range s.blueprint.Oracles {
+				oracleEvents := attributed
 				switch oracle.Kind {
 				case "attacker_sink_match", "output_contains", "model_output_contains", "tool_call_match", "event_match":
-					bp.Oracles = append(bp.Oracles, oracle)
+				case "database_query_match":
+					if databaseErr != nil {
+						unavailable = true
+						continue
+					}
+					oracleEvents = databaseEvents
 				default:
 					unsupported = true
+					continue
 				}
-			}
-			report, err := evaluation.Evaluate(evaluation.Input{Blueprint: bp, Events: attributed, Blobs: s.blobs})
-			if err != nil {
-				c := category("oracle_outcome")
-				c.State, c.Reason = "unavailable", "oracle_evaluation_unavailable"
-				v.CollectionState = "partial"
-			} else {
+				bp := &environment.Blueprint{Oracles: []environment.Oracle{oracle}}
+				report, err := evaluation.Evaluate(evaluation.Input{Blueprint: bp, Events: oracleEvents, Blobs: s.blobs})
+				if err != nil {
+					unavailable = true
+					continue
+				}
 				for _, o := range report.Oracles {
 					if o.Fired {
 						addValue("oracle_outcome", map[string]any{"oracle_id": o.ID, "oracle_kind": o.Kind, "fired": true})
 					}
 				}
-				c := category("oracle_outcome")
+			}
+			c := category("oracle_outcome")
+			if c.State == "empty" {
+				c.Reason = "no_positive_attributed_result_not_proof_of_failure"
+			}
+			if unsupported {
+				c.State, c.Reason = "partial", "state_oracles_require_post_run_evidence"
+				v.CollectionState = "partial"
+			}
+			if unavailable {
 				if c.State == "empty" {
-					c.Reason = "no_positive_attributed_result_not_proof_of_failure"
+					c.State = "unavailable"
+				} else {
+					c.State = "partial"
 				}
-				if unsupported {
-					c.State, c.Reason = "partial", "state_oracles_require_post_run_evidence"
-					v.CollectionState = "partial"
-				}
+				c.Reason = "oracle_evaluation_unavailable"
+				v.CollectionState = "partial"
 			}
 		}
 	}
 	if err := adaptive.SaveFeedback(s.paths.Root, v); err != nil {
+		s.recorder.Fail(err)
+		_ = s.evidenceError()
 		return adaptive.OperationError(503, "feedback_persistence_failed")
 	}
 	return adaptive.RetainedFeedback(s.paths.Root, r, id)

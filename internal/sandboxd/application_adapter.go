@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -29,6 +30,8 @@ import (
 const applicationProtocol = "interceptor.application/v1"
 
 type applicationInvocation struct {
+	AttemptID     string
+	PayloadDigest string
 	TurnID        string
 	Operation     string
 	Method        string
@@ -74,6 +77,7 @@ func (s *Server) newApplicationAdapter() (applicationAdapter, error) {
 		if err != nil {
 			return nil, err
 		}
+		env = append(env, "INTERCEPTOR_STATE_RESTORE="+strconv.FormatBool(s.metadata.ParentCheckpoint != ""), "INTERCEPTOR_STATE_MAX_BYTES="+strconv.FormatInt(s.blueprint.Limits.MaxBlobBytes, 10))
 		return newProtocolApplicationAdapter(s, command, env)
 	default:
 		return nil, fmt.Errorf("unsupported application interface %q", s.blueprint.Application.Interface.Adapter)
@@ -100,6 +104,29 @@ func (s *Server) routeOperation(method, path string) (environment.ApplicationOpe
 
 func (s *Server) adapterHandler(invoke func(context.Context, applicationInvocation) (applicationResult, error)) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if err := s.evidenceError(); err != nil {
+			writeError(writer, 507, "evidence_storage_error", err.Error())
+			return
+		}
+		if code := s.blueprint.Application.Interface.Code; code != nil && code.State != nil {
+			ctx, cancel := context.WithTimeout(request.Context(), s.turnTimeout())
+			defer cancel()
+			if adapter, ok := s.adapter.(*protocolApplicationAdapter); ok {
+				release, err := adapter.lockState(ctx)
+				if err != nil {
+					writeError(writer, http.StatusRequestTimeout, "application_busy", err.Error())
+					return
+				}
+				defer release()
+				ctx = context.WithValue(ctx, stateInvocationKey{}, adapter)
+			}
+			if err := lockContext(ctx, s.activityMu.TryRLock); err != nil {
+				writeError(writer, http.StatusRequestTimeout, "application_busy", err.Error())
+				return
+			}
+			defer s.activityMu.RUnlock()
+			request = request.WithContext(ctx)
+		}
 		if request.Method != http.MethodPost || !strings.HasPrefix(request.URL.Path, "/operations/") {
 			writeError(writer, http.StatusNotFound, "unsupported_operation", "use POST /operations/{operation-id}")
 			return
@@ -132,10 +159,18 @@ func (s *Server) adapterHandler(invoke func(context.Context, applicationInvocati
 		result, err := invoke(ctx, applicationInvocation{TurnID: invocationID, Operation: operationID, Body: body, MediaType: request.Header.Get("Content-Type")})
 		if err != nil {
 			s.recordDirectInvocation(invocationID, operationID, 0, nil, err)
+			if evidenceErr := s.evidenceError(); evidenceErr != nil {
+				writeError(writer, 507, "evidence_storage_error", evidenceErr.Error())
+				return
+			}
 			writeError(writer, http.StatusBadGateway, "application_error", err.Error())
 			return
 		}
 		s.recordDirectInvocation(invocationID, operationID, result.Code, result.Body, nil)
+		if err := s.evidenceError(); err != nil {
+			writeError(writer, 507, "evidence_storage_error", err.Error())
+			return
+		}
 		for name, value := range result.Headers {
 			writer.Header().Set(name, value)
 		}
@@ -345,9 +380,12 @@ func (a *httpApplicationAdapter) Invoke(ctx context.Context, invocation applicat
 	if invocation.MediaType != "" {
 		request.Header.Set("Content-Type", invocation.MediaType)
 	}
-	if invocation.TurnID != "" {
-		request.Header.Set("X-Interceptor-Turn-ID", invocation.TurnID)
+
+	finishWindow, windowErr := a.server.beginInvocation(ctx, invocation)
+	if windowErr != nil {
+		return applicationResult{}, windowErr
 	}
+	defer finishWindow()
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		return applicationResult{}, err
@@ -359,6 +397,10 @@ func (a *httpApplicationAdapter) Invoke(ctx context.Context, invocation applicat
 
 func (a *httpApplicationAdapter) Handler() http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if err := a.server.evidenceError(); err != nil {
+			writeError(writer, 507, "evidence_storage_error", err.Error())
+			return
+		}
 		operation, ok := a.server.routeOperation(request.Method, request.URL.Path)
 		if !ok {
 			writeError(writer, http.StatusNotImplemented, "unsupported_route", "route is not declared by the Sealed Environment")
@@ -401,32 +443,21 @@ func (a *httpApplicationAdapter) Handler() http.Handler {
 			writeError(writer, http.StatusTooManyRequests, "turn_limit", "turn limit is exhausted")
 			return
 		}
-		request.Header.Set("X-Interceptor-Turn-ID", invocationID)
-		recorder := &statusResponseWriter{ResponseWriter: writer, status: http.StatusOK}
-		a.proxy.ServeHTTP(recorder, request)
-		a.server.recordDirectInvocation(invocationID, operation.ID, recorder.status, nil, nil)
+		finishWindow, windowErr := a.server.beginInvocation(request.Context(), applicationInvocation{TurnID: invocationID, Operation: operation.ID})
+		if windowErr != nil {
+			writeError(writer, 507, "evidence_storage_error", windowErr.Error())
+			return
+		}
+		capture := newEvidenceResponse(a.server.blueprint.Limits.MaxBlobBytes, a.server.recorder)
+		a.proxy.ServeHTTP(capture, request)
+		finishWindow()
+		a.server.recordDirectInvocation(invocationID, operation.ID, capture.status, capture.body.Bytes(), nil)
+		if err := a.server.evidenceError(); err != nil {
+			writeError(writer, 507, "evidence_storage_error", err.Error())
+			return
+		}
+		capture.publish(writer)
 	})
-}
-
-type statusResponseWriter struct {
-	http.ResponseWriter
-	status      int
-	wroteHeader bool
-}
-
-func (w *statusResponseWriter) WriteHeader(status int) {
-	if w.wroteHeader {
-		return
-	}
-	w.wroteHeader = true
-	w.status = status
-	w.ResponseWriter.WriteHeader(status)
-}
-
-func (w *statusResponseWriter) Flush() {
-	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
-		flusher.Flush()
-	}
 }
 
 func (s *Server) recordDirectInvocation(id, operation string, code int, body []byte, invocationError error) {
@@ -434,10 +465,24 @@ func (s *Server) recordDirectInvocation(id, operation string, code int, body []b
 	if invocationError != nil {
 		errorText = invocationError.Error()
 	}
+	outputRef := ""
+	if len(body) > 0 && s.blobs != nil {
+		object, err := s.blobs.Put(context.Background(), bytes.NewReader(body))
+		if err != nil {
+			s.recorder.Fail(err)
+		} else {
+			outputRef = object.Digest
+		}
+	}
+	inline := body
+	if len(inline) > 64<<10 {
+		inline = nil
+	}
 	_, _ = s.recorder.Append(recording.Draft{
+		RawRef:  outputRef,
 		Channel: recording.Attack, Layer: "application_bridge", Kind: "application_invocation_completed",
 		Provenance: recording.Application, TurnID: id,
-		Semantic: map[string]any{"operation": operation, "code": code, "body": string(body), "error": errorText},
+		Semantic: map[string]any{"operation": operation, "code": code, "body": string(inline), "output_ref": outputRef, "error": errorText, "evidence_partial": s.pendingEvidence(id)},
 	})
 	_ = s.recorder.Flush()
 }
@@ -480,6 +525,11 @@ func (a *commandApplicationAdapter) Invoke(ctx context.Context, invocation appli
 	} else if stdinMode == "json" && !json.Valid(stdin) {
 		return applicationResult{}, errors.New("command input must be valid JSON")
 	}
+	finishWindow, windowErr := a.server.beginInvocation(ctx, invocation)
+	if windowErr != nil {
+		return applicationResult{}, windowErr
+	}
+	defer finishWindow()
 	response, err := a.server.callHelper(ctx, HelperRequest{Command: command, Stdin: stdin, TimeoutMS: a.server.turnTimeout().Milliseconds()})
 	a.server.appendApplicationLogs(response.Stdout, response.Stderr)
 	if err != nil {
@@ -662,6 +712,11 @@ func (a *stdioApplicationAdapter) Invoke(ctx context.Context, invocation applica
 	}
 	a.invokeMu.Lock()
 	defer a.invokeMu.Unlock()
+	finishWindow, windowErr := a.server.beginInvocation(ctx, invocation)
+	if windowErr != nil {
+		return applicationResult{}, windowErr
+	}
+	defer finishWindow()
 	a.output.consumeAll()
 	suffix := a.config.InputSuffix
 	if suffix == "" {
@@ -882,6 +937,9 @@ type protocolApplicationAdapter struct {
 	ready     chan error
 	readyOnce sync.Once
 	limit     chan struct{}
+	stateGate chan struct{}
+	failed    error // protected by pendingMu; an indeterminate code session cannot be reused
+	closed    chan error
 }
 
 func newProtocolApplicationAdapter(server *Server, command, extraEnv []string) (*protocolApplicationAdapter, error) {
@@ -895,7 +953,7 @@ func newProtocolApplicationAdapter(server *Server, command, extraEnv []string) (
 	if server.blueprint.Application.Interface.Code != nil && server.blueprint.Application.Interface.Code.Concurrency > 0 {
 		concurrency = server.blueprint.Application.Interface.Code.Concurrency
 	}
-	return &protocolApplicationAdapter{server: server, command: command, extraEnv: extraEnv, pending: map[string]chan protocolFrame{}, ready: make(chan error, 1), limit: make(chan struct{}, concurrency)}, nil
+	return &protocolApplicationAdapter{server: server, command: command, extraEnv: extraEnv, pending: map[string]chan protocolFrame{}, ready: make(chan error, 1), closed: make(chan error, 1), stateGate: make(chan struct{}, 1), limit: make(chan struct{}, concurrency)}, nil
 }
 
 func (a *protocolApplicationAdapter) Kind() string {
@@ -911,17 +969,40 @@ func (a *protocolApplicationAdapter) Start() error {
 	a.server.configureApplicationCommand(command, a.extraEnv)
 	a.input, err = command.StdinPipe()
 	if err != nil {
+		_ = stdoutLog.Close()
+		_ = stderrLog.Close()
 		return err
 	}
-	output, err := command.StdoutPipe()
+	var output io.ReadCloser
+	var protocolWriter *os.File
+	if a.Kind() == "code" {
+		output, protocolWriter, err = os.Pipe()
+		if err == nil {
+			defer protocolWriter.Close()
+			command.ExtraFiles = []*os.File{protocolWriter}
+			command.Env = append(command.Env, "INTERCEPTOR_PROTOCOL_FD=3")
+			command.Stdout = stdoutLog
+		}
+	} else {
+		output, err = command.StdoutPipe()
+	}
 	if err != nil {
+		_ = a.input.Close()
+		_ = stdoutLog.Close()
+		_ = stderrLog.Close()
 		return err
 	}
 	command.Stderr = stderrLog
 	if err := a.server.startApplicationProcess(command, stdoutLog, stderrLog); err != nil {
+		_ = output.Close()
+		_ = a.input.Close()
 		return err
 	}
-	go a.readFrames(output, stdoutLog)
+	var frameLog io.Writer = stdoutLog
+	if a.Kind() == "code" {
+		frameLog = io.Discard
+	}
+	go func() { defer output.Close(); a.readFrames(output, frameLog) }()
 	config := map[string]any{}
 	if external := a.server.blueprint.Application.Interface.External; external != nil {
 		for key, value := range external.Config {
@@ -946,12 +1027,31 @@ func (a *protocolApplicationAdapter) readFrames(reader io.Reader, log io.Writer)
 		var frame protocolFrame
 		if err := json.Unmarshal(scanner.Bytes(), &frame); err != nil {
 			a.readyOnce.Do(func() { a.ready <- fmt.Errorf("invalid application protocol frame: %w", err) })
+			if a.Kind() == "code" {
+				a.failSession(err)
+				return
+			}
 			continue
 		}
 		switch frame.Type {
 		case "ready":
 			a.readyOnce.Do(func() { a.ready <- nil })
-		case "result":
+		case "error":
+			err := errors.New(frame.Error)
+			a.readyOnce.Do(func() { a.ready <- err })
+			if a.Kind() == "code" {
+				a.failSession(err)
+			}
+		case "closed":
+			var err error
+			if frame.Error != "" {
+				err = errors.New(frame.Error)
+			}
+			select {
+			case a.closed <- err:
+			default:
+			}
+		case "result", "state_saved":
 			a.pendingMu.Lock()
 			channel := a.pending[frame.ID]
 			a.pendingMu.Unlock()
@@ -969,6 +1069,9 @@ func (a *protocolApplicationAdapter) readFrames(reader io.Reader, log io.Writer)
 	}
 	a.readyOnce.Do(func() { a.ready <- err })
 	a.pendingMu.Lock()
+	if a.Kind() == "code" && a.failed == nil {
+		a.failed = fmt.Errorf("application process ended: %w; start a new session", err)
+	}
 	for _, channel := range a.pending {
 		select {
 		case channel <- protocolFrame{Type: "result", Error: err.Error()}:
@@ -987,6 +1090,9 @@ func (a *protocolApplicationAdapter) writeFrame(frame protocolFrame) error {
 func (a *protocolApplicationAdapter) WaitReady(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
+		if a.Kind() == "code" {
+			a.failSession(ctx.Err())
+		}
 		return ctx.Err()
 	case err := <-a.ready:
 		return err
@@ -994,11 +1100,19 @@ func (a *protocolApplicationAdapter) WaitReady(ctx context.Context) error {
 }
 
 func (a *protocolApplicationAdapter) Invoke(ctx context.Context, invocation applicationInvocation) (applicationResult, error) {
+	release, err := a.lockState(ctx)
+	if err != nil {
+		return applicationResult{}, err
+	}
+	defer release()
 	select {
 	case a.limit <- struct{}{}:
 		defer func() { <-a.limit }()
 	case <-ctx.Done():
 		return applicationResult{}, ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return applicationResult{}, err
 	}
 	if _, ok := a.server.operation(invocation.Operation); !ok {
 		return applicationResult{}, fmt.Errorf("unknown operation %q", invocation.Operation)
@@ -1017,15 +1131,33 @@ func (a *protocolApplicationAdapter) Invoke(ctx context.Context, invocation appl
 	}
 	channel := make(chan protocolFrame, 1)
 	a.pendingMu.Lock()
+	if a.failed != nil {
+		err := a.failed
+		a.pendingMu.Unlock()
+		return applicationResult{}, err
+	}
 	a.pending[id] = channel
 	a.pendingMu.Unlock()
 	defer func() { a.pendingMu.Lock(); delete(a.pending, id); a.pendingMu.Unlock() }()
-	if err := a.writeFrame(protocolFrame{Protocol: applicationProtocol, Type: "invoke", ID: id, Operation: invocation.Operation, Input: input, MediaType: invocation.MediaType}); err != nil {
+	invocation.TurnID = id
+	finishWindow, windowErr := a.server.beginInvocation(ctx, invocation)
+	if windowErr != nil {
+		return applicationResult{}, windowErr
+	}
+	defer finishWindow()
+	if err := a.writeInvocation(ctx, protocolFrame{Protocol: applicationProtocol, Type: "invoke", ID: id, Operation: invocation.Operation, Input: input, MediaType: invocation.MediaType}); err != nil {
+		if a.Kind() == "code" {
+			a.failSession(err)
+		}
 		return applicationResult{}, err
 	}
 	select {
 	case <-ctx.Done():
-		_ = a.writeFrame(protocolFrame{Protocol: applicationProtocol, Type: "cancel", ID: id})
+		if a.Kind() == "code" {
+			a.failSession(ctx.Err())
+		} else {
+			_ = a.writeFrame(protocolFrame{Protocol: applicationProtocol, Type: "cancel", ID: id})
+		}
 		return applicationResult{}, ctx.Err()
 	case frame := <-channel:
 		if frame.Error != "" {
@@ -1036,6 +1168,74 @@ func (a *protocolApplicationAdapter) Invoke(ctx context.Context, invocation appl
 			output = []byte("null")
 		}
 		return applicationResult{Code: http.StatusOK, Body: output, MediaType: valueOr(frame.MediaType, "application/json")}, nil
+	}
+}
+
+func (a *protocolApplicationAdapter) writeInvocation(ctx context.Context, frame protocolFrame) error {
+	if a.Kind() != "code" {
+		return a.writeFrame(frame)
+	}
+	result := make(chan error, 1)
+	go func() { result <- a.writeFrame(frame) }()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		a.failSession(ctx.Err())
+		return ctx.Err()
+	}
+}
+
+func (a *protocolApplicationAdapter) failSession(cause error) {
+	a.pendingMu.Lock()
+	if a.failed != nil {
+		a.pendingMu.Unlock()
+		return
+	}
+	a.failed = fmt.Errorf("code session is unusable: %w; start a new session", cause)
+	for _, channel := range a.pending {
+		select {
+		case channel <- protocolFrame{Type: "result", Error: a.failed.Error()}:
+		default:
+		}
+	}
+	a.pendingMu.Unlock()
+	// Never wait for arbitrary user code to cooperate after an indeterminate turn.
+	if a.server.app != nil && a.server.app.Process != nil {
+		_ = syscall.Kill(-a.server.app.Process.Pid, syscall.SIGKILL)
+	}
+	if a.input != nil {
+		_ = a.input.Close()
+	}
+}
+
+func (a *protocolApplicationAdapter) Close(ctx context.Context) error {
+	if a.Kind() != "code" {
+		return nil
+	}
+	a.pendingMu.Lock()
+	failed := a.failed
+	a.pendingMu.Unlock()
+	if failed != nil {
+		return nil
+	} // Already terminated; no cleanup guarantee.
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	release, err := a.lockState(ctx)
+	if err != nil {
+		a.failSession(err)
+		return err
+	}
+	defer release()
+	if err := a.writeInvocation(ctx, protocolFrame{Protocol: applicationProtocol, Type: "close"}); err != nil {
+		return err
+	}
+	select {
+	case err := <-a.closed:
+		return err
+	case <-ctx.Done():
+		a.failSession(ctx.Err())
+		return fmt.Errorf("adapter cleanup timed out: %w", ctx.Err())
 	}
 }
 
@@ -1055,33 +1255,19 @@ func codeDriverCommand(base []string, config *environment.CodeInterface) ([]stri
 	}
 	extra := []string{"INTERCEPTOR_CODE_CONFIG=" + string(encoded)}
 	if config.Language == "python" {
-		return append(append([]string{}, base...), "-u", "-c", pythonCodeDriver), extra, nil
+		return append(append([]string{}, base...), "-u", "-c", pythonStateStore+"\n"+pythonCodeDriver), extra, nil
 	}
-	return append(append([]string{}, base...), "-e", nodeCodeDriver), extra, nil
+	return append(append([]string{}, base...), "-e", nodeStateStore+"\n"+nodeCodeDriver), extra, nil
 }
 
-const pythonCodeDriver = `
-import asyncio, importlib, inspect, json, os, sys
-cfg=json.loads(os.environ['INTERCEPTOR_CODE_CONFIG']); mod=importlib.import_module(cfg['module']); target=mod
-init=cfg.get('initialize')
-if init:
-    fn=getattr(mod,init); target=fn(cfg.get('init_arguments') or {})
-    if inspect.isawaitable(target): target=asyncio.run(target)
-print(json.dumps({'protocol':'interceptor.application/v1','type':'ready'}),flush=True)
-for line in sys.stdin:
-    try:
-        f=json.loads(line)
-        if f.get('type')!='invoke': continue
-        fn=getattr(target,cfg['invoke']); value=f.get('input')
-        result=fn(**value) if cfg.get('input_mode')=='kwargs' else fn(value)
-        if inspect.isawaitable(result): result=asyncio.run(result)
-        print(json.dumps({'protocol':'interceptor.application/v1','type':'result','id':f['id'],'output':result},default=str),flush=True)
-    except Exception as e: print(json.dumps({'protocol':'interceptor.application/v1','type':'result','id':f.get('id'),'error':str(e)}),flush=True)
-`
+//go:embed drivers/python.py
+var pythonCodeDriver string
 
-const nodeCodeDriver = `
-const readline=require('readline'); const cfg=JSON.parse(process.env.INTERCEPTOR_CODE_CONFIG);
-(async()=>{ const mod=await import(cfg.module); let target=mod; if(cfg.initialize){ target=await mod[cfg.initialize](cfg.init_arguments||{}); }
-console.log(JSON.stringify({protocol:'interceptor.application/v1',type:'ready'}));
-readline.createInterface({input:process.stdin}).on('line',async line=>{ let f={}; try { f=JSON.parse(line); if(f.type!=='invoke')return; const fn=target[cfg.invoke]; const out=await fn.call(target,f.input); console.log(JSON.stringify({protocol:'interceptor.application/v1',type:'result',id:f.id,output:out})); } catch(e){ console.log(JSON.stringify({protocol:'interceptor.application/v1',type:'result',id:f.id,error:String(e.message||e)})); }}); })().catch(e=>{console.error(e);process.exit(1)});
-`
+//go:embed drivers/node.cjs
+var nodeCodeDriver string
+
+//go:embed drivers/state.py
+var pythonStateStore string
+
+//go:embed drivers/state.cjs
+var nodeStateStore string

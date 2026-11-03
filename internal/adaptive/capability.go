@@ -61,7 +61,15 @@ type InjectionProfile struct {
 	SelectorFields []string `json:"selector_fields"`
 	Carriers       []string `json:"carriers"`
 }
+type DatabaseTableCapability struct {
+	ID          string   `json:"id"`
+	Keys        []string `json:"keys"`
+	Fields      []string `json:"fields"`
+	AllowCreate bool     `json:"allow_create"`
+	MaxRecords  int      `json:"max_records,omitempty"`
+}
 type ServiceCapability struct {
+	DatabaseTables       []DatabaseTableCapability    `json:"database_tables,omitempty"`
 	Implementation       string                       `json:"implementation,omitempty"`
 	Endpoints            []delivery.Endpoint          `json:"endpoints,omitempty"`
 	ID                   string                       `json:"id"`
@@ -181,6 +189,19 @@ func BuildCapabilityManifest(blueprint *environment.Blueprint, environmentDigest
 		if service.Kind == "mcp_http" {
 			capability.InjectionSurfaces = append(capability.InjectionSurfaces, "mcp_tool_result")
 		}
+		if service.Kind == "postgresql" {
+			capability.Transports = []string{"postgresql+tls"}
+			capability.InjectionSurfaces = []string{"database_response"}
+			if service.PostgreSQL != nil && len(service.PostgreSQL.Tables) > 0 {
+				capability.InjectionSurfaces = append(capability.InjectionSurfaces, "environment_state")
+				for _, table := range service.PostgreSQL.Tables {
+					capability.DatabaseTables = append(capability.DatabaseTables, DatabaseTableCapability{ID: table.ID, Keys: append([]string{}, table.Keys...), Fields: append([]string{}, table.Fields...), AllowCreate: table.AllowCreate, MaxRecords: table.MaxRecords})
+					if table.AllowCreate {
+						capability.CreatableCollections = append(capability.CreatableCollections, ResourceCreationCapability{Collection: table.ID, MaxResources: table.MaxRecords})
+					}
+				}
+			}
+		}
 		for _, policy := range service.Injections.CreateCollections {
 			capability.CreatableCollections = append(capability.CreatableCollections, ResourceCreationCapability{Collection: policy.Collection, MaxResources: policy.MaxResources})
 		}
@@ -251,6 +272,11 @@ func injectionProfiles(surfaces []string) []InjectionProfile {
 			profile.Placements = []string{"replace", "prepend", "append", "insert", "merge"}
 			profile.SelectorFields = []string{"service", "method", "path", "call_ordinal", "query_equal", "headers_equal", "request_body_json_pointer", "request_body_equal", "request_body_contain", "turn_id"}
 			profile.Carriers = []string{"managed_http_response", "dynamic_attacker_sink_response"}
+		case "database_response":
+			profile.Scopes = []string{"once", "standing"}
+			profile.Placements = []string{"replace", "prepend", "append", "insert", "merge"}
+			profile.SelectorFields = []string{"service", "call_ordinal", "request_body_json_pointer", "request_body_equal", "request_body_contain"}
+			profile.Carriers = []string{"postgresql_result"}
 		case "mcp_tool_result":
 			profile.Scopes = []string{"once", "standing"}
 			profile.Placements = []string{"replace", "prepend", "append", "insert", "merge"}

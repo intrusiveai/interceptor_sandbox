@@ -5,6 +5,15 @@ named `environment.yaml` and every asset it references. Unknown YAML fields,
 multiple documents, missing assets, unsafe paths, and unsupported capabilities
 fail validation.
 
+For `application.interface.kind: code`, optional `code.adapter_asset` names a
+directory within this Blueprint that `app build` installs into the wrapper.
+The existing `code.module` selects its Python module or explicit relative Node
+entry file. All adapter files are sealed assets; changing them requires resealing
+and rebuilding. Optional `code.close` names a cleanup method on the initialized
+object (or module without initialization). See the
+[adapter configuration and lifecycle](application-interfaces.md#supplying-an-adapter-separately)
+for path restrictions, dependencies, and examples.
+
 In plain language, the Blueprint answers six questions: What application is
 being tested? What files and services does it believe exist? How should its
 closed DNS and HTTP/TLS plane behave? Which values are safe synthetic
@@ -186,6 +195,41 @@ covers only declared hostnames. Trust modes are:
 | `auto` | Adds the public CA to a recognized Linux PEM store when available and injects common PEM trust variables for OpenSSL/curl, Python Requests, Node, AWS SDKs, and gRPC. |
 | `bundle` | Provides `/opt/interceptor/tls/ca.pem` and `INTERCEPTOR_CA_BUNDLE` without altering application-specific trust settings. |
 | `application-managed` | Provides the same bundle but requires `application_managed_probe`, an absolute argv array run as the application user before startup. The command receives `INTERCEPTOR_TLS_PROBE_URL` and must return success only when the application's trust mechanism accepts the endpoint. |
+
+For Python clients that use Certifi, declare each interpreter used by the target
+application under automatic trust:
+
+```yaml
+network:
+  tls:
+    enabled: true
+    trust_mode: auto
+    python_environments:
+      - /app/.venv/bin/python
+      - /opt/worker-venv/bin/python
+```
+
+These are absolute executable paths **inside the target image**. During
+`interceptor app build`, each interpreter locates its installed Certifi bundle
+and Interceptor appends the sandbox public CA, preserving existing roots. This
+allows unchanged HTTPX clients using `verify=True, trust_env=False` to access
+declared HTTPS fixtures with certificate verification enabled. It applies to
+Python applications using any invocation interface, not only the code adapter.
+
+Each declared interpreter and Certifi must already exist in the target image.
+The build fails if an interpreter or bundle is unavailable, invalid, unwritable,
+or hidden by a known runtime mount. Standard virtualenv interpreter and bundle
+symlinks are supported. Install Certifi in the environment's normal site-packages;
+user-site, application-shadowed, or temporary extracted bundles are unsupported.
+The build does not install packages or download certificates. An omitted or empty
+list preserves the existing behavior and requires no Python installation.
+
+This setting requires `auto` trust and cannot be combined with `bundle` or
+`application-managed`. It changes only the wrapper image. Reseal and rebuild
+when declarations change; rebuild the target image and wrapper after Python or
+dependency upgrades. Custom CA files, privately vendored bundles, and certificate
+pinning need their own application-managed trust configuration. Node retains its
+existing `NODE_EXTRA_CA_CERTS` handling. See the [Python HTTPS example](../examples/python-ca/README.md).
 
 The probe URL uses a reserved read-only `GET` endpoint that returns `204`; it
 does not invoke or mutate the selected simulated service.
@@ -391,7 +435,6 @@ rules:
       query: {email: alice@example.test}
       headers: {Accept: application/json}
     response:
-      mode: static
       status: 200
       headers: {X-Fixture: find-alice}
       json: {id: user-1, email: alice@example.test}
@@ -754,3 +797,9 @@ Sealing writes `environment.lock.json`, a receipt containing digital
 fingerprints for the application and approved assets. Inspect compares the
 current directory with that receipt. Any change that could affect behavior
 requires review and resealing.
+
+## Managed PostgreSQL
+
+See [PostgreSQL and pgvector](postgresql.md) for the managed database Blueprint,
+wrapper packaging, verified driver TLS, database injection surfaces, independent
+committed-state oracles, evidence and coordinated restore contract.

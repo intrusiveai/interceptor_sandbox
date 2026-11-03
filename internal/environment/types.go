@@ -2,6 +2,7 @@ package environment
 
 import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/delivery"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/postgresql"
 	"time"
 )
 
@@ -112,7 +113,16 @@ type ExternalInterface struct {
 	Concurrency int            `yaml:"concurrency,omitempty" json:"concurrency,omitempty"`
 }
 
+type CodeState struct {
+	Save    string `yaml:"save" json:"save"`
+	Restore string `yaml:"restore" json:"restore"`
+	Path    string `yaml:"path" json:"path"`
+}
+
 type CodeInterface struct {
+	State         *CodeState     `yaml:"state,omitempty" json:"state,omitempty"`
+	AdapterAsset  string         `yaml:"adapter_asset,omitempty" json:"adapter_asset,omitempty"`
+	Close         string         `yaml:"close,omitempty" json:"close,omitempty"`
 	Language      string         `yaml:"language" json:"language"`
 	Module        string         `yaml:"module" json:"module"`
 	Initialize    string         `yaml:"initialize,omitempty" json:"initialize,omitempty"`
@@ -174,6 +184,7 @@ type TLSConfig struct {
 	Enabled                 bool     `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	Listen                  string   `yaml:"listen,omitempty" json:"listen,omitempty"`
 	TrustMode               string   `yaml:"trust_mode,omitempty" json:"trust_mode,omitempty"`
+	PythonEnvironments      []string `yaml:"python_environments,omitempty" json:"python_environments,omitempty"`
 	ApplicationManagedProbe []string `yaml:"application_managed_probe,omitempty" json:"application_managed_probe,omitempty"`
 }
 
@@ -199,6 +210,7 @@ type SeedEntry struct {
 }
 
 type Service struct {
+	PostgreSQL        *postgresql.Config     `yaml:"postgresql,omitempty" json:"postgresql,omitempty"`
 	Implementation    string                 `yaml:"implementation,omitempty" json:"implementation,omitempty"`
 	ExportContracts   bool                   `yaml:"export_contracts,omitempty" json:"export_contracts,omitempty"`
 	ResolvedEndpoints []delivery.Endpoint    `yaml:"-" json:"-"`

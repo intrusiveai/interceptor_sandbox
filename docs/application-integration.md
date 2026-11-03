@@ -1,5 +1,14 @@
 # Application integration
 
+Python and Node applications can supply invocation glue separately from their
+application image. Set `application.interface.code.adapter_asset` to an adapter
+directory in the Blueprint; sealing records its contents and `interceptor app
+build` installs it into the wrapper. The target image still supplies its runtime
+and dependencies. See [invocation adapters](application-interfaces.md#supplying-an-adapter-separately)
+for configuration, imports, session lifetime, and cleanup, and the
+[runnable examples](../examples/invocation-adapters/README.md) for the complete
+build/run workflow.
+
 Interceptor needs a small amount of information about an application before it
 can run it safely. The Environment Blueprint supplies that information: how to
 start the application, how a tester invokes it, which operations may be called,
@@ -12,10 +21,11 @@ or Interceptor-specific listeners to that Dockerfile. After the Environment is
 sealed, `interceptor app build` creates a second image—the wrapper image—by:
 
 1. using the application image as its starting point;
-2. adding the Linux `interceptor` executable; and
+2. adding the Linux `interceptor` executable;
 3. when local TLS is enabled, adding the generated public sandbox CA and
-   applying the selected trust mode; and
-4. making Interceptor the wrapper image's entrypoint.
+   applying the selected trust mode;
+4. copying any declared invocation adapter into the application workdir; and
+5. making Interceptor the wrapper image's entrypoint.
 
 On macOS, a released CLI takes the Linux executable from `interceptor-linux`
 beside the real CLI executable, and verifies it using the adjacent `release.json`.
@@ -106,6 +116,14 @@ Blueprint probe command for custom stores such as a JVM truststore or pinned
 runtime. Only the public CA enters the wrapper. The server keypair stays in
 protected host data and is mounted for the supervisor at runtime.
 
+Python applications using Certifi can declare their image interpreter paths in
+`network.tls.python_environments` with `trust_mode: auto`. Wrapper construction
+adds the sandbox public CA to each declared environment's existing bundle, so
+HTTPX clients with `verify=True, trust_env=False` work without application code
+changes. Dependencies must already be installed; the original target image is
+unchanged. [Python trust configuration](environment-blueprint.md#network)
+explains the declaration and supported layouts.
+
 Credential-looking variables—names containing `TOKEN`, `SECRET`, `PASSWORD`,
 or ending in `_KEY`—must be declared in `credentials` with the same value and a
 synthetic service or `model-proxy` in `accepted_by`. Use only synthetic secrets
@@ -161,6 +179,15 @@ Only enable `snapshot_capable` if the application can restart correctly using:
 All information that must survive a restart needs to be written under
 `mutable_roots`. Information held only in memory, `/tmp`, an undeclared folder,
 an open connection, or an external service is not included in a snapshot.
+
+For a Python or Node application that keeps its conversation in memory, a
+separately packaged [state adapter](application-interfaces.md#saving-and-restoring-application-state)
+can export that context and reconstruct it after restart. This does not require
+a framework checkpointer. It does require an application-specific inventory of
+messages, identity, safeguards, and any other state needed for continuation.
+Initialization and restore must not replay business operations. Full support
+must be demonstrated by comparing continued execution before and after restore;
+merely configuring methods is not sufficient.
 
 Before taking a snapshot, Interceptor asks the application to finish or save any
 work that is still in progress. This is called **quiescence**. Declare one way
@@ -223,3 +250,9 @@ Before relying on an environment:
 7. If snapshots are enabled, mutate both service and file state, snapshot,
    restore, and verify the application sees the restored values.
 8. Confirm unsnapshotted in-memory state is not required after restart.
+
+## Managed PostgreSQL
+
+See [PostgreSQL and pgvector](postgresql.md) for the managed database Blueprint,
+wrapper packaging, verified driver TLS, database injection surfaces, independent
+committed-state oracles, evidence and coordinated restore contract.

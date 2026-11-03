@@ -33,32 +33,40 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/hostlifetime"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/ociruntime"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/postgresql"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/session"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/snapshot"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/statejournal"
 )
 
 type Config struct {
-	EvidenceMaxBytes     int64
-	SpoolMaxBytes        int64
-	OnFault              func(string, error)
-	InternalOnly         bool // Integrated local API owns all public target access.
-	EnvironmentDirectory string
-	ApplicationPort      int
-	ControlPort          int
-	ProviderType         string
-	ProviderURL          string
-	ProviderAPIKey       string
-	AWSRegion            string
-	AWSProfile           string
-	ProviderAPIVersion   string
-	ProviderAuthMode     string
-	AllowedModels        []string
-	BridgeTransport      string
-	Docker               ociruntime.Docker
-	Output               io.Writer
-	OnReady              func(session.Metadata) error
-	FeedbackProfile      string
+	EvidenceMaxBytes       int64
+	SpoolMaxBytes          int64
+	OnFault                func(string, error)
+	InternalOnly           bool // Integrated local API owns all public target access.
+	EnvironmentDirectory   string
+	ApplicationPort        int
+	ControlPort            int
+	ProviderType           string
+	ProviderURL            string
+	ProviderAPIKey         string
+	EmbeddingsAuth         string
+	EmbeddingsAWSRegion    string
+	EmbeddingsAWSProfile   string
+	EmbeddingsProviderType string
+	EmbeddingsURL          string
+	EmbeddingsAPIKey       string
+	AllowedEmbeddingModels []string
+	AWSRegion              string
+	AWSProfile             string
+	ProviderAPIVersion     string
+	ProviderAuthMode       string
+	AllowedModels          []string
+	BridgeTransport        string
+	Docker                 ociruntime.Docker
+	Output                 io.Writer
+	OnReady                func(session.Metadata) error
+	FeedbackProfile        string
 }
 
 type Running struct {
@@ -207,6 +215,22 @@ func Restore(ctx context.Context, config Config, sourceSessionID, checkpointID s
 	}
 	if checkpoint.JournalSeq == 0 || checkpoint.JournalSeq > uint64(len(transactions)) || transactions[checkpoint.JournalSeq-1].Hash != checkpoint.JournalHash {
 		return session.Metadata{}, errors.New("checkpoint journal head is missing or inconsistent")
+	}
+	databaseCheckpoints := map[string]bool{}
+	for _, tx := range transactions[:checkpoint.JournalSeq] {
+		for _, op := range tx.Operations {
+			if op.Kind == "database_checkpoint" {
+				if err := postgresql.ValidateCheckpoint(op); err != nil {
+					return session.Metadata{}, err
+				}
+				databaseCheckpoints[op.Service] = true
+			}
+		}
+	}
+	for _, service := range report.Blueprint.Services {
+		if service.Kind == "postgresql" && !databaseCheckpoints[service.ID] {
+			return session.Metadata{}, fmt.Errorf("checkpoint lacks database %s", service.ID)
+		}
 	}
 	blobs, err := blobstore.Open(sourcePaths.Blobs, report.Blueprint.Limits.MaxBlobBytes)
 	if err != nil {
@@ -537,8 +561,13 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 	if err != nil {
 		return metadata, err
 	}
+	embeddingProvider, err := embeddingsProvider(ctx, config)
+	if err != nil {
+		return metadata, err
+	}
 	connector, err := bridge.NewHostConnector(bridge.HostConnectorConfig{
 		SessionID: metadata.ID, Provider: provider,
+		EmbeddingsProvider: embeddingProvider, AllowedEmbeddingModels: config.AllowedEmbeddingModels,
 		AllowedModel: config.AllowedModels, MaxBodyBytes: blueprint.Limits.MaxBlobBytes,
 	})
 	if err != nil {
@@ -1112,4 +1141,28 @@ func preserveRestoreSource(paths session.Paths, checkpoint snapshot.Checkpoint, 
 		}
 	}
 	return fsutil.WriteFile(filepath.Join(directory, "state.jsonl"), prefix.Bytes(), 0600)
+}
+
+func embeddingsProvider(ctx context.Context, config Config) (bridge.ModelProvider, error) {
+	if config.EmbeddingsProviderType == "" {
+		return nil, nil
+	}
+	if config.EmbeddingsProviderType == bridge.ProviderBedrockTitan {
+		if config.EmbeddingsURL != "" || config.EmbeddingsAPIKey != "" || len(config.AllowedEmbeddingModels) == 0 {
+			return nil, errors.New("Titan embeddings require AWS identity and an explicit model allowlist, without HTTP endpoint/key options")
+		}
+		for _, model := range config.AllowedEmbeddingModels {
+			if model != bridge.TitanEmbeddingModel {
+				return nil, errors.New("unsupported Titan embedding model")
+			}
+		}
+		if config.EmbeddingsAuth != "aws-environment" && config.EmbeddingsAuth != "aws-profile" && config.EmbeddingsAuth != "workload-identity" {
+			return nil, errors.New("Titan embeddings require an explicit AWS authentication mode")
+		}
+		return bridge.LoadTitanProvider(ctx, bridge.BedrockProviderConfig{Authentication: config.EmbeddingsAuth, Region: config.EmbeddingsAWSRegion, Profile: config.EmbeddingsAWSProfile})
+	}
+	if config.EmbeddingsProviderType != bridge.ProviderOpenAICompatible {
+		return nil, errors.New("unsupported embeddings provider")
+	}
+	return bridge.NewOpenAIEmbeddingsProvider(bridge.HTTPProviderConfig{BaseURL: config.EmbeddingsURL, APIKey: config.EmbeddingsAPIKey})
 }

@@ -227,11 +227,26 @@ application-lock digests. HTTPS URLs must use a declared hostname and the
 `network.tls.listen` port rather than `127.0.0.1` or an internal plaintext
 service port.
 
+For `Missing Authority Key Identifier`, rebuild the wrapper with an updated
+Interceptor CLI using `interceptor app build`. This regenerates the server
+certificate with its issuer's key identifier and installs the matching CA.
+Start a new session from the rebuilt wrapper with certificate verification enabled.
+
 For `auto`, confirm the runtime honors its system PEM store or one of the
 injected trust variables. For `bundle`, configure the client to consume
 `INTERCEPTOR_CA_BUNDLE`. JVM, pinned, and other custom trust implementations
 should use `application-managed`; its probe runs as the application user and
 fails session startup when trust cannot be established.
+
+For HTTPX with `trust_env=False`, declare the exact Python interpreter in
+`network.tls.python_environments` under `auto` trust, then reseal and rebuild.
+HTTPX ignores the usual CA environment variables in this mode. Check that the
+interpreter and Certifi are installed in the target image, that the application
+uses that environment, and that its bundle is outside image volumes, mutable
+roots, and other runtime mounts. The build error identifies a failed interpreter
+and its underlying error. Install missing dependencies in the target image;
+CA injection never installs them. Explicit custom CA files and pinned
+certificates are not covered by Certifi integration.
 
 ## Snapshot returns `409 snapshot_failed`
 

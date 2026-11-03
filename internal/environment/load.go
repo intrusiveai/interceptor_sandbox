@@ -53,6 +53,11 @@ func Load(directory string) (*Blueprint, error) {
 			blueprint.Network.TLS.TrustMode = "auto"
 		}
 	}
+	for i := range blueprint.Services {
+		if c := blueprint.Services[i].PostgreSQL; c != nil {
+			c.Defaults()
+		}
+	}
 	for index := range blueprint.AttackerServices {
 		if blueprint.AttackerServices[index].Response.Mode == "" {
 			blueprint.AttackerServices[index].Response.Mode = "static"

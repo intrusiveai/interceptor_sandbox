@@ -38,3 +38,9 @@ Blueprints additionally set `delivery_schema_profile`. Missing delivery contract
 remain explicit and MUST NOT be invented. Operator and Interceptor MUST be updated
 together; administrators MUST re-export saved capabilities and native companions.
 Existing retained evidence MUST NOT be rewritten to claim the new schema.
+
+## Managed PostgreSQL
+
+See [PostgreSQL and pgvector](postgresql.md) for the managed database Blueprint,
+wrapper packaging, verified driver TLS, database injection surfaces, independent
+committed-state oracles, evidence and coordinated restore contract.

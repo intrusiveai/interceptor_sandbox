@@ -1,0 +1,14 @@
+FROM alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f AS interceptor-postgresql
+RUN apk add --no-cache build-base=0.5-r3 gcc=14.2.0-r6 binutils=2.44-r3 make=4.4.1-r3 bison=3.8.2-r2 flex=2.6.4-r7 perl=5.40.4-r0 curl=8.14.1-r4 patchelf=0.18.0-r3 linux-headers=6.14.2-r0 musl=1.2.5-r13
+WORKDIR /build
+RUN curl -fsSL https://ftp.postgresql.org/pub/source/v18.6/postgresql-18.6.tar.bz2 -o pg.tar.bz2 && echo '555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f  pg.tar.bz2' | sha256sum -c - && tar xjf pg.tar.bz2
+RUN cd postgresql-18.6 && ./configure --prefix=/opt/interceptor/postgresql --without-readline --without-zlib --without-icu --without-lz4 --without-zstd --disable-nls CFLAGS='-O2' LDFLAGS='-static-libgcc' && make -j4 && make install
+RUN curl -fsSL https://codeload.github.com/pgvector/pgvector/tar.gz/refs/tags/v0.8.7 -o vector.tar.gz && echo 'cac0b10c360f05b2d521200105ba3697e773d4cd3731f5a915a7e37ebe0bea85  vector.tar.gz' | sha256sum -c - && tar xzf vector.tar.gz && cd pgvector-0.8.7 && make -j4 PG_CONFIG=/opt/interceptor/postgresql/bin/pg_config OPTFLAGS='' && make install PG_CONFIG=/opt/interceptor/postgresql/bin/pg_config
+RUN cp /lib/ld-musl-*.so.1 /opt/interceptor/postgresql/lib/libc.so && for exe in /opt/interceptor/postgresql/bin/*; do patchelf --set-interpreter /opt/interceptor/postgresql/lib/libc.so --set-rpath /opt/interceptor/postgresql/lib "$exe"; done
+# Preserve notices for PostgreSQL (including bundled source components),
+# pgvector, musl and statically linked GCC runtime code.
+COPY musl.LICENSE GPL3.LICENSE GCC-runtime.LICENSE /build/
+RUN mkdir -p /opt/interceptor/postgresql/licenses && cp postgresql-18.6/COPYRIGHT /opt/interceptor/postgresql/licenses/PostgreSQL.txt && cp pgvector-0.8.7/LICENSE /opt/interceptor/postgresql/licenses/pgvector.txt && cp /build/musl.LICENSE /opt/interceptor/postgresql/licenses/musl.txt
+RUN printf 'PostgreSQL 18.6: PostgreSQL.txt\npgvector 0.8.7: pgvector.txt\nmusl: musl.txt (version in build-packages.txt)\n' > /opt/interceptor/postgresql/licenses/INDEX && apk info -v > /opt/interceptor/postgresql/licenses/build-packages.txt && /opt/interceptor/postgresql/bin/postgres --version && /opt/interceptor/postgresql/bin/pg_dump --version
+
+RUN cp /build/GPL3.LICENSE /opt/interceptor/postgresql/licenses/GPL3.txt && cp /build/GCC-runtime.LICENSE /opt/interceptor/postgresql/licenses/GCC-runtime.txt && cp pg.tar.bz2 /opt/interceptor/postgresql/licenses/postgresql-18.6-source.tar.bz2 && cp vector.tar.gz /opt/interceptor/postgresql/licenses/pgvector-0.8.7-source.tar.gz && printf 'GCC runtime: GPL3.txt with GCC-runtime.txt exception (native GCC compilation)\nComplete bundled source notices: postgresql-18.6-source.tar.bz2 and pgvector-0.8.7-source.tar.gz\n' >> /opt/interceptor/postgresql/licenses/INDEX

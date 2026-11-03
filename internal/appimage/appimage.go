@@ -22,6 +22,8 @@ import (
 )
 
 type Lock struct {
+	PostgreSQLUID        int       `json:"postgresql_uid,omitempty"`
+	PostgreSQL           string    `json:"postgresql,omitempty"`
 	SchemaVersion        int       `json:"schema_version"`
 	EnvironmentDigest    string    `json:"environment_digest"`
 	SourceImage          string    `json:"source_image"`
@@ -78,7 +80,43 @@ func Build(ctx context.Context, directory, dataRoot, tag, version string, docker
 			sourceReference = localTag
 		}
 	}
-	dockerfile := fmt.Sprintf("FROM %s\nCOPY --chmod=0555 interceptor /usr/local/bin/interceptor\n", sourceReference)
+	databaseStage, databaseCopy, err := databaseBuild(report.Blueprint, temporary)
+	if err != nil {
+		return Lock{}, err
+	}
+	if err := os.WriteFile(filepath.Join(temporary, "postgresql-client.LICENSE"), postgresClientLicense, 0644); err != nil {
+		return Lock{}, err
+	}
+	dockerfile := databaseStage + fmt.Sprintf("FROM %s\nCOPY --chmod=0555 interceptor /usr/local/bin/interceptor\n", sourceReference) + databaseCopy
+	dockerfile += "COPY --chmod=0444 postgresql-client.LICENSE /usr/local/share/interceptor/licenses/PostgreSQL-client.txt\n"
+	if databaseCopy != "" {
+		originalUser, err := docker.ImageUser(ctx, sourceReference)
+		if err != nil {
+			return Lock{}, err
+		}
+		if originalUser == "" {
+			originalUser = "0"
+		}
+		command, _ := json.Marshal([]string{"/usr/local/bin/interceptor", "image-postgresql-user", fmt.Sprint(os.Getuid())})
+		dockerfile += "USER 0:0\nRUN --network=none " + string(command) + "\nUSER " + originalUser + "\n"
+	}
+
+	if code := report.Blueprint.Application.Interface.Code; code != nil && code.AdapterAsset != "" {
+		volumes, err := docker.ImageVolumes(ctx, sourceReference)
+		if err != nil {
+			return Lock{}, err
+		}
+		if err := checkAdapterVolumes(report.Blueprint.Application.Launch.Workdir, volumes); err != nil {
+			return Lock{}, err
+		}
+		if err := stageAdapter(directory, temporary, code.AdapterAsset, environmentLock.Assets); err != nil {
+			return Lock{}, fmt.Errorf("stage invocation adapter: %w", err)
+		}
+		destination := environment.AdapterPath(report.Blueprint.Application.Launch.Workdir)
+		check, _ := json.Marshal([]string{"/usr/local/bin/interceptor", "image-check-adapter", destination})
+		copyPaths, _ := json.Marshal([]string{"adapter/", destination + "/"})
+		dockerfile += "RUN " + string(check) + "\nCOPY --chown=0:0 " + string(copyPaths) + "\n"
+	}
 	var material tlsMaterial
 	var tlsLock *TLSLock
 	if report.Blueprint.Network.TLS.Enabled {
@@ -98,9 +136,45 @@ func Build(ctx context.Context, directory, dataRoot, tag, version string, docker
 		if err := os.WriteFile(publicCA, material.ca, 0444); err != nil {
 			return Lock{}, err
 		}
+		// Creation modes are filtered by the caller's umask. Normalize only
+		// this public COPY tree, never its private temporary parent or host TLS.
+		for directory := filepath.Dir(publicCA); ; directory = filepath.Dir(directory) {
+			if err := os.Chmod(directory, 0755); err != nil {
+				return Lock{}, err
+			}
+			if directory == publicRoot {
+				break
+			}
+		}
+		if err := os.Chmod(publicCA, 0444); err != nil {
+			return Lock{}, err
+		}
 		dockerfile += "COPY public-ca/ /\n"
 		if report.Blueprint.Network.TLS.TrustMode == "auto" {
-			dockerfile += "RUN [\"/usr/local/bin/interceptor\",\"image-install-ca\",\"" + ContainerCABundle + "\"]\n"
+			python := report.Blueprint.Network.TLS.PythonEnvironments
+			var user string
+			if len(python) != 0 {
+				user, err = docker.ImageUser(ctx, sourceReference)
+				if err != nil {
+					return Lock{}, err
+				}
+				dockerfile += "USER 0:0\n"
+			}
+			dockerfile += "RUN --network=none [\"/usr/local/bin/interceptor\",\"image-install-ca\",\"" + ContainerCABundle + "\"]\n"
+			if len(python) != 0 {
+				volumes, err := docker.ImageVolumes(ctx, sourceReference)
+				if err != nil {
+					return Lock{}, err
+				}
+				mounts, _ := json.Marshal(pythonCAMounts(report.Blueprint, volumes))
+				arguments := append([]string{"/usr/local/bin/interceptor", "image-install-python-ca", ContainerCABundle, string(mounts)}, python...)
+				command, _ := json.Marshal(arguments)
+				dockerfile += "RUN --network=none " + string(command) + "\n"
+				if user == "" {
+					user = "0"
+				}
+				dockerfile += "USER " + user + "\n"
+			}
 		}
 		tlsLock = &TLSLock{TrustMode: report.Blueprint.Network.TLS.TrustMode, Hostnames: hostnames, RootCertificateDigest: digest.Bytes(material.ca), ServerCertificateDigest: digest.Bytes(material.certificate), ServerPrivateKeyDigest: digest.Bytes(material.privateKey)}
 	}
@@ -120,7 +194,10 @@ func Build(ctx context.Context, directory, dataRoot, tag, version string, docker
 		SourceImage: report.Blueprint.Application.Image, SourceDigest: environmentLock.ApplicationDigest,
 		WrapperImage: tag, WrapperDigest: wrapperDigest, InterceptorVersion: version,
 		InterceptorBinary: digest.Bytes(binary), BlueprintSchema: report.Blueprint.APIVersion,
-		JournalSchemaVersion: 1, TLS: tlsLock, ConstructedAt: time.Now().UTC(),
+		JournalSchemaVersion: 1, TLS: tlsLock, PostgreSQL: databaseVersions(report.Blueprint), ConstructedAt: time.Now().UTC(),
+	}
+	if databaseCopy != "" {
+		lock.PostgreSQLUID = os.Getuid()
 	}
 	if report.Blueprint.Network.TLS.Enabled {
 		if err := persistTLSMaterial(dataRoot, report.Blueprint, material); err != nil {
@@ -157,6 +234,9 @@ func Load(path string) (Lock, error) {
 }
 
 func Verify(ctx context.Context, lock Lock, environmentLock *environment.Lock, docker ociruntime.Docker) error {
+	if lock.PostgreSQL != "" && lock.PostgreSQLUID != os.Getuid() {
+		return errors.New("PostgreSQL wrapper belongs to a different supervisor UID; rebuild with interceptor app build on this host")
+	}
 	supportedBlueprint := lock.BlueprintSchema == environment.APIVersion || lock.BlueprintSchema == environment.DeliveryAPIVersion
 	if lock.EnvironmentDigest != environmentLock.EnvironmentDigest || lock.SourceDigest != environmentLock.ApplicationDigest || !supportedBlueprint || lock.JournalSchemaVersion != 1 {
 		return errors.New("application lock is incompatible with Sealed Environment")

@@ -28,7 +28,7 @@ def candidate_version(branch):
 
 
 def event_context(event, name, ref, sha, repository):
-    result = {"mode": "verify", "version": "0.1.2", "source": sha,
+    result = {"mode": "verify", "version": "0.1.3", "source": sha,
               "branch": ref.removeprefix("refs/heads/"), "pr": ""}
     if name == "pull_request":
         pr = event["pull_request"]

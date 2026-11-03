@@ -82,11 +82,14 @@ func operation(b localapi.Binding, name string, body any, attempt *adaptive.Atte
 	}
 	return postRaw("/v1/operations", adaptive.EncodeOperation(request, raw))
 }
-func attempt(b localapi.Binding) adaptive.AttemptContext {
+func attempt(b localapi.Binding, profile ...string) adaptive.AttemptContext {
 	payload := []byte(`"smoke payload"`)
 	descriptor := adaptive.ArtifactDescriptor{Digest: digest.Bytes(payload), SizeBytes: int64(len(payload)), MediaType: "application/json", Canonicalization: "raw"}
 	success(operation(b, "artifact.register", map[string]any{"descriptor": descriptor, "content": payload}, nil))
 	a := adaptive.AttemptContext{APIVersion: adaptive.AttemptContextVersion, CampaignID: campaign, ThreadID: "smoke-thread", AttemptID: fmt.Sprintf("smoke-attempt-%d", b.RunRevision), Generation: b.RunRevision, AttemptIndex: b.RunRevision, Payload: descriptor, Generator: adaptive.Generator{Kind: "custom-harness"}, FeedbackProfile: "black-box", CreatedAt: time.Now().UTC()}
+	if len(profile) > 0 {
+		a.FeedbackProfile = profile[0]
+	}
 	if b.RunRevision > 1 {
 		a.ParentAttemptID = fmt.Sprintf("smoke-attempt-%d", b.RunRevision-1)
 	}
@@ -120,7 +123,7 @@ func counter(root, id string, want int) {
 	must(json.Unmarshal(data, &count))
 	require(count.Count == want, fmt.Sprintf("%s counter=%d want=%d", id, count.Count, want))
 }
-func evidence(output, id string, maximum int64) {
+func evidence(output, id string, maximum int64, partial ...bool) {
 	raw, _ := json.Marshal(map[string]string{"api_version": localapi.Version, "campaign_id": campaign, "session_id": id})
 	r, err := client.Post("http://127.0.0.1:8080/v1/evidence", "application/json", bytes.NewReader(raw))
 	must(err)
@@ -162,7 +165,11 @@ func evidence(output, id string, maximum int64) {
 	}
 	require(seen["execution.json"] && seen["state.jsonl"] && seen["events.jsonl"] && seen["manifest.json"], "missing protected evidence members")
 	require(bundle.SessionID == id && bundle.CampaignID == campaign, "evidence scope mismatch")
-	require(bundle.Completeness.State == "complete", fmt.Sprintf("partial evidence: %+v gaps=%v", bundle.Completeness, bundle.CoverageGaps))
+	expectedState := "complete"
+	if len(partial) > 0 && partial[0] {
+		expectedState = "partial"
+	}
+	require(bundle.Completeness.State == expectedState, fmt.Sprintf("partial evidence: %+v gaps=%v", bundle.Completeness, bundle.CoverageGaps))
 	must(file.Sync())
 	must(file.Close())
 	must(os.Rename(file.Name(), filepath.Join(output, id+".tar")))
@@ -170,9 +177,14 @@ func evidence(output, id string, maximum int64) {
 }
 func main() {
 	output := flag.String("output", "", "directory for evidence and result JSON")
+	evidenceFailure := flag.Bool("evidence-failure", false, "test required evidence failure after state qualification; requires isolated --data-root")
+	stateSnapshots := flag.Bool("state-snapshots", false, "qualify packaged application state snapshot and restore")
 	commandOnly := flag.Bool("command-only", false, "qualify a minimal command target's echo operation without snapshots or model calls")
+	adapterOnly := flag.Bool("adapter-only", false, "qualify the stateful invocation-adapter example without snapshots or model calls")
 	maximumEvidence := flag.Int64("evidence-max-bytes", evidencepolicy.DefaultMaxBytes, "local evidence archive acceptance ceiling")
 	root := flag.String("data-root", "", "optional host data root to check reference application state rollback")
+	customerSupport := flag.Bool("customer-support", false, "qualify the customer-support application")
+	postgresql := flag.Bool("postgresql", false, "qualify managed PostgreSQL")
 	flag.Parse()
 	_, limitErr := evidencepolicy.ParseLimit(strconv.FormatInt(*maximumEvidence, 10))
 	must(limitErr)
@@ -188,6 +200,22 @@ func main() {
 	must(limitErr)
 	limit := min(*maximumEvidence, attached.EvidenceMaxBytes)
 	first := attached.Binding
+	if *customerSupport {
+		qualifyCustomerSupport(first, *output, limit)
+		return
+	}
+	if *postgresql {
+		qualifyPostgreSQL(first, *output, limit, *root)
+		return
+	}
+	if *stateSnapshots {
+		qualifyStateSnapshots(first, *output, limit, *evidenceFailure, *root)
+		return
+	}
+	if *adapterOnly {
+		qualifyAdapter(first, *output, limit)
+		return
+	}
 	if *commandOnly {
 		qualifyCommand(first, *output, limit)
 		return
@@ -237,6 +265,54 @@ func main() {
 	raw, err := json.MarshalIndent(result, "", "  ")
 	must(err)
 	must(os.WriteFile(filepath.Join(*output, "result.json"), raw, 0600))
+	fmt.Println(string(raw))
+}
+
+func qualifyAdapter(binding localapi.Binding, output string, limit int64) {
+	a := attempt(binding)
+	for n := 1; n <= 3; n++ {
+		message := "hello"
+		if n == 3 {
+			message = "error"
+		}
+		input, err := json.Marshal(map[string]string{"message": message})
+		must(err)
+		raw := success(operation(binding, "application.invoke", map[string]any{"operation": "ask", "input": input, "media_type": "application/json", "attempt_id": a.AttemptID, "payload_digest": a.Payload.Digest}, &a))
+		var turn struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		}
+		must(json.Unmarshal(raw, &turn))
+		if n == 3 {
+			require(turn.Status != "complete", "application exception reported success")
+			continue
+		}
+		require(turn.Status == "complete", string(raw))
+		var view adaptive.ObservationView
+		must(json.Unmarshal(success(operation(binding, "observation.read", adaptive.ObservationRequest{TurnID: turn.ID}, &a)), &view))
+		found := false
+		for _, entry := range view.Entries {
+			if entry.Kind != "target_output" || entry.Availability != "available" {
+				continue
+			}
+			var chunk adaptive.FeedbackChunk
+			must(json.Unmarshal(success(operation(binding, "observation.content.read", adaptive.FeedbackReadRequest{ReceiptID: view.ReceiptID, EntryID: entry.ID, MaxBytes: adaptive.MaxFeedbackChunk}, &a)), &chunk))
+			var value struct {
+				Customer string
+				Turn     int
+				Message  string
+			}
+			if json.Unmarshal(chunk.Content, &value) == nil && value.Customer == "alice" && value.Turn == n && value.Message == "hello" {
+				found = true
+			}
+		}
+		require(found, "evidence did not contain the expected stateful adapter output")
+	}
+	success(post("/v1/lifecycle", localapi.LifecycleRequest{WorkerInstanceID: binding.WorkerInstanceID, RunRevision: binding.RunRevision, APIVersion: localapi.Version, CampaignID: campaign, SessionID: binding.SessionID, OperationID: "stop-adapter", Operation: "session.stop"}))
+	evidence(output, binding.SessionID, limit)
+	raw, err := json.MarshalIndent(map[string]any{"passed": true, "session_id": binding.SessionID, "target_output": "alice: turns 1, 2", "checks": []string{"state retained across two turns", "application exception", "confirmed target stop", "complete verified evidence"}}, "", "  ")
+	must(err)
+	must(os.WriteFile(filepath.Join(output, "result.json"), raw, 0600))
 	fmt.Println(string(raw))
 }
 

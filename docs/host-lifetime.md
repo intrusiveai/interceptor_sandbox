@@ -62,7 +62,7 @@ service, root helper or power-preference change is needed.
 
 Linux runs the existing foreground/service lifecycle without a caffeinate helper.
 The Docker interruption, signal, terminal closure and cleanup rules apply to both
-platforms. See [validation](host-lifetime-validation.md) for exercised behavior.
+platforms.
 
 ## Optional Linux systemd service
 

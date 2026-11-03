@@ -134,7 +134,6 @@ func (a *agent) invoke(writer http.ResponseWriter, request *http.Request) {
 	encoded, _ := json.Marshal(modelRequest)
 	providerRequest, _ := http.NewRequestWithContext(request.Context(), http.MethodPost, a.modelURL, bytes.NewReader(encoded))
 	providerRequest.Header.Set("Content-Type", "application/json")
-	providerRequest.Header.Set("X-Interceptor-Turn-ID", request.Header.Get("X-Interceptor-Turn-ID"))
 	providerResponse, err := a.client.Do(providerRequest)
 	if err != nil {
 		http.Error(writer, err.Error(), http.StatusBadGateway)

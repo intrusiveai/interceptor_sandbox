@@ -31,7 +31,15 @@ An incompatible pairing fails explicitly. For example, a Responses request is
 not converted to Bedrock Converse, and a Bedrock Converse request is not
 converted to Chat Completions.
 
-All requested model IDs must exactly match a repeated `--allow-model` value.
+Generation model IDs must exactly match a repeated `--allow-model` value.
+Embeddings are configured independently with `--embeddings-provider` and
+`--allow-embedding-model`:
+
+| Application API | Local route | Embeddings provider |
+| --- | --- | --- |
+| OpenAI-compatible embeddings | `POST /v1/embeddings` | `openai-compatible` |
+| Titan Text Embeddings | `POST /model/{modelId}/invoke` | `bedrock-titan` |
+
 For HTTP providers, the application cannot choose the upstream server: the
 operator supplies one fixed `--provider-base-url`, and cross-origin redirects
 are rejected.
@@ -335,3 +343,155 @@ Offline regression tests MUST cover native byte/status preservation, journal
 annotations, retained blob identity, filtered tool-call responses, multiple Chat
 choices, ordinary responses without Azure fields, and provider errors. These tests
 MUST NOT claim live Azure qualification.
+
+## Remote embeddings
+
+Enable an independent OpenAI-compatible embeddings provider when the application
+uses a remote embedding model. Generation keeps its existing provider, credentials,
+and model allowlist; either provider can use the same endpoint if explicitly
+configured that way. For example, add these options to your normal `interceptor run`
+command:
+
+```sh
+--embeddings-provider openai-compatible \
+--embeddings-base-url https://api.openai.com/v1 \
+--embeddings-auth secret-store \
+--embeddings-credential-config /absolute/private/credentials.yaml \
+--embeddings-credential-id embeddings-key \
+--allow-embedding-model text-embedding-3-small
+```
+
+`--allow-embedding-model` is repeatable and must contain at least one exact model
+or deployment identifier. No generation credential or model permission is inherited.
+The embeddings credential file uses the existing host credential-store format,
+including AWS Secrets Manager. It can differ from the generation credential file;
+this also allows cloud workload identity for generation alongside an embeddings key.
+
+For an explicitly selected host environment key, use
+`--embeddings-auth api-key-env --embeddings-api-key-env EMBEDDINGS_API_KEY`
+in place of the stored-credential options. For an intentionally unauthenticated
+gateway, select `--embeddings-auth none` without any credential options. Authentication
+only defaults to `secret-store` when an embeddings credential ID is supplied.
+Without the embeddings option group, embedding requests fail explicitly.
+
+Configure the application's actual SDK clients to use
+`http://127.0.0.1:18080/v1`, for both generation and embeddings, with their respective
+model names and a declared synthetic credential (`accepted_by: model-proxy`). For
+example, `OpenAIEmbeddings(base_url=..., api_key=..., model=..., chunk_size=128)`
+configures LangChain. Host keys stay outside the container. There is no universal
+embeddings environment variable: the application or its invocation adapter must
+actually read the variables you supply. Startup embeddings work during adapter
+initialization before the target becomes ready.
+
+The supported operation is `POST /v1/embeddings`, with `model`, `input`, optional
+positive integer `dimensions`, `encoding_format` (`float` or `base64`), and `user`.
+Input can be nonempty text, a text batch, an integer-token array, or a batch of
+integer-token arrays. Batches are limited to **128 inputs**; request and response
+bodies are each limited to **4 MiB**, or the Blueprint's smaller blob limit. This
+leaves room for evidence copies and base64 expansion inside the existing 32 MiB
+bridge message. Reduce SDK chunk sizes or requested dimensions if a batch exceeds
+these limits. Provider token limits still apply. Vector values and index associations
+are preserved; malformed responses fail rather than producing substitute vectors.
+Native Bedrock/Gemini embedding APIs and multimodal inputs are not supported by
+this OpenAI-compatible route.
+
+Upstream HTTP errors retain their bounded bodies, status, and retry headers.
+Interceptor adds no retries; configure SDK retries/timeouts explicitly when needed.
+Invalid or disabled routes and disallowed models do not contact an upstream.
+Body, deadline, and evidence-storage failures produce explicit errors.
+
+Protected `model_exchange` evidence uses codec `openai_embeddings`, records requested
+and reported model names, input count, vector width, usage, and body references.
+Embedding input tokens count once toward the session token budget. Initialization
+calls without a turn ID remain session activity. Embedding calls neither consume
+generation injections nor establish generation delivery, even if their input
+contains an injected string.
+
+See the [executable embeddings example](../examples/remote-embeddings/README.md)
+for SDK dependency packaging and a wrapper qualification workflow. SDK tokenizers
+must be packaged in the target image when needed; the network-isolated application
+cannot download tokenizer data on first use. Interceptor itself does not require
+a tokenizer or local embedding model.
+
+Document and query vectors must use compatible models, dimensions, and preprocessing.
+Switching an existing 384-dimensional corpus requires re-embedding its documents
+and updating the application's vector schema as needed. Equal dimensions alone do
+not make different models' vectors compatible. Database integration is independent
+of the embeddings transport; this feature does not emulate PostgreSQL or pgvector.
+
+### Amazon Titan Text Embeddings V2
+
+Use the independent `bedrock-titan` embeddings provider for native Boto3 or
+LangChain Bedrock clients. It supports `amazon.titan-embed-text-v2:0` through
+`POST /model/{modelId}/invoke`; it does not translate OpenAI embeddings requests.
+Keep your existing generation provider options and add:
+
+```sh
+--embeddings-provider bedrock-titan \
+--embeddings-auth aws-profile \
+--embeddings-aws-profile embeddings \
+--embeddings-aws-region us-west-2 \
+--allow-embedding-model amazon.titan-embed-text-v2:0
+```
+
+Select `workload-identity`, `aws-profile`, or `aws-environment` explicitly.
+Embeddings use their own profile and region options and do not inherit generation
+options or model permissions. The selected identity needs `bedrock:InvokeModel`
+on `arn:aws:bedrock:REGION::foundation-model/amazon.titan-embed-text-v2:0` (use your
+AWS partition and region). No HTTP key, secret-store bearer key, or unauthenticated
+mode is accepted. AWS signing and credential refresh happen on the host.
+
+Inside the sandbox, use the synthetic AWS credential declarations shown under
+[Bedrock Converse](#amazon-bedrock-converse). Configure Boto3's `endpoint_url`
+(or `AWS_ENDPOINT_URL_BEDROCK_RUNTIME`) to `http://127.0.0.1:18080`, without `/v1`,
+and set its region. For example:
+
+```python
+import boto3
+from botocore.config import Config
+from langchain_aws import BedrockEmbeddings
+
+client = boto3.client(
+    "bedrock-runtime", endpoint_url="http://127.0.0.1:18080",
+    region_name="us-west-2", config=Config(retries={"total_max_attempts": 1}))
+embeddings = BedrockEmbeddings(
+    client=client, model_id="amazon.titan-embed-text-v2:0",
+    model_kwargs={"dimensions": 256, "normalize": True}, normalize=False)
+documents = embeddings.embed_documents(["account help", "billing help"])
+query = embeddings.embed_query("How do I change my account?")
+```
+
+Here `model_kwargs.normalize` selects provider normalization; LangChain's separate
+`normalize=False` avoids additional client-side normalization. Every native call
+contains one `inputText` string; document batches become multiple SDK calls.
+Dimensions are 256, 512, or 1024 (default). Provider normalization defaults to true.
+`embeddingTypes` supports float (default), binary, or both. Binary vectors contain
+one integer bit per dimension; a binary-only response has no `embedding` field.
+Boto3 returns the native `embeddingsByType` object unchanged.
+
+Input is limited to 50,000 characters and the provider's 8,192-token limit. The
+existing embeddings byte and bridge limits still apply. Interceptor does not
+truncate text, generate substitute vectors, retry provider calls, or enable
+streaming and other InvokeModel models. Configure application SDK retries and
+timeouts explicitly. Native AWS exceptions retain safe error types, statuses,
+and request identifiers; denied access requires checking the host identity and
+regional model access, while throttling requires reviewing request rate/quota.
+
+Calls during initialization are session activity; calls observed during a turn
+use the existing attribution rules. Protected evidence records native bodies,
+model identity, dimensions, normalization, representations, usage, and AWS request
+IDs. Input tokens count once, even when both representations are returned.
+Embeddings do not consume generation injections or establish generation delivery.
+Required evidence-storage failures fail the operation and follow the existing
+session failure policy.
+
+See the [Titan wrapper example](../examples/titan-embeddings/README.md) for packaged
+SDK qualification and real-provider setup. Re-embed your document corpus before
+switching models or incompatible settings; equal dimensions do not make vectors
+from different models compatible. Seed vectors are never regenerated implicitly.
+
+The host may explicitly set `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` for a fixed private
+endpoint or local qualification fixture. HTTPS is required except for a loopback
+IP using HTTP. Redirects are refused. This host setting is independent of the
+similarly named variable in the sandbox Blueprint; guest settings cannot choose
+the host endpoint or credentials.

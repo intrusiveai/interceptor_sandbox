@@ -2,6 +2,7 @@ package services
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -370,7 +371,7 @@ func validateMCPSeedRequirements(definition *MCPDefinition, state map[string]map
 
 func (h *MCPHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if request.URL.Path != h.endpoint {
-		h.coverageGap("http", "", map[string]any{"method": request.Method, "path": request.URL.Path, "reason": "unknown MCP endpoint"})
+		h.coverageGap(request.Context(), "http", "", map[string]any{"method": request.Method, "path": request.URL.Path, "reason": "unknown MCP endpoint"})
 		h.writeHTTPError(writer, http.StatusNotFound, "MCP endpoint not found")
 		return
 	}
@@ -409,7 +410,7 @@ func (h *MCPHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	if len(rpc.ID) == 0 {
-		h.handleNotification(writer, rpc)
+		h.handleNotification(request.Context(), writer, rpc)
 		return
 	}
 	handleStatus := http.StatusOK
@@ -429,7 +430,7 @@ func (h *MCPHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
 			"serverInfo":      map[string]any{"name": "interceptor-" + h.serviceID, "version": "v1alpha1"},
 		})
-		h.record("mcp_initialize", map[string]any{"service": h.serviceID, "requested_protocol": params.ProtocolVersion, "protocol": protocol})
+		h.record(request.Context(), "mcp_initialize", map[string]any{"service": h.serviceID, "requested_protocol": params.ProtocolVersion, "protocol": protocol})
 	case "ping":
 		h.writeRPCResult(writer, handleStatus, rpc.ID, map[string]any{})
 	case "tools/list":
@@ -438,7 +439,7 @@ func (h *MCPHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request
 		}
 		if len(rpc.Params) > 0 && string(rpc.Params) != "null" {
 			if err := json.Unmarshal(rpc.Params, &params); err != nil || params.Cursor != "" {
-				h.coverageGap("rpc", "", map[string]any{"method": rpc.Method, "reason": "tool-list pagination is not supported"})
+				h.coverageGap(request.Context(), "rpc", "", map[string]any{"method": rpc.Method, "reason": "tool-list pagination is not supported"})
 				h.writeRPCError(writer, handleStatus, rpc.ID, -32602, "tool-list pagination is not supported", nil)
 				return
 			}
@@ -455,26 +456,26 @@ func (h *MCPHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request
 			tools = append(tools, item)
 		}
 		h.writeRPCResult(writer, handleStatus, rpc.ID, map[string]any{"tools": tools})
-		h.record("mcp_tools_list", map[string]any{"service": h.serviceID, "count": len(tools)})
+		h.record(request.Context(), "mcp_tools_list", map[string]any{"service": h.serviceID, "count": len(tools)})
 	case "tools/call":
-		h.handleToolCall(writer, rpc)
+		h.handleToolCall(request.Context(), writer, rpc)
 	default:
-		h.coverageGap("rpc", "", map[string]any{"method": rpc.Method, "reason": "unsupported MCP method"})
+		h.coverageGap(request.Context(), "rpc", "", map[string]any{"method": rpc.Method, "reason": "unsupported MCP method"})
 		h.writeRPCError(writer, handleStatus, rpc.ID, -32601, "MCP method not supported", map[string]any{"method": rpc.Method})
 	}
 }
 
-func (h *MCPHandler) handleNotification(writer http.ResponseWriter, request mcpRequest) {
+func (h *MCPHandler) handleNotification(ctx context.Context, writer http.ResponseWriter, request mcpRequest) {
 	if request.Method == "notifications/initialized" {
-		h.record("mcp_notification", map[string]any{"service": h.serviceID, "method": request.Method})
+		h.record(ctx, "mcp_notification", map[string]any{"service": h.serviceID, "method": request.Method})
 		writer.WriteHeader(http.StatusAccepted)
 		return
 	}
-	h.coverageGap("notification", "", map[string]any{"method": request.Method, "reason": "unsupported MCP notification"})
+	h.coverageGap(ctx, "notification", "", map[string]any{"method": request.Method, "reason": "unsupported MCP notification"})
 	writer.WriteHeader(http.StatusAccepted)
 }
 
-func (h *MCPHandler) handleToolCall(writer http.ResponseWriter, request mcpRequest) {
+func (h *MCPHandler) handleToolCall(ctx context.Context, writer http.ResponseWriter, request mcpRequest) {
 	var params struct {
 		Name      string         `json:"name"`
 		Arguments map[string]any `json:"arguments"`
@@ -490,12 +491,12 @@ func (h *MCPHandler) handleToolCall(writer http.ResponseWriter, request mcpReque
 	}
 	tool := h.byName[params.Name]
 	if tool == nil {
-		h.coverageGap("tool", params.Name, map[string]any{"reason": "unknown MCP tool", "arguments": params.Arguments})
+		h.coverageGap(ctx, "tool", params.Name, map[string]any{"reason": "unknown MCP tool", "arguments": params.Arguments})
 		h.writeRPCError(writer, http.StatusOK, request.ID, -32602, "unknown MCP tool", map[string]any{"tool": params.Name})
 		return
 	}
 	if err := validateMCPArguments(tool.InputSchema, params.Arguments); err != nil {
-		h.record("mcp_tool_error", map[string]any{"service": h.serviceID, "tool": params.Name, "arguments": params.Arguments, "error": err.Error()})
+		h.record(ctx, "mcp_tool_error", map[string]any{"service": h.serviceID, "tool": params.Name, "arguments": params.Arguments, "error": err.Error()})
 		h.writeRPCResult(writer, http.StatusOK, request.ID, wireMCPResult(errorMCPResult(err.Error())))
 		return
 	}
@@ -510,20 +511,20 @@ func (h *MCPHandler) handleToolCall(writer http.ResponseWriter, request mcpReque
 	}
 	if err != nil {
 		if errors.Is(err, errMCPFixtureGap) {
-			h.coverageGap("tool", params.Name, map[string]any{"reason": err.Error(), "arguments": params.Arguments})
+			h.coverageGap(ctx, "tool", params.Name, map[string]any{"reason": err.Error(), "arguments": params.Arguments})
 		} else {
-			h.record("mcp_tool_error", map[string]any{"service": h.serviceID, "tool": params.Name, "arguments": params.Arguments, "error": err.Error()})
+			h.record(ctx, "mcp_tool_error", map[string]any{"service": h.serviceID, "tool": params.Name, "arguments": params.Arguments, "error": err.Error()})
 		}
 		result = errorMCPResult(err.Error())
 	}
 	wire := wireMCPResult(result)
 	if encoded, encodeErr := json.Marshal(wire); encodeErr != nil || len(encoded) > maxServiceRequestBody {
-		h.record("mcp_tool_error", map[string]any{"service": h.serviceID, "tool": params.Name, "error": "tool result exceeds MCP response limit"})
+		h.record(ctx, "mcp_tool_error", map[string]any{"service": h.serviceID, "tool": params.Name, "error": "tool result exceeds MCP response limit"})
 		result = errorMCPResult("tool result exceeds MCP response limit")
 		wire = wireMCPResult(result)
 	}
 	h.writeRPCResult(writer, http.StatusOK, request.ID, wire)
-	h.record("mcp_tool_call", map[string]any{
+	h.record(ctx, "mcp_tool_call", map[string]any{
 		"service": h.serviceID, "tool": params.Name, "arguments": params.Arguments,
 		"behavior": tool.Behavior.Kind, "fixture": rule, "is_error": result.IsError, "result": wire,
 	})
@@ -740,20 +741,20 @@ func (h *MCPHandler) commit(reason string, operations []statejournal.Operation) 
 	return err
 }
 
-func (h *MCPHandler) coverageGap(surface, tool string, details map[string]any) {
+func (h *MCPHandler) coverageGap(ctx context.Context, surface, tool string, details map[string]any) {
 	details["service"] = h.serviceID
 	details["surface"] = surface
 	if tool != "" {
 		details["tool"] = tool
 	}
-	h.record("coverage_gap", details)
+	h.record(ctx, "coverage_gap", details)
 }
 
-func (h *MCPHandler) record(kind string, semantic any) {
+func (h *MCPHandler) record(ctx context.Context, kind string, semantic any) {
 	if h.recorder == nil {
 		return
 	}
-	_, _ = h.recorder.Append(recording.Draft{
+	_, _ = h.recorder.AppendContext(ctx, recording.Draft{
 		Channel: recording.Evaluation, Layer: "mcp_service", Kind: kind,
 		Provenance: recording.EnvironmentSealed, Semantic: semantic,
 	})

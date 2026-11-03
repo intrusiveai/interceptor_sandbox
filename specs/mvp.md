@@ -1826,6 +1826,15 @@ Verification reports the first failing record and exits non-zero.
 
 ## 13. Logical state journal and snapshots
 
+Application-specific state persistence for the Python and Node code interfaces
+MUST follow [Application state adapters](application-state-snapshots.md). This
+extends declared filesystem persistence: adapters export JSON at a completed-turn
+boundary and reconstruct the application before restored readiness. It does not
+capture process memory, replay old actions, or implicitly enable snapshot support
+for any framework. Applications without this optional configuration retain the
+existing snapshot contract.
+
+
 ### 13.1 Design
 
 The snapshot system is logical, not block based. The Sealed Environment is the
@@ -2628,3 +2637,27 @@ and `evidence_retained: true` in the ordinary body. Successful transfer advertis
 full length/digest for receiver verification. This is a reporting/collection
 failure, not a new execution failure or evidence deletion. The
 [local API contract](../docs/local-api.md#stop-and-evidence) defines the wire fields.
+
+
+## Native observation and evidence completeness
+
+The [observed-turn evidence contract](observed-turn-evidence.md) governs
+supervisor-owned observation windows and required evidence-storage failures.
+Native model/service turn association MUST mean observed during an invocation,
+not causal provenance. Interceptor MUST NOT use application correlation headers
+for this association or turn-specific injection selection. Required capture
+failure MUST block subsequent invocations and snapshots, preserve inspection and
+cleanup, and prevent missing evidence from becoming a negative oracle outcome.
+
+## Managed database extension
+
+The [PostgreSQL integration contract](postgresql-integration.md) extends managed
+services with `postgresql`, independent `postgresql+tls` transport, the
+`database_response` simulation surface, policy-constrained `environment_state`
+database mutations, and `database_query_match` oracles. Database response
+selection MUST use query/parameter predicates and result/cell ordinals; HTTP
+selectors and HTTP endpoint contracts MUST NOT describe this transport.
+Capabilities MUST expose only public table policy and supported surfaces, never
+credentials or oracle SQL. Native backups MUST use integrity-covered
+`database_checkpoint` journal operations; observation windows and required
+capture-failure policy MUST apply to native database evidence.

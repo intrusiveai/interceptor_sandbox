@@ -87,6 +87,42 @@ func (d Docker) ImageID(ctx context.Context, image string) (string, error) {
 	return value, nil
 }
 
+// ImageVolumes are implicitly mounted by Docker even when RunConfig has no
+// explicit bind at that path. Callers installing immutable code must check them.
+func (d Docker) ImageVolumes(ctx context.Context, image string) ([]string, error) {
+	output, err := d.command(ctx, "image", "inspect", "--format", "{{json .Config.Volumes}}", image).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("inspect Docker image volumes: %w: %s", err, output)
+	}
+	var volumes map[string]json.RawMessage
+	if err := json.Unmarshal(output, &volumes); err != nil {
+		return nil, fmt.Errorf("decode Docker image volumes: %w", err)
+	}
+	paths := make([]string, 0, len(volumes))
+	for path := range volumes {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+// ImageUser lets build-time installers temporarily elevate without changing the
+// source image's default user in the completed wrapper.
+func (d Docker) ImageUser(ctx context.Context, image string) (string, error) {
+	output, err := d.command(ctx, "image", "inspect", "--format", "{{json .Config.User}}", image).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("inspect Docker image user: %w: %s", err, output)
+	}
+	var user string
+	if err := json.Unmarshal(output, &user); err != nil {
+		return "", fmt.Errorf("decode Docker image user: %w", err)
+	}
+	if strings.ContainsAny(user, "\r\n\x00 \t") {
+		return "", errors.New("image user contains invalid whitespace")
+	}
+	return user, nil
+}
+
 func RunArguments(config RunConfig) ([]string, error) {
 	if config.Name == "" || config.Image == "" {
 		return nil, errors.New("container name and image are required")

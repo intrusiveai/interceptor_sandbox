@@ -1048,3 +1048,28 @@ MUST use identical credentials and lifecycle semantics; a service has its own
 configured account/environment. The [shared host authentication contract](../docs/cloud-authentication.md)
 is authoritative for model and store selectors, portable credential files,
 GitHub OIDC bootstrap, required model/secret permissions and renewal limits.
+
+## Managed database extension
+
+The [PostgreSQL integration contract](postgresql-integration.md) extends managed
+services with `postgresql`, independent `postgresql+tls` transport, the
+`database_response` simulation surface, policy-constrained `environment_state`
+database mutations, and `database_query_match` oracles. Database response
+selection MUST use query/parameter predicates and result/cell ordinals; HTTP
+selectors and HTTP endpoint contracts MUST NOT describe this transport.
+Capabilities MUST expose only public table policy and supported surfaces, never
+credentials or oracle SQL. Native backups MUST use integrity-covered
+`database_checkpoint` journal operations; observation windows and required
+capture-failure policy MUST apply to native database evidence.
+
+Under the `oracle-assisted` profile, selected `oracle_outcome` feedback MUST
+include eligible recorded `database_query_match` outcomes before session export.
+Evaluation MUST use only independent application observations bound to the
+requested observed turn and attempt through its completion event. It MUST NOT
+query current database state, use cumulative/restored verdicts as turn outcomes,
+or treat harness-authored mutations as application success. Missing or ambiguous
+required observations MUST be unavailable/partial, not negative. Valid results
+from other oracles MAY remain in a partial collection. Retained receipts MUST
+remain immutable after later writes or restore. Public feedback MUST contain only
+normalized outcomes, never sealed SQL, private result rows or credentials.
+Other unsupported state-oracle kinds MUST retain their post-run restrictions.

@@ -63,3 +63,5 @@ those terms in plain language before relying on them.
 
 - [Host authentication](cloud-authentication.md): shared model/store selectors, GitHub OIDC and required permissions.
 - [Host lifetime](host-lifetime.md): standard foreground execution and optional service templates.
+
+- [Managed PostgreSQL and pgvector](postgresql.md)

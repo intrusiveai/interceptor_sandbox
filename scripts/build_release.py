@@ -103,7 +103,7 @@ def build(root, output, version, platform):
             }
             files.append(("interceptor-linux", companion_bytes, 0o755))
         release_json = (json.dumps(metadata, sort_keys=True, indent=2) + "\n").encode()
-        license_text = (root / "LICENSE").read_bytes()
+        license_text = (root / "LICENSE").read_bytes() + b"\n\nTHIRD-PARTY COMPONENT NOTICES\n\n" + (root / "internal/appimage/postgresql-go.LICENSE").read_bytes()
         files.extend((
             ("release.json", release_json, 0o644),
             ("LICENSE", license_text, 0o644),

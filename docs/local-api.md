@@ -438,9 +438,6 @@ after restore, verifies filesystem rollback when `--data-root` is supplied,
 rejects a stale mutation, stops the target and verifies complete protected exports
 for both sessions. It is a qualification client, not Operator implementation.
 
-See [the recorded Docker validation](local-api-validation.md) for tested source
-bytes, runtime scope and evidence results.
-
 ## Live feedback
 
 See [live feedback](feedback.md) for observation selection, immutable native

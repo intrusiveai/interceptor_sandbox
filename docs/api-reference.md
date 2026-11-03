@@ -168,8 +168,9 @@ expects a user credential.
 In the compatibility form, `body` is also base64. The decoded request is
 limited to 2 MiB. `method` and `path` must match one declared HTTP operation.
 Only `Content-Type`, `Accept`, `If-Match`, and
-`If-None-Match` request headers are forwarded. Interceptor adds
-`X-Interceptor-Turn-ID`.
+`If-None-Match` request headers are forwarded. Interceptor associates model and
+service observations with the active invocation internally; applications do not
+need to supply or forward a turn header.
 
 The response is:
 
@@ -349,3 +350,9 @@ or every change made to the environment.
 - `429` turn limit exhausted
 - `501` unsupported application, synthetic-service, sink, or model route
 - `500` integrity or evaluation failure
+
+## Managed PostgreSQL
+
+See [PostgreSQL and pgvector](postgresql.md) for the managed database Blueprint,
+wrapper packaging, verified driver TLS, database injection surfaces, independent
+committed-state oracles, evidence and coordinated restore contract.

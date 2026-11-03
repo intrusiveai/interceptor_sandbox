@@ -75,7 +75,7 @@ func VerifyBlobs(blobs *blobstore.Store, transactions []statejournal.Transaction
 			break
 		}
 		for _, operation := range transaction.Operations {
-			if operation.Kind != "file_upsert" {
+			if operation.Kind != "file_upsert" && operation.Kind != "database_checkpoint" {
 				continue
 			}
 			if _, exists := seen[operation.Blob]; exists {

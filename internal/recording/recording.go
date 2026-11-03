@@ -3,6 +3,7 @@ package recording
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,9 +38,12 @@ const (
 )
 
 type Attribution struct {
-	ToolCallID string `json:"tool_call_id,omitempty"`
-	PID        int    `json:"pid,omitempty"`
-	Confidence string `json:"confidence,omitempty"`
+	Window                string `json:"window,omitempty"`
+	ObservedAttemptID     string `json:"observed_attempt_id,omitempty"`
+	ObservedPayloadDigest string `json:"observed_payload_digest,omitempty"`
+	ToolCallID            string `json:"tool_call_id,omitempty"`
+	PID                   int    `json:"pid,omitempty"`
+	Confidence            string `json:"confidence,omitempty"`
 }
 
 type Draft struct {
@@ -77,8 +81,14 @@ type Event struct {
 }
 
 type Writer struct {
-	mu        sync.Mutex
-	file      *os.File
+	mu   sync.Mutex
+	file interface {
+		Write([]byte) (int, error)
+		Sync() error
+		Close() error
+	}
+	failureMu sync.Mutex
+	failure   error
 	path      string
 	sessionID string
 	nextSeq   uint64
@@ -110,9 +120,17 @@ func Open(path, sessionID string) (*Writer, error) {
 	return writer, nil
 }
 
-func (w *Writer) Append(draft Draft) (Event, error) {
+func (w *Writer) Append(draft Draft) (eventResult Event, appendErr error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	defer func() {
+		if appendErr != nil {
+			w.Fail(appendErr)
+		}
+	}()
+	if err := w.Err(); err != nil {
+		return Event{}, err
+	}
 	if err := validateDraft(draft); err != nil {
 		return Event{}, err
 	}
@@ -135,16 +153,28 @@ func (w *Writer) Append(draft Draft) (Event, error) {
 		return Event{}, fmt.Errorf("encode event: %w", err)
 	}
 	line = append(line, '\n')
-	if _, err := w.file.Write(line); err != nil {
+	if n, err := w.file.Write(line); err != nil || n != len(line) {
+		if err == nil {
+			err = io.ErrShortWrite
+		}
+		w.Fail(err)
 		return Event{}, fmt.Errorf("append event: %w", err)
 	}
 	w.nextSeq, w.head = event.Seq+1, event.Hash
 	return event, nil
 }
 
-func (w *Writer) Flush() error {
+func (w *Writer) Flush() (flushErr error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	defer func() {
+		if flushErr != nil {
+			w.Fail(flushErr)
+		}
+	}()
+	if err := w.Err(); err != nil {
+		return err
+	}
 	if err := w.file.Sync(); err != nil {
 		return fmt.Errorf("sync event log: %w", err)
 	}
@@ -286,4 +316,49 @@ func collectReferences(value any, result map[string]struct{}) {
 			collectReferences(child, result)
 		}
 	}
+}
+
+// Fail latches the first required evidence error independently of the event file.
+func (w *Writer) Fail(err error) {
+	if w == nil || err == nil {
+		return
+	}
+	w.failureMu.Lock()
+	defer w.failureMu.Unlock()
+	if w.failure == nil {
+		w.failure = fmt.Errorf("evidence_storage_error: %w; evidence is incomplete; an operation may already have occurred; start a new session after repairing storage", err)
+	}
+}
+func (w *Writer) Err() error {
+	if w == nil {
+		return nil
+	}
+	w.failureMu.Lock()
+	defer w.failureMu.Unlock()
+	return w.failure
+}
+
+type Observation struct {
+	TurnID        string
+	AttemptID     string
+	PayloadDigest string
+	Window        string
+}
+type observationKey struct{}
+
+func WithObservation(ctx context.Context, observation Observation) context.Context {
+	return context.WithValue(ctx, observationKey{}, observation)
+}
+func ObservationFrom(ctx context.Context) Observation {
+	value, _ := ctx.Value(observationKey{}).(Observation)
+	return value
+}
+func (w *Writer) AppendContext(ctx context.Context, draft Draft) (Event, error) {
+	observation := ObservationFrom(ctx)
+	draft.TurnID = observation.TurnID
+	draft.Attribution.Window = observation.Window
+	draft.Attribution.ObservedAttemptID = observation.AttemptID
+	draft.Attribution.ObservedPayloadDigest = observation.PayloadDigest
+
+	return w.Append(draft)
 }

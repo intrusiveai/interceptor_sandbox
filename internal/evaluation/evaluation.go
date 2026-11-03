@@ -2,6 +2,7 @@ package evaluation
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -99,6 +100,47 @@ func injectionResults(oracles []OracleResult, injections []injection.OperatorSta
 
 func evaluateOracle(oracle environment.Oracle, input Input) (OracleResult, error) {
 	result := OracleResult{ID: oracle.ID, Kind: oracle.Kind, Evidence: []string{}}
+	if oracle.Kind == "database_query_match" {
+		observed := false
+		for _, event := range input.Events {
+			if event.Kind != "database_oracle" {
+				continue
+			}
+			var value struct {
+				Service string `json:"service"`
+				Detail  struct {
+					Oracle  string          `json:"oracle"`
+					Source  string          `json:"source"`
+					Matched *bool           `json:"matched"`
+					Result  json.RawMessage `json:"result"`
+				} `json:"detail"`
+			}
+			if err := json.Unmarshal(event.Semantic, &value); err != nil {
+				return result, err
+			}
+			if value.Service != oracle.Service || value.Detail.Oracle != oracle.ID {
+				continue
+			}
+			var rows [][]json.RawMessage
+			if value.Detail.Matched == nil || json.Unmarshal(value.Detail.Result, &rows) != nil || rows == nil ||
+				(value.Detail.Source != "application" && value.Detail.Source != "baseline" && value.Detail.Source != "harness") {
+				return result, errors.New("required database oracle evidence is incomplete")
+			}
+			observed = true
+			if value.Detail.Source == "application" && *value.Detail.Matched {
+				result.Fired = true
+				result.Evidence = append(result.Evidence, fmt.Sprintf("event:%d", event.Seq))
+				if result.FirstEventSeq == 0 {
+					result.FirstEventSeq = event.Seq
+					result.FirstEventDigest = event.Hash
+				}
+			}
+		}
+		if !observed {
+			return result, errors.New("required database oracle evidence is unavailable")
+		}
+		return result, nil
+	}
 	explicitAttribution := false
 	for _, event := range input.Events {
 		var semantic map[string]any
@@ -107,6 +149,7 @@ func evaluateOracle(oracle environment.Oracle, input Input) (OracleResult, error
 		}
 		matched := false
 		switch oracle.Kind {
+
 		case "attacker_sink_match":
 			containsValue := textValue(oracle.Match["body_contains"])
 			matched = event.Kind == "attacker_observation" && semantic["service"] == oracle.Service && containsValue != "" && strings.Contains(textValue(semantic["body"]), containsValue)
@@ -124,7 +167,7 @@ func evaluateOracle(oracle environment.Oracle, input Input) (OracleResult, error
 			}
 		case "model_output_contains":
 			if event.Kind == "model_exchange" {
-				content, err := readBlob(input.Blobs, textValue(semantic["response_ref"]))
+				content, err := readRequiredBlob(input.Blobs, textValue(semantic["response_ref"]))
 				if err != nil {
 					return result, err
 				}
@@ -133,7 +176,7 @@ func evaluateOracle(oracle environment.Oracle, input Input) (OracleResult, error
 		case "tool_call_match":
 			if event.Kind == "model_exchange" {
 				toolName := textValue(oracle.Match["tool_name"])
-				content, err := readBlob(input.Blobs, textValue(semantic["request_ref"]))
+				content, err := readRequiredBlob(input.Blobs, textValue(semantic["request_ref"]))
 				if err != nil {
 					return result, err
 				}
@@ -367,4 +410,11 @@ func appendUnique(values []string, additions ...string) []string {
 		}
 	}
 	return values
+}
+
+func readRequiredBlob(store *blobstore.Store, reference string) (string, error) {
+	if store == nil || reference == "" {
+		return "", fmt.Errorf("required evidence content unavailable")
+	}
+	return readBlob(store, reference)
 }

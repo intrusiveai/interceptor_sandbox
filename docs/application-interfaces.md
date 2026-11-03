@@ -132,9 +132,10 @@ simultaneous REPL conversations are not supported.
 ## Python and Node modules
 
 Use `code` when the application is naturally invoked as a function rather than
-as a server or CLI. The application image must contain the runtime, module, and
-all dependencies. The launch command identifies the interpreter, not an
-application server:
+as a server or CLI. The application image must contain the runtime, application,
+and its dependencies. An invocation adapter can either be installed in that
+image or supplied separately with the Blueprint. The launch command identifies
+the interpreter:
 
 ```yaml
 launch:
@@ -172,9 +173,135 @@ way.
 
 The return value must be JSON-serializable. Python values that are not
 serializable fall back to their string form; Node serialization errors fail the
-turn. Cancellation stops waiting for a result, but arbitrary user code cannot
-always be safely interrupted inside a shared language process. Keep individual
-functions bounded and rely on `turn_timeout_ms` as the outer limit.
+turn. An invocation exception fails that turn. A timeout or cancellation after
+dispatch terminates the language process and makes the session unusable, because
+the call may already have changed application state. Start a new session; do not
+retry side-effecting calls without checking their outcome. Canceling a request
+that is still waiting for an invocation slot does not terminate the session.
+
+### Supplying an adapter separately
+
+Use `code.adapter_asset` when the image does not already provide the configured
+calling convention. It names a directory relative to the Blueprint, not the
+shell's working directory:
+
+```text
+environment/
+  environment.yaml
+  assets/adapter/
+    support_adapter.py
+    helpers.py
+```
+
+```yaml
+code:
+  language: python
+  adapter_asset: assets/adapter
+  module: support_adapter
+  initialize: initialize
+  invoke: invoke
+  close: close
+  init_arguments:
+    customer_id: alice
+  concurrency: 1
+```
+
+The initializer receives one dictionary/object and returns an object with the
+configured invocation method. That object persists across turns in one sandbox.
+It can create an application instance and a customer session, then translate
+each input into the application's own calling convention. Separate sandbox
+instances get separate objects. In-memory state is not restored by filesystem
+snapshots; leave `snapshot_capable: false` unless the application or a configured
+state adapter implements a verified restore mechanism.
+
+Sealing covers the adapter directory and helper files. `interceptor app build`
+copies the verified code into `<launch.workdir>/.interceptor-adapter/` in the
+wrapper. The original image stays unchanged. After editing an adapter, reseal
+the Blueprint and rebuild the wrapper. No pip/npm installation or adapter code
+execution occurs during the build. The released CLI needs Docker and its normal
+release files, including the packaged Linux companion on macOS; it does not
+need a host Python/Node interpreter, Go, or an Interceptor source checkout.
+
+Python `module` is a dotted name inside the adapter directory. Packages require
+`__init__.py`. Helpers can be imported from that directory; application imports
+resolve from the configured working directory and installed Python packages.
+Async initialization, invocation, and cleanup share one event loop.
+
+For Node, set `language: node`, launch the image's Node executable, and use an
+explicit entry file such as `module: ./support_adapter.mjs`. Relative imports
+resolve inside the adapter; ordinary package imports can find the application's
+`node_modules` in the parent working directory. Use `.mjs`, `.cjs`, or `.js`
+with a suitable `package.json` in the adapter directory. For an application file
+outside the adapter, use its explicit container path, for example
+`import {SupportApplication} from '/app/support_app.mjs'`. Node retains `this`
+when calling a method on the initialized object.
+
+Optional `close` names a cleanup method on that object (or the imported module
+if no initializer is configured). Interceptor awaits it on orderly shutdown,
+with a two-second limit. Exceptions and cleanup timeouts are reported; forced
+termination cannot guarantee cleanup. Application print/console output goes to
+application logs independently of the response protocol.
+
+Missing imports, dependencies, or methods fail startup with the failing stage.
+Adapter paths cannot escape the Blueprint or contain symbolic/hard links. The
+installed destination must be absent from the target image and cannot overlap
+writable roots, filesystem seeds, image `VOLUME` paths, or runtime mounts such as `/tmp` and `/run`.
+Use a dedicated application workdir such as `/app`. Adapters run with the
+application's unprivileged identity and cannot modify their installed code.
+Keep real credentials out of adapter files and `init_arguments`.
+
+See the runnable [Python and Node adapter examples](../examples/invocation-adapters/README.md).
+
+### Saving and restoring application state
+
+A separately supplied invocation adapter can also implement application-specific
+state persistence. The target application does not need a framework checkpointer
+or source changes when the adapter can reconstruct all necessary state. Add this
+mapping under `application.interface.code`:
+
+```yaml
+state:
+  save: save_state
+  restore: restore_state
+  path: /app-state/agent.json
+```
+
+Declare `/app-state` in `application.persistence.mutable_roots`, enable
+`snapshot_capable`, and use concurrency `1`. Choose a dedicated state directory
+outside the application workdir, seeded assets, and file-injection namespaces.
+`save_state()` returns a JSON object; `restore_state(state)` applies it to the
+same object used by `invoke`. Both Python and Node support sync and async methods.
+Without an initializer the methods resolve on the imported module.
+
+On snapshot creation, Interceptor waits for invocations to complete, performs
+configured quiescence, calls the save method, and includes the resulting file in
+the normal verified filesystem snapshot. `quiesce.kind: none` does not skip the
+save method. Saving occurs at snapshot boundaries, not on every turn. The driver
+writes a versioned JSON document atomically and enforces `limits.max_blob_bytes`;
+the file also counts against snapshot byte limits. It rejects lossy serialization,
+including unsupported objects, cycles, non-finite numbers, and dropped fields.
+Encode framework message objects explicitly; do not use pickle.
+
+On restore, the driver initializes the application, loads the selected snapshot's
+state, and awaits the restore method before reporting readiness. A fresh session
+never loads a file merely because it exists. Missing, invalid, incompatible, or
+rejected restored state fails startup; it never falls back to empty history.
+Save errors fail the snapshot without replacing it with stale state. A save
+that times out and may still be running makes that application session unusable.
+State capture and admission waiting use the quiescence timeout (default five
+seconds); restored startup uses the existing startup timeout.
+
+The adapter must preserve messages and tool history, summaries, logical identity,
+and any safeguards affecting future decisions. It must rebuild transient locks
+and clients without replaying model requests or business actions. Background
+state mutation must stop at the snapshot boundary through existing quiescence
+facilities; serializing invocations alone does not stop background tasks. Save
+must leave the live application logically unchanged and be safe to repeat.
+
+This adapter is part of the tested configuration. It does not give the original
+application production restart support, capture process memory, or recover
+provider-side conversation state. See the [runnable examples](../examples/application-state-snapshots/README.md)
+and [snapshot behavior](snapshots-and-restore.md).
 
 ## External adapter protocol
 
@@ -228,3 +355,35 @@ and code for a well-defined module API. Use an external adapter when protocol
 framing or initialization cannot be expressed by the built-ins. The narrowest
 stable boundary usually produces the clearest evidence and the most reliable
 snapshot tests.
+
+### Applications that embed during initialization
+
+A Python or Node invocation adapter can call the local model proxy during its
+initializer and later turns. Configure both generation and embeddings SDK clients
+with `http://127.0.0.1:18080/v1` and declared synthetic credentials. Enable the
+independent host embeddings options described in [Model providers](model-providers.md#remote-embeddings).
+Package SDK dependencies and any tokenizer cache in the target image; no runtime
+downloads are available in the isolated container. The adapter can be supplied
+separately through the existing sealed adapter asset.
+
+Embedding calls preserve their model usage and vector metadata in protected
+evidence. They do not confirm generation injection delivery. See the
+[remote embeddings example](../examples/remote-embeddings/README.md) for startup
+batch embedding and query embedding during later invocations.
+
+
+## Native observation windows
+
+Interceptor opens an observation window when an adapter actually begins an
+invocation, after waiting for capacity, and closes it on return or cancellation.
+Python, Node, HTTP, command, REPL/stdio, and external interfaces use the same
+supervisor-owned mechanism. No application header propagation or HTTP-client
+changes are required. Concurrent invocations remain supported; requests received
+while multiple invocations execute have no guessed turn association. Work that
+continues independently after an invocation returns can only be described by the
+window in which it was observed, not by its initiating turn.
+
+If required native evidence cannot be stored, the session rejects further
+invocations and reports incomplete evidence even when the target catches the
+individual model/service error and returns normally. See
+[injection and evaluation semantics](injections-and-evaluation.md#observed-turns-and-incomplete-evidence).

@@ -49,23 +49,27 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 		writeBridgeError(writer, http.StatusNotImplemented, "unsupported_model_route", "unsupported model route")
 		return
 	}
-	body, err := readLimit(request.Body, p.maxBytes)
+	bodyLimit := p.maxBytes
+	if isEmbeddingCodec(codec) {
+		bodyLimit = min(bodyLimit, maxEmbeddingBodyBytes)
+	}
+	body, err := readLimit(request.Body, bodyLimit)
 	if err != nil {
-		writeBridgeError(writer, http.StatusRequestEntityTooLarge, "model_body_limit", err.Error())
+		writeModelError(writer, codec, http.StatusRequestEntityTooLarge, "model_body_limit", err.Error())
 		return
 	}
-	turnID := request.Header.Get("X-Interceptor-Turn-ID")
+	turnID := recording.ObservationFrom(request.Context()).TurnID
 	rewritten := body
 	results := []injection.Result{}
 	if err := validateNonStreaming(codec, body); err != nil {
-		writeBridgeError(writer, http.StatusBadRequest, "unsupported_streaming", err.Error())
+		writeModelError(writer, codec, http.StatusBadRequest, "unsupported_streaming", err.Error())
 		return
 	}
 	if err := validateNativeShape(codec, body, request.Header); err != nil {
-		writeBridgeError(writer, http.StatusBadRequest, "unsupported_model_feature", err.Error())
+		writeModelError(writer, codec, http.StatusBadRequest, "unsupported_model_feature", err.Error())
 		return
 	}
-	if p.injections != nil {
+	if p.injections != nil && !isEmbeddingCodec(codec) {
 		switch codec {
 		case CodecOpenAIChat:
 			rewritten, results, err = p.injections.RewriteOpenAI(body, turnID)
@@ -79,19 +83,39 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 			rewritten, results, err = p.injections.RewriteGoogleGenerateContent(body, turnID)
 		}
 		if err != nil {
-			writeBridgeError(writer, http.StatusBadRequest, "injection_failed", err.Error())
+			writeModelError(writer, codec, http.StatusBadRequest, "injection_failed", err.Error())
 			return
 		}
 	}
 	// Freeze already-applied response candidates before forwarding. A response
 	// rewritten while this model request is in flight cannot qualify this request.
 	responseCandidates := []string{}
-	if p.injections != nil {
+	if p.injections != nil && !isEmbeddingCodec(codec) {
 		responseCandidates = p.injections.ObservableResponseIDs()
 	}
 	requestRef := p.store(request.Context(), rewritten)
+	if p.blobs != nil && requestRef == "" {
+		p.record(request.Context(), "model_error", turnID, "", map[string]any{"codec": codec, "error": "model request evidence storage failed"})
+		writeModelError(writer, codec, http.StatusInsufficientStorage, "evidence_storage_error", "model request exceeds evidence storage limits or storage is unavailable")
+		return
+	}
+	if err := p.record(request.Context(), "model_request", turnID, requestRef, map[string]any{"codec": codec}); err != nil {
+		writeModelError(writer, codec, http.StatusInsufficientStorage, "evidence_storage_error", err.Error())
+		return
+	}
+	if p.recorder != nil {
+		if err := p.recorder.Flush(); err != nil {
+			writeModelError(writer, codec, http.StatusInsufficientStorage, "evidence_storage_error", err.Error())
+			return
+		}
+	}
 	started := time.Now()
 	p.connectorMu.Lock()
+	if err := p.recorder.Err(); err != nil {
+		p.connectorMu.Unlock()
+		writeModelError(writer, codec, 507, "evidence_storage_error", err.Error())
+		return
+	}
 	requestID := p.nextID.Add(1)
 	result, err := p.connector.Forward(request.Context(), ModelFrame{
 		SessionID: p.sessionID, RequestID: requestID, Codec: codec, Path: request.URL.EscapedPath(),
@@ -102,8 +126,8 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 	})
 	p.connectorMu.Unlock()
 	if err != nil {
-		p.record("model_error", turnID, requestRef, map[string]any{"error": err.Error(), "elapsed_ms": time.Since(started).Milliseconds()})
-		writeBridgeError(writer, http.StatusBadGateway, "model_connector_error", err.Error())
+		p.record(request.Context(), "model_error", turnID, requestRef, map[string]any{"codec": codec, "error": err.Error(), "elapsed_ms": time.Since(started).Milliseconds()})
+		writeModelError(writer, codec, http.StatusBadGateway, "model_connector_error", err.Error())
 		return
 	}
 	ids := []string{}
@@ -112,18 +136,18 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 			ids = append(ids, item.InjectionID)
 		}
 	}
-	if p.injections != nil {
+	if p.injections != nil && !isEmbeddingCodec(codec) {
 		candidates := append(append([]string(nil), ids...), p.injections.ObservableFidelityIDs(turnID)...)
 		candidates = append(candidates, responseCandidates...)
 		confirmed, confirmErr := p.injections.ConfirmDelivery(result.FinalRequest, candidates)
 		if confirmErr != nil {
-			p.record("injection_state_error", turnID, requestRef, map[string]any{"error": confirmErr.Error()})
-			writeBridgeError(writer, http.StatusInternalServerError, "injection_state_error", confirmErr.Error())
+			p.record(request.Context(), "injection_state_error", turnID, requestRef, map[string]any{"error": confirmErr.Error()})
+			writeModelError(writer, codec, http.StatusInternalServerError, "injection_state_error", confirmErr.Error())
 			return
 		}
 		if err := p.injections.CompleteFidelityTurn(turnID, confirmed); err != nil {
-			p.record("injection_state_error", turnID, requestRef, map[string]any{"error": err.Error()})
-			writeBridgeError(writer, http.StatusInternalServerError, "injection_state_error", err.Error())
+			p.record(request.Context(), "injection_state_error", turnID, requestRef, map[string]any{"error": err.Error()})
+			writeModelError(writer, codec, http.StatusInternalServerError, "injection_state_error", err.Error())
 			return
 		}
 		for _, id := range confirmed {
@@ -132,21 +156,27 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 			}
 		}
 	}
-	responseRef := p.store(request.Context(), result.Body)
-	providerRequestRef := p.store(request.Context(), result.ProviderRequest)
-	providerResponseRef := p.store(request.Context(), result.ProviderResponse)
 	model, usage := modelSemantics(codec, request.URL.EscapedPath(), rewritten, result.Body)
-	finish, safety := modelOutcome(codec, result.Body)
-	attemptID, payloadDigest := "", ""
-	if p.injections != nil {
-		attemptID, payloadDigest = p.injections.Attribution(ids)
-	}
-	if p.onTokens != nil {
+	// Account for a completed provider call even if retaining its evidence fails.
+	if p.onTokens != nil && (!isEmbeddingCodec(codec) || result.Status >= 200 && result.Status < 300) {
 		if total := totalTokens(usage); total > 0 {
 			p.onTokens(total)
 		}
 	}
-	p.record("model_exchange", turnID, requestRef, map[string]any{
+	responseRef := p.store(request.Context(), result.Body)
+	providerRequestRef := p.store(request.Context(), result.ProviderRequest)
+	providerResponseRef := p.store(request.Context(), result.ProviderResponse)
+	if p.blobs != nil && (len(result.Body) > 0 && responseRef == "" || len(result.ProviderRequest) > 0 && providerRequestRef == "" || len(result.ProviderResponse) > 0 && providerResponseRef == "") {
+		p.record(request.Context(), "model_error", turnID, requestRef, map[string]any{"codec": codec, "model": model, "status": result.Status, "usage": usage, "error": "model response evidence storage failed"})
+		writeModelError(writer, codec, http.StatusInsufficientStorage, "evidence_storage_error", "model response exceeds evidence storage limits or storage is unavailable")
+		return
+	}
+	finish, safety := modelOutcome(codec, result.Body)
+	attemptID, payloadDigest := "", ""
+	if p.injections != nil && !isEmbeddingCodec(codec) {
+		attemptID, payloadDigest = p.injections.Attribution(ids)
+	}
+	exchange := map[string]any{
 		"codec": codec, "provider": result.Provider, "model": model, "status": result.Status,
 		"request_ref": requestRef, "response_ref": responseRef, "provider_request_ref": providerRequestRef,
 		"provider_response_ref": providerResponseRef, "final_proxy_request_digest": result.FinalRequestDigest,
@@ -154,7 +184,28 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 		"elapsed_ms": time.Since(started).Milliseconds(), "usage": usage, "injection_ids": ids,
 		"provider_metadata": result.ProviderMetadata, "finish_status": finish, "safety_status": safety,
 		"attempt_id": attemptID, "payload_digest": payloadDigest,
-	})
+	}
+	if isEmbeddingCodec(codec) {
+		delete(exchange, "finish_status")
+		delete(exchange, "safety_status")
+		exchange["operation"] = "embeddings"
+		count, _ := validateEmbeddingCodec(codec, rewritten)
+		exchange["input_count"] = count
+		if result.Status >= 200 && result.Status < 300 {
+			metadata, validationErr := embeddingCodecMetadata(codec, rewritten, result.Body)
+			if validationErr != nil {
+				writeModelError(writer, codec, http.StatusBadGateway, "invalid_embeddings_response", validationErr.Error())
+				return
+			}
+			for key, value := range metadata {
+				exchange[key] = value
+			}
+		}
+	}
+	if err := p.record(request.Context(), "model_exchange", turnID, requestRef, exchange); err != nil {
+		writeModelError(writer, codec, http.StatusInsufficientStorage, "evidence_storage_error", "model exchange could not be recorded")
+		return
+	}
 	for name, value := range result.Headers {
 		writer.Header().Set(name, value)
 	}
@@ -171,6 +222,23 @@ func validateNativeShape(codec string, body []byte, headers http.Header) error {
 		return errors.New("background model operations are not supported")
 	}
 	switch codec {
+	case CodecTitanEmbeddings:
+		for name := range headers {
+			if strings.HasPrefix(strings.ToLower(name), "x-amzn-bedrock-") {
+				return errors.New("Titan invocation control headers are not supported")
+			}
+		}
+		if value := headers.Get("Content-Type"); value != "" && value != "application/json" {
+			return errors.New("Titan requires application/json content")
+		}
+		if value := headers.Get("Accept"); value != "" && value != "application/json" && value != "*/*" {
+			return errors.New("Titan accepts application/json responses")
+		}
+		_, err := titanRequest(body)
+		return err
+	case CodecOpenAIEmbeddings:
+		_, err := validateEmbeddingCodec(codec, body)
+		return err
 	case CodecAnthropicMessages:
 		if err := rejectUnsupportedKeys(object, []string{"model", "max_tokens", "messages", "system", "temperature", "top_p", "top_k", "stop_sequences", "tools", "tool_choice", "metadata", "stream"}, "Anthropic Messages parameter"); err != nil {
 			return err
@@ -375,21 +443,23 @@ func (p *ModelProxy) store(ctx context.Context, content []byte) string {
 	}
 	object, err := p.blobs.Put(ctx, bytes.NewReader(content))
 	if err != nil {
+		p.recorder.Fail(err)
 		return ""
 	}
 	return object.Digest
 }
 
-func (p *ModelProxy) record(kind, turnID, rawRef string, semantic any) {
+func (p *ModelProxy) record(ctx context.Context, kind, turnID, rawRef string, semantic any) error {
 	if p.recorder == nil {
-		return
+		return nil
 	}
 	draft := recording.Draft{Channel: recording.Evaluation, Layer: "inference_proxy", Kind: kind, Provenance: recording.Application, TurnID: turnID, RawRef: rawRef, Semantic: semantic}
 	if value, ok := semantic.(map[string]any); ok {
 		draft.AttemptID, _ = value["attempt_id"].(string)
 		draft.PayloadDigest, _ = value["payload_digest"].(string)
 	}
-	_, _ = p.recorder.Append(draft)
+	_, err := p.recorder.AppendContext(ctx, draft)
+	return err
 }
 
 func modelSemantics(codec, path string, request, response []byte) (string, any) {
@@ -397,6 +467,9 @@ func modelSemantics(codec, path string, request, response []byte) (string, any) 
 	var value map[string]any
 	_ = json.Unmarshal(response, &value)
 	usage := value["usage"]
+	if codec == CodecTitanEmbeddings {
+		usage = map[string]any{"input_tokens": value["inputTextTokenCount"], "total_tokens": value["inputTextTokenCount"]}
+	}
 	if codec == CodecGoogleGenerateContent {
 		if raw, ok := value["usageMetadata"].(map[string]any); ok {
 			usage = map[string]any{"input_tokens": raw["promptTokenCount"], "output_tokens": raw["candidatesTokenCount"], "total_tokens": raw["totalTokenCount"]}
@@ -498,6 +571,11 @@ func modelCodec(method, requestPath string) (string, bool) {
 		return "", false
 	}
 	switch {
+	case strings.HasPrefix(requestPath, "/model/") && strings.HasSuffix(requestPath, "/invoke"):
+		_, err := titanModel(requestPath)
+		return CodecTitanEmbeddings, err == nil
+	case requestPath == "/v1/embeddings":
+		return CodecOpenAIEmbeddings, true
 	case strings.HasSuffix(requestPath, "/chat/completions"):
 		return CodecOpenAIChat, true
 	case strings.HasSuffix(requestPath, "/responses"):

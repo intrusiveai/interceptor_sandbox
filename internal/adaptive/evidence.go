@@ -64,6 +64,11 @@ type EvidenceBundle struct {
 }
 
 func BuildEvidenceBundle(metadata session.Metadata, attempts []AttemptContext, artifacts []ArtifactDescriptor, events []recording.Event, checkpoints []snapshot.Checkpoint, report evaluation.Report, evaluationComplete bool) (EvidenceBundle, error) {
+	for _, taint := range metadata.Taints {
+		if taint == "evidence_incomplete" {
+			evaluationComplete = false
+		}
+	}
 	state := "complete"
 	if !evaluationComplete {
 		state = "partial"
@@ -85,6 +90,19 @@ func BuildEvidenceBundle(metadata session.Metadata, attempts []AttemptContext, a
 		if index, ok := byAttempt[event.AttemptID]; ok {
 			bundle.Attempts[index].EventSequences = append(bundle.Attempts[index].EventSequences, event.Seq)
 		}
+	}
+	// Observation context and injection origin may refer to different attempts.
+	for _, event := range events {
+		if event.Attribution.ObservedAttemptID != event.AttemptID {
+			if index, ok := byAttempt[event.Attribution.ObservedAttemptID]; ok {
+				bundle.Attempts[index].EventSequences = append(bundle.Attempts[index].EventSequences, event.Seq)
+			}
+		}
+	}
+	for index := range bundle.Attempts {
+		sort.Slice(bundle.Attempts[index].EventSequences, func(i, j int) bool {
+			return bundle.Attempts[index].EventSequences[i] < bundle.Attempts[index].EventSequences[j]
+		})
 	}
 	for _, checkpoint := range checkpoints {
 		bundle.Snapshots = append(bundle.Snapshots, SnapshotEvidence{SnapshotID: checkpoint.ID, Digest: checkpoint.Hash, ParentSnapshot: checkpoint.ParentCheckpoint, CanonicalSizeBytes: checkpoint.CanonicalSizeBytes, EventSequence: checkpoint.EventSeq, CreatedAt: checkpoint.CreatedAt, Status: checkpoint.Status})

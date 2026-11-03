@@ -76,3 +76,12 @@ func TestEventMatchTreatsExplicitAttemptAttributionAsCausal(t *testing.T) {
 		t.Fatalf("explicit attempt attribution was not retained: %#v", report)
 	}
 }
+
+func TestMissingRequiredModelEvidenceIsNotNegativeOutcome(t *testing.T) {
+	for _, kind := range []string{"model_output_contains", "tool_call_match"} {
+		_, err := Evaluate(Input{Blueprint: &environment.Blueprint{Oracles: []environment.Oracle{{ID: "required", Kind: kind, Value: "success", Match: map[string]any{"tool_name": "refund"}}}}, Events: []recording.Event{{Kind: "model_exchange", Semantic: json.RawMessage(`{}`)}}})
+		if err == nil {
+			t.Fatalf("%s silently evaluated missing evidence", kind)
+		}
+	}
+}

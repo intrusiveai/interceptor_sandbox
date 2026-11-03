@@ -44,8 +44,14 @@ type Transaction struct {
 }
 
 type Writer struct {
-	mu        sync.Mutex
-	file      *os.File
+	mu   sync.Mutex
+	file interface {
+		Write([]byte) (int, error)
+		Sync() error
+		Close() error
+	}
+	failure   error
+	onFailure func(error)
 	sessionID string
 	nextSeq   uint64
 	head      string
@@ -80,9 +86,22 @@ func Open(path, sessionID string) (*Writer, error) {
 	return writer, nil
 }
 
-func (w *Writer) Append(reason string, operations []Operation) (Transaction, error) {
+func (w *Writer) Append(reason string, operations []Operation) (result Transaction, appendErr error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	defer func() {
+		if appendErr != nil {
+			if w.failure == nil {
+				w.failure = appendErr
+			}
+			if w.onFailure != nil {
+				w.onFailure(appendErr)
+			}
+		}
+	}()
+	if w.failure != nil {
+		return Transaction{}, w.failure
+	}
 	if strings.TrimSpace(reason) == "" || len(operations) == 0 {
 		return Transaction{}, errors.New("transaction reason and operations are required")
 	}
@@ -104,7 +123,11 @@ func (w *Writer) Append(reason string, operations []Operation) (Transaction, err
 	if err != nil {
 		return Transaction{}, fmt.Errorf("encode transaction: %w", err)
 	}
-	if _, err := w.file.Write(append(line, '\n')); err != nil {
+	line = append(line, '\n')
+	if n, err := w.file.Write(line); err != nil || n != len(line) {
+		if err == nil {
+			err = io.ErrShortWrite
+		}
 		return Transaction{}, fmt.Errorf("append transaction: %w", err)
 	}
 	// State mutations are write-ahead durable before the caller applies them.
@@ -181,6 +204,11 @@ func VerifyFile(path string) ([]Transaction, error) {
 
 func ValidateOperation(operation Operation) error {
 	switch operation.Kind {
+	case "database_checkpoint":
+		if operation.Service == "" || !digest.Valid(operation.Blob) || operation.Size < 0 || !json.Valid(operation.Value) {
+			return errors.New("invalid database checkpoint")
+		}
+		return rejectFields(operation, "kind", "service", "blob", "size", "value")
 	case "file_upsert":
 		if err := validMutablePath(operation.Path); err != nil || !digest.Valid(operation.Blob) || operation.Size < 0 {
 			return errors.New("file_upsert requires a clean absolute path, blob digest, and nonnegative size")
@@ -275,3 +303,6 @@ func validMutablePath(path string) error {
 	}
 	return nil
 }
+
+// SetFailureHandler is configured before serving requests.
+func (w *Writer) SetFailureHandler(handler func(error)) { w.onFailure = handler }

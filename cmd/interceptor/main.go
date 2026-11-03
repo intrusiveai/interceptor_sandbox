@@ -82,11 +82,26 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return sandboxdCommand(arguments[1:])
 	case "app-helper":
 		return sandboxd.RunHelper()
+	case "image-postgresql-user":
+		if len(arguments) != 2 {
+			return errors.New("image-postgresql-user requires UID")
+		}
+		return appimage.EnsurePostgreSQLUser(arguments[1])
 	case "image-install-ca":
 		if len(arguments) != 2 {
 			return errors.New("image-install-ca requires one CA path")
 		}
 		return appimage.InstallSystemCA(arguments[1])
+	case "image-check-adapter":
+		if len(arguments) != 2 {
+			return errors.New("image-check-adapter requires one destination")
+		}
+		return appimage.CheckAdapterDestination(arguments[1])
+	case "image-install-python-ca":
+		if len(arguments) < 4 {
+			return errors.New("image-install-python-ca requires CA path, mount list JSON, and interpreter paths")
+		}
+		return appimage.InstallPythonCA(arguments[1], arguments[2], arguments[3:])
 	case "status":
 		return statusCommand(arguments[1:], stdout)
 	case "list":
@@ -246,6 +261,16 @@ func runCommand(arguments []string, stdout io.Writer) error {
 	awsProfile := flags.String("aws-profile", "", "AWS shared configuration profile for bedrock-converse")
 	providerAPIVersion := flags.String("provider-api-version", "", "pinned provider API version (Anthropic only in this release)")
 	providerAuthMode := flags.String("provider-auth", "", "provider authentication selector; see docs/cloud-authentication.md")
+	var embeddings embeddingsOptions
+	flags.StringVar(&embeddings.provider, "embeddings-provider", "", "optional embeddings provider: openai-compatible or bedrock-titan")
+	flags.StringVar(&embeddings.baseURL, "embeddings-base-url", "", "fixed embeddings API base URL")
+	flags.StringVar(&embeddings.auth, "embeddings-auth", "", "embeddings authentication selector; see docs/cloud-authentication.md")
+	flags.StringVar(&embeddings.credentialConfig, "embeddings-credential-config", "", "embeddings secret-store configuration")
+	flags.StringVar(&embeddings.credentialID, "embeddings-credential-id", "", "embeddings host credential ID")
+	flags.StringVar(&embeddings.keyEnv, "embeddings-api-key-env", "", "explicit host embeddings key environment variable")
+	flags.StringVar(&embeddings.awsRegion, "embeddings-aws-region", "", "independent embeddings AWS region")
+	flags.StringVar(&embeddings.awsProfile, "embeddings-aws-profile", "", "independent embeddings AWS profile")
+	flags.Var(&embeddings.models, "allow-embedding-model", "allowed embeddings model (repeatable)")
 	var allowedModels stringList
 	flags.Var(&allowedModels, "allow-model", "allowed model identifier (repeatable)")
 	if err := flags.Parse(arguments); err != nil {
@@ -291,7 +316,14 @@ func runCommand(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	embeddingKey, err := embeddings.resolve(ctx, *production, resolveStoredCredential)
+	if err != nil {
+		return err
+	}
 	err = localapi.Run(ctx, hostrun.Config{
+		EmbeddingsProviderType: embeddings.provider, EmbeddingsURL: embeddings.baseURL,
+		EmbeddingsAPIKey: embeddingKey, AllowedEmbeddingModels: embeddings.models,
+		EmbeddingsAuth: embeddings.auth, EmbeddingsAWSRegion: embeddings.awsRegion, EmbeddingsAWSProfile: embeddings.awsProfile,
 		EnvironmentDirectory: *directory,
 		ProviderType:         *providerType, ProviderURL: *providerURL, ProviderAPIKey: apiKey,
 		AWSRegion: *awsRegion, AWSProfile: *awsProfile, AllowedModels: allowedModels,
@@ -765,9 +797,27 @@ func exportEvidence(ctx context.Context, dataRoot string, metadata session.Metad
 			references[reference] = struct{}{}
 		}
 	}
-	for _, transaction := range transactions {
-		for _, operation := range transaction.Operations {
-			if operation.Kind == "file_upsert" {
+	// Restore-source history is part of the exported evidence even when the
+	// replacement journal no longer references the source's files or backups.
+	journals := [][]statejournal.Transaction{transactions}
+	if metadata.ParentSessionID != "" {
+		source, err := statejournal.VerifyFile(filepath.Join(paths.Root, "restore-source", "state.jsonl"))
+		if err != nil {
+			return err
+		}
+		journals = append(journals, source)
+	}
+	journalSizes := map[string]int64{}
+	for _, history := range journals {
+		for _, transaction := range history {
+			for _, operation := range transaction.Operations {
+				if operation.Kind != "file_upsert" && operation.Kind != "database_checkpoint" {
+					continue
+				}
+				if size, exists := journalSizes[operation.Blob]; exists && size != operation.Size {
+					return errors.New("journal blob has conflicting recorded sizes")
+				}
+				journalSizes[operation.Blob] = operation.Size
 				references[operation.Blob] = struct{}{}
 			}
 		}
@@ -937,6 +987,10 @@ func exportEvidence(ctx context.Context, dataRoot string, metadata session.Metad
 		reader, object, err := store.Open(reference)
 		if err != nil {
 			return err
+		}
+		if size, exists := journalSizes[reference]; exists && size != object.Size {
+			reader.Close()
+			return errors.New("journal blob size does not match retained bytes")
 		}
 		name := "blobs/sha256/" + strings.TrimPrefix(reference, "sha256:")
 		copyErr := addReader(name, reader, object.Size, 0o640)

@@ -34,6 +34,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/identity"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/injection"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/postgresql"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/recording"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/services"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/session"
@@ -49,6 +50,12 @@ const (
 )
 
 type Server struct {
+	databases          map[string]*postgresql.Engine
+	databaseProxies    map[string]*postgresql.Proxy
+	databaseOracleMu   sync.Mutex
+	databaseOracleBase map[string]json.RawMessage
+
+	windows         executionWindows
 	feedbackMu      sync.Mutex
 	execution       *adaptive.ExecutionStore
 	blueprint       *environment.Blueprint
@@ -115,6 +122,7 @@ type TurnRequest struct {
 }
 
 type Turn struct {
+	EvidencePartial      bool              `json:"evidence_partial,omitempty"`
 	OutputContractStatus string            `json:"output_contract_status,omitempty"`
 	ID                   string            `json:"id"`
 	Operation            string            `json:"operation,omitempty"`
@@ -203,7 +211,17 @@ func New() (*Server, error) {
 		recorder.Close()
 		return nil, err
 	}
-	blobs, err := blobstore.Open(containerBlobs, report.Blueprint.Limits.MaxBlobBytes)
+	journal.SetFailureHandler(recorder.Fail)
+	blobRoot := containerBlobs
+	for _, service := range report.Blueprint.Services {
+		if service.Kind == "postgresql" {
+			// Database wrappers put mounts beneath a native, private ancestor.
+			// Open its real directory; blobstore intentionally rejects aliases.
+			blobRoot = "/run/interceptor-private/interceptor-blobs"
+			break
+		}
+	}
+	blobs, err := blobstore.Open(blobRoot, report.Blueprint.Limits.MaxBlobBytes)
 	if err != nil {
 		journal.Close()
 		recorder.Close()
@@ -313,6 +331,9 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := s.adapter.WaitReady(readyContext); err != nil {
 		return err
 	}
+	if err := s.evidenceError(); err != nil {
+		return err
+	}
 	if err := s.startHostBridge(ctx); err != nil {
 		return err
 	}
@@ -336,6 +357,11 @@ func (s *Server) startSyntheticServices() error {
 	for _, definition := range s.blueprint.Services {
 		var handler http.Handler
 		switch definition.Kind {
+		case "postgresql":
+			if err := s.startDatabase(definition); err != nil {
+				return err
+			}
+			continue
 		case "fixture_http":
 			fixtures, err := services.LoadFixtureSet(filepath.Join(containerEnvironment, definition.Fixtures))
 			if err != nil {
@@ -367,7 +393,7 @@ func (s *Server) startSyntheticServices() error {
 			}
 			handler = authority.Authorize(definition.ID, *definition.Authorization, handler)
 		}
-		handler = s.trackActivity(handler)
+		handler = s.observedHandler(handler, definition.ID)
 		s.registerHostRoutes(definition.Hostnames, handler)
 		if err := s.serveTCP(definition.Listen, handler); err != nil {
 			return fmt.Errorf("start service %s: %w", definition.ID, err)
@@ -391,7 +417,7 @@ func (s *Server) startSyntheticServices() error {
 		if definition.Response.Mode == "dynamic" {
 			handler = services.WithResponseInjection(definition.ID, definition.Kind, handler, s.injections, s.recorder)
 		}
-		handler = s.trackActivity(handler)
+		handler = s.observedHandler(handler, definition.ID)
 		s.registerHostRoutes(definition.Hostnames, handler)
 		if err := s.serveTCP(definition.Listen, handler); err != nil {
 			return fmt.Errorf("start attacker service %s: %w", definition.ID, err)
@@ -559,11 +585,15 @@ func (s *Server) startModelProxy() error {
 		return err
 	}
 	proxy.SetTokenObserver(s.consumeTokens)
-	return s.serveTCP(baseURL.Host, s.trackActivity(proxy))
+	return s.serveTCP(baseURL.Host, s.observedHandler(proxy, ""))
 }
 
 func (s *Server) startHostBridge(ctx context.Context) error {
 	appHandler := s.trackActivity(s.adapter.Handler())
+	if a, ok := s.adapter.(*protocolApplicationAdapter); ok && a.stateEnabled() {
+		// State adapters admit the entire request before acquiring activity locks.
+		appHandler = s.adapter.Handler()
+	}
 	controlHandler := s.controlHandler()
 	if s.metadata.BridgeTransport == "unix" {
 		if err := s.serveUnix(filepath.Join(s.paths.Sockets, "application.sock"), appHandler); err != nil {
@@ -639,9 +669,13 @@ func (s *Server) controlHandler() http.Handler {
 }
 
 func (s *Server) statusHandler(writer http.ResponseWriter, _ *http.Request) {
+	evidenceErr := s.evidenceError()
 	s.metadataMu.RLock()
 	metadata := s.metadata
 	s.metadataMu.RUnlock()
+	if evidenceErr != nil {
+		metadata.TerminationReason = evidenceErr.Error()
+	}
 	writeJSON(writer, http.StatusOK, metadata)
 }
 
@@ -751,6 +785,21 @@ func (s *Server) bumpRevision() {
 }
 
 func (s *Server) turnHandler(writer http.ResponseWriter, request *http.Request) {
+	if err := s.evidenceError(); err != nil {
+		writeError(writer, 507, "evidence_storage_error", err.Error())
+		return
+	}
+	if a, ok := s.adapter.(*protocolApplicationAdapter); ok && a.stateEnabled() {
+		ctx, cancel := context.WithTimeout(request.Context(), s.turnTimeout())
+		defer cancel()
+		release, err := a.lockState(ctx)
+		if err != nil {
+			writeError(writer, http.StatusRequestTimeout, "application_busy", err.Error())
+			return
+		}
+		defer release()
+		request = request.WithContext(context.WithValue(ctx, stateInvocationKey{}, a))
+	}
 	s.activityMu.RLock()
 	defer s.activityMu.RUnlock()
 	s.metadataMu.RLock()
@@ -874,10 +923,11 @@ func (s *Server) turnHandler(writer http.ResponseWriter, request *http.Request) 
 	if body == nil {
 		body = input.Body
 	}
-	result, err := s.adapter.Invoke(turnContext, applicationInvocation{TurnID: id, Operation: input.Operation, Method: input.Method, Path: input.Path, Headers: input.Headers, Body: body, MediaType: input.MediaType, IdentityToken: identityToken})
+	result, err := s.adapter.Invoke(turnContext, applicationInvocation{TurnID: id, AttemptID: input.AttemptID, PayloadDigest: input.PayloadDigest, Operation: input.Operation, Method: input.Method, Path: input.Path, Headers: input.Headers, Body: body, MediaType: input.MediaType, IdentityToken: identityToken})
 	turn.Code, turn.Headers, turn.Body, turn.MediaType, turn.ExitCode = result.Code, result.Headers, result.Body, result.MediaType, result.ExitCode
 	turn.OutputContractStatus = s.outputContractStatus(operationID, result.MediaType, result.Body)
 	turn.Finished = time.Now().UTC()
+	turn.EvidencePartial = s.pendingEvidence(id)
 	if err != nil {
 		turn.Status, turn.Error = "error", err.Error()
 	} else {
@@ -886,6 +936,8 @@ func (s *Server) turnHandler(writer http.ResponseWriter, request *http.Request) 
 	if len(turn.Body) > 0 {
 		if object, storeErr := s.blobs.Put(request.Context(), bytes.NewReader(turn.Body)); storeErr == nil {
 			turn.OutputDigest = object.Digest
+		} else {
+			s.recorder.Fail(storeErr)
 		}
 	}
 	s.turnMu.Lock()
@@ -902,6 +954,12 @@ func (s *Server) turnHandler(writer http.ResponseWriter, request *http.Request) 
 	}
 	_, _ = s.recorder.Append(recording.Draft{Channel: recording.Attack, Layer: "application_bridge", Kind: "turn_completed", Provenance: recording.Application, TurnID: id, AttemptID: turn.AttemptID, PayloadDigest: turn.PayloadDigest, RawRef: turn.OutputDigest, Semantic: semantic})
 	_ = s.recorder.Flush()
+	if evidenceErr := s.evidenceError(); evidenceErr != nil {
+		turn.Status, turn.Error, turn.EvidencePartial = "error", evidenceErr.Error(), true
+	}
+	s.turnMu.Lock()
+	s.turns[id] = turn
+	s.turnMu.Unlock()
 	writeJSON(writer, http.StatusOK, turn)
 }
 
@@ -1017,6 +1075,19 @@ func (s *Server) fidelityMutation(ctx context.Context, definition injection.Defi
 		return nil, nil, nil
 	}
 	selector := definition.Selector
+	if db := s.databases[selector.Service]; db != nil {
+		if err := db.ValidateMutation(definition); err != nil {
+			return nil, nil, err
+		}
+		return nil, func() error {
+			s.databaseOracleMu.Lock()
+			defer s.databaseOracleMu.Unlock()
+			if err := db.Mutate(ctx, definition); err != nil {
+				return err
+			}
+			return s.captureDatabaseOraclesLocked(ctx, selector.Service, "harness")
+		}, nil
+	}
 	if selector.Service != "" {
 		handler := s.services[selector.Service]
 		if handler == nil {
@@ -1163,7 +1234,15 @@ func (s *Server) validateInjectionTarget(definition injection.Definition) error 
 	switch definition.Surface {
 	case "model_tool_result":
 		return nil
+	case "database_response":
+		if s.databases[definition.Selector.Service] == nil {
+			return errors.New("database response requires a PostgreSQL service")
+		}
+		return nil
 	case "service_response":
+		if s.databases[definition.Selector.Service] != nil {
+			return errors.New("PostgreSQL requires database_response surface")
+		}
 		for _, service := range s.blueprint.Services {
 			if service.ID == definition.Selector.Service {
 				return nil
@@ -1186,7 +1265,7 @@ func (s *Server) validateInjectionTarget(definition injection.Definition) error 
 		}
 		return errors.New("MCP result target is not a declared MCP service")
 	case "environment_state":
-		if definition.Selector.Service != "" && s.services[definition.Selector.Service] == nil {
+		if definition.Selector.Service != "" && s.services[definition.Selector.Service] == nil && s.databases[definition.Selector.Service] == nil {
 			return errors.New("environment state target is not a managed service")
 		}
 		if definition.Selector.FileNamespace != "" {
@@ -1233,6 +1312,13 @@ func (s *Server) resolveInjectionFile(selector injection.Selector) (string, stri
 			return "", "", nil, false
 		}
 		containerPath = pathpkg.Join(namespace.Root, selector.RelativePath)
+	}
+	if code := s.blueprint.Application.Interface.Code; code != nil && code.State != nil {
+		clean := pathpkg.Clean(containerPath)
+		state := code.State.Path
+		if clean == state || strings.HasPrefix(state, clean+"/") || strings.HasPrefix(clean, state+"/") {
+			return "", "", nil, false
+		}
 	}
 	hostPath, ok := resolveMutablePath(s.containerRoots(), containerPath)
 	return containerPath, hostPath, namespace, ok
@@ -1345,10 +1431,40 @@ func (s *Server) createSnapshotHandler(writer http.ResponseWriter, request *http
 }
 
 func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommittedBytes snapshot.ByteAllowance, checkpointMetadata snapshot.Metadata) (snapshot.Checkpoint, error) {
-	s.controlMu.Lock()
+	if err := s.evidenceError(); err != nil {
+		return snapshot.Checkpoint{}, err
+	}
+	stateAdapter, hasState := s.adapter.(*protocolApplicationAdapter)
+	hasState = hasState && stateAdapter.stateEnabled()
+	if hasState {
+		timeout := time.Duration(s.blueprint.Application.Persistence.Quiesce.TimeoutMS) * time.Millisecond
+		if timeout <= 0 {
+			timeout = 5 * time.Second
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	// Drain invocations before taking the service/activity lock: a running
+	// turn may still need to call a managed service or the model proxy.
+	if hasState {
+		release, err := stateAdapter.lockState(ctx)
+		if err != nil {
+			return snapshot.Checkpoint{}, err
+		}
+		defer release()
+	}
+	if err := lockContext(ctx, s.controlMu.TryLock); err != nil {
+		return snapshot.Checkpoint{}, err
+	}
 	defer s.controlMu.Unlock()
-	s.activityMu.Lock()
+	if err := lockContext(ctx, s.activityMu.TryLock); err != nil {
+		return snapshot.Checkpoint{}, err
+	}
 	defer s.activityMu.Unlock()
+	if err := s.evidenceError(); err != nil {
+		return snapshot.Checkpoint{}, err
+	}
 	if !s.blueprint.Application.Persistence.SnapshotCapable {
 		return snapshot.Checkpoint{}, errors.New("application is not snapshot capable")
 	}
@@ -1378,9 +1494,21 @@ func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommit
 	if err := s.quiesce(ctx); err != nil {
 		return snapshot.Checkpoint{}, err
 	}
+	if hasState {
+		if err := stateAdapter.saveState(ctx); err != nil {
+			return snapshot.Checkpoint{}, err
+		}
+	}
 	if err := s.recorder.Flush(); err != nil {
 		return snapshot.Checkpoint{}, err
 	}
+	dbContext, dbCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer dbCancel()
+	databaseBackups, releaseDatabases, err := s.freezeDatabases(dbContext)
+	if err != nil {
+		return snapshot.Checkpoint{}, err
+	}
+	defer releaseDatabases()
 	roots := s.containerRoots()
 	first, err := s.scanMutable(ctx, roots)
 	if err != nil {
@@ -1400,6 +1528,12 @@ func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommit
 		return snapshot.Checkpoint{}, err
 	}
 	canonicalSize := int64(0)
+	for _, op := range databaseBackups {
+		if op.Size > allowance-canonicalSize {
+			return snapshot.Checkpoint{}, snapshot.ErrBytesExhausted
+		}
+		canonicalSize += op.Size
+	}
 	for _, entry := range current.Entries {
 		if entry.Type == "file" {
 			if entry.Size < 0 || entry.Size > allowance-canonicalSize {
@@ -1416,6 +1550,7 @@ func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommit
 	if err != nil {
 		return snapshot.Checkpoint{}, err
 	}
+	operations = append(operations, databaseBackups...)
 	if len(operations) > 0 {
 		if _, err := s.journal.Append("snapshot_filesystem_delta", operations); err != nil {
 			return snapshot.Checkpoint{}, err
@@ -1644,11 +1779,17 @@ func (s *Server) Close(ctx context.Context) error {
 			_ = s.helperIn.Close()
 			s.helperIn = nil
 		}
+		if adapter, ok := s.adapter.(*protocolApplicationAdapter); ok {
+			result = errors.Join(result, adapter.Close(ctx))
+		}
 		if s.app != nil && s.app.Process != nil {
 			_ = syscall.Kill(-s.app.Process.Pid, syscall.SIGTERM)
 		}
 		if s.helper != nil && s.helper.Process != nil {
 			_ = syscall.Kill(-s.helper.Process.Pid, syscall.SIGTERM)
+		}
+		for _, proxy := range s.databaseProxies {
+			result = errors.Join(result, proxy.Close())
 		}
 		for _, path := range s.identityFiles {
 			_ = os.Remove(path)
@@ -1668,7 +1809,12 @@ func (s *Server) Close(ctx context.Context) error {
 		_ = session.Save(s.paths.Metadata, s.metadata)
 		s.metadataMu.Unlock()
 		_, _ = s.recorder.Append(recording.Draft{Channel: recording.Control, Layer: "sandboxd", Kind: "session_stopped", Provenance: recording.SandboxControl, Semantic: map[string]any{}})
-		result = errors.Join(result, s.recorder.Close(), s.journal.Close())
+		for _, db := range s.databases {
+			result = errors.Join(result, db.Close())
+		}
+		closeErr := errors.Join(s.recorder.Close(), s.journal.Close())
+		s.recorder.Fail(closeErr)
+		result = errors.Join(result, closeErr, s.evidenceError())
 	})
 	return result
 }
@@ -1818,6 +1964,9 @@ func (s *Server) replayManagedState() error {
 }
 
 func (s *Server) evaluate() (evaluation.Report, error) {
+	if err := s.evidenceError(); err != nil {
+		return evaluation.Report{}, err
+	}
 	events, err := recording.VerifyFile(s.paths.Events)
 	if err != nil {
 		return evaluation.Report{}, err

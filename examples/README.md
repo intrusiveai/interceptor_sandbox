@@ -1,5 +1,8 @@
 # Reference application and environment
 
+For Python and Node applications invoked through functions, see the
+[separately supplied invocation adapters](invocation-adapters/README.md).
+
 The reference pair exercises the HTTP adapter, model proxy, stateful and MCP
 services, attacker sink, both injection surfaces, and logical snapshot/restore
 flow.
