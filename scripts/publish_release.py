@@ -13,7 +13,7 @@ import tempfile
 import time
 import uuid
 
-from build_release import ARCHIVE_ROOT, archive_name, checksum_name, checksum_line
+from build_release import ARCHIVE_ROOT, archive_name, checksum_name, checksum_line, contract_version
 
 PLATFORMS = {"linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"}
 VERSION = r"(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})"
@@ -80,10 +80,13 @@ class GitHub:
                         "--repo", self.repository] + (["--clobber"] if replace else []), check=True)
 
     def download_catalog(self, tag):
+        return json.loads(self.download_asset(tag, CATALOG_ASSET))
+
+    def download_asset(self, tag, name):
         with tempfile.TemporaryDirectory(prefix="interceptor-catalog-") as directory:
             subprocess.run(["gh", "release", "download", tag, "--repo", self.repository,
-                            "--pattern", CATALOG_ASSET, "--dir", directory], check=True)
-            return json.loads((Path(directory) / CATALOG_ASSET).read_text())
+                            "--pattern", name, "--dir", directory], check=True)
+            return (Path(directory) / name).read_bytes()
 
     def release(self, tag):
         return self.api("releases/tags/" + tag, missing=True)
@@ -106,6 +109,7 @@ def read_archive(path):
         if sum(member.name == prefix + "release.json" for member in members) != 1:
             raise ValueError("release archive requires one release.json")
         metadata = json.load(archive.extractfile(prefix + "release.json"))
+        contract_version(metadata.get("interceptor_contract_version"))
         platform = metadata.get("platform")
         if platform not in PLATFORMS or path.name != archive_name(metadata.get("version"), platform):
             raise ValueError("release archive platform/filename differs")
@@ -138,25 +142,52 @@ def verify_archive_checksum(path, metadata):
         raise ValueError("release archive checksum file is missing or differs")
 
 
-def assemble(directory, output):
+def verify_contract_reports(archives, metadata, verification):
+    if verification is None:
+        raise ValueError("packaged contract verification reports are required")
+    reports = []
+    for path, item in zip(archives, metadata):
+        targets = [("interceptor", item["platform"], item["binary_sha256"])]
+        if "linux_companion" in item:
+            c = item["linux_companion"]
+            targets.append((c["filename"], c["platform"], c["sha256"]))
+        for name, platform, binary in targets:
+            report_path = verification / (item["platform"].replace("/", "_") + "-" + name + ".json")
+            report = json.loads(report_path.read_text())
+            expected = {"archive_sha256": checksum(path).removeprefix("sha256:"),
+                        "source_commit": item["source_commit"], "version": item["version"],
+                        "platform": item["platform"], "interceptor_contract_version": item["interceptor_contract_version"],
+                        "executable": name, "binary_sha256": binary, "execution_platform": platform,
+                        "checks": ["contract-json", "version-json", "plain-version", "no-runtime-state"]}
+            if report != expected:
+                raise ValueError("contract verification does not describe the actual archive: " + report_path.name)
+            reports.append(report)
+    if len(list(verification.glob("*.json"))) != len(reports):
+        raise ValueError("unexpected contract verification reports")
+    return reports
+
+
+def assemble(directory, output, verification=None):
     archives = sorted(directory.glob("*.tar.gz"))
     if len(archives) != len(PLATFORMS):
         raise ValueError("four distinct platform archives are required")
     metadata = [read_archive(path) for path in archives]
-    identity = {(item.get("version"), item.get("source_commit")) for item in metadata}
+    identity = {(item.get("version"), item.get("source_commit"), item["interceptor_contract_version"]) for item in metadata}
     platforms = {item.get("platform") for item in metadata}
     if len(identity) != 1 or platforms != PLATFORMS:
-        raise ValueError("release source, version or platform identities differ")
-    version, source = identity.pop()
+        raise ValueError("release source, version, contract or platform identities differ")
+    version, source, contract = identity.pop()
     if {path.name for path in directory.iterdir()} != expected_assets(version) - {"candidate.json"}:
         raise ValueError("four platform archives and matching checksum files are required")
     for path, item in zip(archives, metadata):
         verify_archive_checksum(path, item)
+    reports = verify_contract_reports(archives, metadata, verification)
     output.mkdir(mode=0o700)
     for path in sorted(directory.iterdir()):
         destination = output / path.name
         destination.write_bytes(path.read_bytes())
     inventory = {"version": version, "source_commit": source,
+                 "interceptor_contract_version": contract, "contract_verification": reports,
                  "archives": {path.name: checksum(path) for path in archives}}
     record = output / "candidate.json"
     record.write_text(json.dumps(inventory, sort_keys=True, indent=2) + "\n")
@@ -179,6 +210,22 @@ def verify_uploaded(github, release, digests):
             raise ValueError("uploaded release asset digest differs")
 
 
+def verified_candidate(github, tag, record):
+    """Bind body/catalog identity to the immutable candidate evidence asset."""
+    contract_version(record.get("interceptor_contract_version"))
+    raw = github.download_asset(tag, "candidate.json")
+    if "sha256:" + hashlib.sha256(raw).hexdigest() != record["assets"]["candidate.json"]:
+        raise ValueError("candidate evidence digest differs")
+    candidate = json.loads(raw)
+    for key in ("version", "source_commit", "interceptor_contract_version"):
+        if candidate.get(key) != record[key]:
+            raise ValueError("candidate evidence identity differs: " + key)
+    expected = {archive_name(record["version"], p): record["assets"][archive_name(record["version"], p)] for p in PLATFORMS}
+    if candidate.get("archives") != expected:
+        raise ValueError("candidate evidence archive identities differ")
+    return candidate
+
+
 def catalog_entry(github, tag, source):
     if github.repository != "intrusiveai/interceptor_sandbox":
         raise ValueError("catalog publication is restricted to Interceptor's repository")
@@ -194,6 +241,7 @@ def catalog_entry(github, tag, source):
     if set(record["assets"]) != expected_assets(version):
         raise ValueError("catalog requires all release assets")
     verify_uploaded(github, release, record["assets"])
+    verified_candidate(github, tag, record)
     if not release["prerelease"]:
         number = record.get("promotion_pr")
         if type(number) is not int or number < 1:
@@ -214,6 +262,7 @@ def catalog_entry(github, tag, source):
                           "url": asset["browser_download_url"],
                           "sha256": asset["digest"].removeprefix("sha256:")})
     return {"version": tag, "latest": True,
+            "interceptor_contract_version": record["interceptor_contract_version"],
             "tags": ["rc" if release["prerelease"] else "release"],
             "artifacts": artifacts}
 
@@ -264,6 +313,7 @@ def publish(github, branch, source, inventory, files):
     version = candidate_version(branch)
     if inventory["version"] != version or inventory["source_commit"] != source:
         raise ValueError("build does not match candidate event")
+    contract = contract_version(inventory.get("interceptor_contract_version"))
     if not re.fullmatch(r"[a-f0-9]{40}", source):
         raise ValueError("invalid source commit")
     if github.api("git/ref/heads/" + branch)["object"]["sha"] != source:
@@ -276,6 +326,7 @@ def publish(github, branch, source, inventory, files):
     if set(digests) != expected_assets(version):
         raise ValueError("candidate file set is incomplete")
     body = MARKER + "\n" + json.dumps({"version": version, "source_commit": source,
+                                         "interceptor_contract_version": contract,
                                          "assets": digests}, sort_keys=True)
     if release:
         github.api(f"releases/{release['id']}", "PATCH", {"draft": True})
@@ -297,6 +348,7 @@ def publish(github, branch, source, inventory, files):
         release = github.api("releases", "POST", release_metadata)
     github.upload(tag, files)
     verify_uploaded(github, release, digests)
+    verified_candidate(github, tag, json.loads(body.removeprefix(MARKER + "\n")))
     if github.api("git/ref/heads/" + branch)["object"]["sha"] != source:
         return "superseded"
     github.api(f"releases/{release['id']}", "PATCH",
@@ -328,6 +380,7 @@ def promote(github, number):
     if candidate_tree != merged_tree:
         raise ValueError("main merge changed the candidate tree; merge main into the candidate and rebuild before release")
     verify_uploaded(github, release, record["assets"])
+    verified_candidate(github, "v" + version, record)
     promoted_record = dict(record, promotion_pr=number)
     body = MARKER + "\n" + json.dumps(promoted_record, sort_keys=True)
     if not release["prerelease"]:
@@ -344,6 +397,7 @@ def main():
     parser.add_argument("operation", choices=("context", "publish", "promote",
                                               "catalog-sync", "catalog-context", "verify-archive"))
     parser.add_argument("--directory", type=Path)
+    parser.add_argument("--verification-directory", type=Path)
     parser.add_argument("--branch")
     parser.add_argument("--source")
     parser.add_argument("--pr", type=int)
@@ -385,10 +439,10 @@ def main():
             parser.error("--pr is required")
         result = promote(github, args.pr)
     else:
-        if not all((args.directory, args.branch, args.source)):
-            parser.error("publish requires directory, branch and source")
+        if not all((args.directory, args.branch, args.source, args.verification_directory)):
+            parser.error("publish requires directory, branch, source and verification-directory")
         with tempfile.TemporaryDirectory(prefix="interceptor-publish-") as temporary:
-            inventory, files = assemble(args.directory.resolve(), Path(temporary) / "assets")
+            inventory, files = assemble(args.directory.resolve(), Path(temporary) / "assets", args.verification_directory.resolve())
             result = publish(github, args.branch, args.source, inventory, files)
         if os.environ.get("GITHUB_OUTPUT"):
             with open(os.environ["GITHUB_OUTPUT"], "a") as output:

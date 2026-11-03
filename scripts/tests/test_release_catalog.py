@@ -72,6 +72,8 @@ class CatalogTest(unittest.TestCase):
         result = release.sync_catalog(self.github, "v1.2.3", FIRST)
         self.assertTrue(result.endswith("/123"))
         candidate = self.github.public_catalog
+        self.assertEqual(candidate["interceptor_contract_version"], "0.1.0")
+        self.assertNotIn("contract_package_version", candidate)
         self.assertEqual(candidate["tags"], ["rc"])
         self.assertEqual(
             {artifact["platform"] for artifact in candidate["artifacts"]},
@@ -94,6 +96,7 @@ class CatalogTest(unittest.TestCase):
         stable = self.github.public_catalog
         self.assertEqual(stable["tags"], ["release"])
         self.assertEqual(stable["artifacts"], candidate["artifacts"])
+        self.assertEqual(stable["interceptor_contract_version"], candidate["interceptor_contract_version"])
         actual_release_files = {
             name: data
             for name, data in self.github.uploaded.items()

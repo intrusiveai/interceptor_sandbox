@@ -42,6 +42,7 @@ is the one binary response. Send `Content-Type: application/json`.
 
 | Route | Request | Purpose |
 |---|---|---|
+| `/v1/contract-version` | Empty JSON object (`{}`) | Read the running Interceptor's contract version before campaign attachment. |
 | `/v1/attach` | Lifecycle version, `campaign_id`, `worker_instance_id`, optional `allow_target_stop` | Bind the first campaign and return current session, native binding and capabilities. |
 | `/v1/operations` | Existing v1alpha2 `{request, body}` envelope | Native experiments, snapshot creation, status, observations and admission closure. |
 | `/v1/lifecycle` | Lifecycle request described below | Restore or confirmed target stop. |
@@ -53,6 +54,34 @@ is the one binary response. Send `Content-Type: application/json`.
 No `/v1/cross-vm`, lease endpoint, separate gateway listener or standalone
 `interceptor restore` launcher is supported. Existing administrator CLI commands
 remain host administration tools; Operator uses this API.
+
+## Automatic contract compatibility
+
+Before attaching a campaign, an integration calls `POST /v1/contract-version`
+with `{}` on the same Interceptor API instance it will use for execution:
+
+```json
+{"status":200,"body":{"interceptor_contract_version":"0.1.0"},"session_revision":0}
+```
+
+This endpoint returns the service's embedded integration contract version. It
+requires no campaign ID, calls no target and changes no state. It uses the existing
+trusted-local-host boundary and remains available before attachment. Its request
+and response shape stay stable across contract updates.
+
+The consumer pins the one contract version its integration implements. Exact
+equality permits attachment and normal environment capability and policy checks.
+A mismatch stops the campaign and reports expected and actual versions. A missing
+endpoint, failed request, or missing, malformed or unreadable version also stops
+execution with a compatibility error. There is no CLI fallback, version range,
+negotiation or Internet lookup. Product release versions need not match.
+
+Users do not export or supply a contract to run campaigns. The optional
+`interceptor contract --json` command describes all implemented capabilities for
+developers and inspection; it is not a startup requirement. The environment
+capability manifest still determines what the particular sandbox offers.
+`interceptor run` retains its existing startup behavior; the compatibility check
+precedes campaign attachment and operations, not initial sandbox creation.
 
 ## Attach and native experiments
 

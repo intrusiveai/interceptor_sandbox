@@ -30,6 +30,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/hostlifetime"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/hostrun"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/integrationcontract"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/localapi"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/ociruntime"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/recording"
@@ -68,8 +69,19 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	}
 	switch arguments[0] {
 	case "version", "--version", "-version":
+		if len(arguments) == 2 && arguments[1] == "--json" {
+			return writeJSON(stdout, map[string]string{"version": version, "source_commit": buildinfo.SourceCommit, "interceptor_contract_version": integrationcontract.Version()})
+		}
+		if len(arguments) != 1 {
+			return errors.New("usage: interceptor version [--json]")
+		}
 		fmt.Fprintln(stdout, version)
 		return nil
+	case "contract":
+		if len(arguments) != 2 || arguments[1] != "--json" {
+			return errors.New("usage: interceptor contract --json")
+		}
+		return writeJSON(stdout, integrationcontract.JSON())
 	case "environment":
 		return environmentCommand(arguments[1:], stdout)
 	case "credentials":
@@ -1325,5 +1337,6 @@ Commands:
   evaluate <session-id>
   coverage <session-id>
   logs verify|tail|export <session-id>
-  version`)
+  version [--json]
+  contract --json`)
 }

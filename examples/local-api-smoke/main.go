@@ -186,10 +186,14 @@ func main() {
 	customerSupport := flag.Bool("customer-support", false, "qualify the customer-support application")
 	postgresql := flag.Bool("postgresql", false, "qualify managed PostgreSQL")
 	flag.Parse()
+	// No attach or target operation is sent until the API identity matches.
+	require(checkContract(client, "http://127.0.0.1:8080", "999.0.0") != nil, "contract mismatch was accepted")
+	must(checkContract(client, "http://127.0.0.1:8080", supportedContractVersion))
 	_, limitErr := evidencepolicy.ParseLimit(strconv.FormatInt(*maximumEvidence, 10))
 	must(limitErr)
 	require(*output != "", "--output is required")
 	must(os.MkdirAll(*output, 0700))
+	must(os.WriteFile(filepath.Join(*output, "contract-check.json"), []byte(`{"transport":"http","interceptor_contract_version":"`+supportedContractVersion+`","matched_before_attach":true,"mismatch_rejected":true}`+"\n"), 0600))
 	attach := localapi.AttachRequest{WorkerInstanceID: "smoke-worker", APIVersion: localapi.Version, CampaignID: campaign, AllowTargetStop: true}
 	var attached struct {
 		Binding          localapi.Binding `json:"binding"`

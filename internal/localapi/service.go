@@ -18,6 +18,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/digest"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/evidence"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/integrationcontract"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/session"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/snapshot"
 )
@@ -155,6 +156,22 @@ func read(w http.ResponseWriter, r *http.Request, target any, limit int64) bool 
 	return true
 }
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Compatibility discovery precedes even CheckHost: it must not reconcile
+	// runtime state, call a target, or attach a campaign.
+	if r.URL.Path == "/v1/contract-version" {
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST")
+			reject(w, 405, "method_not_allowed")
+			return
+		}
+		var input struct{}
+		if !read(w, r, &input, 4096) {
+			return
+		}
+		write(w, response(200, map[string]string{"interceptor_contract_version": integrationcontract.Version()}))
+		return
+	}
 	if runtime, ok := s.runtime.(interface{ CheckHost() error }); ok {
 		_ = runtime.CheckHost()
 	}
