@@ -39,6 +39,12 @@ func MergeCatalogEntry(productID string, current, entryJSON []byte) ([]byte, err
 	if err := decode(entryJSON, &entry); err != nil {
 		return nil, fmt.Errorf("decode catalog entry: %w", err)
 	}
+	if product.UsesHarnessContract() && entry.ContractPackageVersion == "" {
+		return nil, errors.New("catalog publication requires contract_package_version from the released artifact")
+	}
+	if product.UsesInterceptorContract() && entry.InterceptorContractVersion == "" {
+		return nil, errors.New("catalog publication requires interceptor_contract_version from the released artifact")
+	}
 	// latest is a property of the merged catalog, not a caller-selected position.
 	entry.Latest = true
 	if product.Kind == "oci_image" && entry.Digest == "" {
@@ -52,6 +58,23 @@ func MergeCatalogEntry(productID string, current, entryJSON []byte) ([]byte, err
 		index.Releases = append([]Entry{entry}, index.Releases...)
 	} else {
 		existing := index.Releases[position]
+		for _, contract := range []struct {
+			name          string
+			before, after ContractVersion
+		}{
+			{"contract_package_version", existing.ContractPackageVersion, entry.ContractPackageVersion},
+			{"interceptor_contract_version", existing.InterceptorContractVersion, entry.InterceptorContractVersion},
+		} {
+			if contract.before == contract.after {
+				continue
+			}
+			// Completing missing metadata is separate from promotion and preserves visibility.
+			metadataOnly := contract.before == "" && sameReleaseArtifacts(existing, entry) && slices.Equal(existing.Tags, entry.Tags)
+			rebuiltCandidate := !slices.Contains(existing.Tags, "release") && !slices.Contains(entry.Tags, "release") && !sameReleaseArtifacts(existing, entry)
+			if !metadataOnly && !rebuiltCandidate {
+				return nil, fmt.Errorf("%s must retain the artifact's identity through promotion and final publication", contract.name)
+			}
+		}
 		if slices.Contains(existing.Tags, "release") && (!slices.Contains(entry.Tags, "release") || !sameReleaseArtifacts(existing, entry)) {
 			return nil, errors.New("cannot demote or replace the artifacts of a published release")
 		}

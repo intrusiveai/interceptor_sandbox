@@ -22,6 +22,8 @@ class ReleaseArchivesTest(unittest.TestCase):
         (self.root / "LICENSE").write_text("license")
         (self.root / "internal/appimage").mkdir(parents=True)
         (self.root / "internal/appimage/postgresql-go.LICENSE").write_text("protocol client notices")
+        (self.root / "internal/integrationcontract").mkdir(parents=True)
+        (self.root / "internal/integrationcontract/contract.json").write_text(json.dumps({"interceptor_contract_version": "0.1.0"}))
         self.calls = []
 
     def run_build_command(self, args, root, env=None):
@@ -69,6 +71,7 @@ class ReleaseArchivesTest(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), (repeated / path.name).read_bytes())
                 self.assertEqual(sums.read_bytes(), (repeated / sums.name).read_bytes())
                 self.assertEqual(metadata["version"], "0.1.2")
+                self.assertEqual(metadata["interceptor_contract_version"], "0.1.0")
                 self.assertEqual(metadata["source_commit"], "a" * 40)
                 builds = [(args, env) for args, env in self.calls if args[:2] == ["go", "build"]]
                 self.assertEqual(len(builds), 4 if platform.startswith("darwin/") else 2)

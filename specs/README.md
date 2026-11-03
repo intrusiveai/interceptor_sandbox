@@ -53,6 +53,12 @@ attribution, terminal execution closure and campaign reporting. The
 `interceptor-improvements.md` describes the cross-project integration
 capabilities and AEF consumption rules without redefining these schemas.
 
+## Interceptor–Operator compatibility
+
+[`interceptor-operator-contract.md`](interceptor-operator-contract.md) defines
+the written capability contract, automatic API-based version compatibility check and
+release publishing requirements.
+
 ## Application state snapshots
 
 [`application-state-snapshots.md`](application-state-snapshots.md) defines optional

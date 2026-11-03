@@ -21,11 +21,20 @@ can supply the default provider URL for `run`; managed restore retains the origi
 
 ```sh
 interceptor version
+interceptor version --json
+interceptor contract --json
 interceptor help
 ```
 
 `--version` and `-version` are aliases for `version`; `-h` and `--help` are
 aliases for `help`.
+
+`version --json` reports `version`, `source_commit` and
+`interceptor_contract_version`. `contract --json` exports the complete embedded
+integration contract and its independent version. Both commands work offline
+without Docker, a target, or runtime state. They are inspection and release tools;
+campaign compatibility uses the [local API](local-api.md#automatic-contract-compatibility)
+automatically, with no manual command required from the user.
 
 ## Environment commands
 

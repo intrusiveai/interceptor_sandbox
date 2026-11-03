@@ -92,6 +92,65 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  packaged-contract:
+    needs: [context, candidates]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux_amd64
+            runner: ubuntu-24.04
+            artifact: 0
+            companion_artifact: 2
+          - platform: linux_arm64
+            runner: ubuntu-24.04-arm
+            artifact: 1
+            companion_artifact: 3
+          - platform: darwin_amd64
+            runner: macos-15-intel
+            artifact: 2
+          - platform: darwin_arm64
+            runner: macos-15
+            artifact: 3
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Verify the actual packaged CLI offline without Docker
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_VERSION: ${{ needs.context.outputs.version }}
+          TARGET_PLATFORM: ${{ matrix.platform }}
+          ARTIFACT: ${{ matrix.artifact }}
+          COMPANION_ARTIFACT: ${{ matrix.companion_artifact }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" --name "release-candidate-$ARTIFACT" --dir dist/archives
+          python3 scripts/verify_release_contract.py \
+            --archive "dist/archives/interceptor_sandbox-v${RELEASE_VERSION}-${TARGET_PLATFORM}.tar.gz" \
+            --version "$RELEASE_VERSION" --source "$GITHUB_SHA" \
+            --output "dist/contract/${TARGET_PLATFORM}-interceptor.json"
+          if [ -n "$COMPANION_ARTIFACT" ]; then
+            gh run download "$GITHUB_RUN_ID" --name "release-candidate-$COMPANION_ARTIFACT" --dir dist/archives
+            darwin_platform="darwin_${TARGET_PLATFORM#linux_}"
+            python3 scripts/verify_release_contract.py \
+              --archive "dist/archives/interceptor_sandbox-v${RELEASE_VERSION}-${darwin_platform}.tar.gz" \
+              --version "$RELEASE_VERSION" --source "$GITHUB_SHA" --companion \
+              --output "dist/contract/${darwin_platform}-interceptor-linux.json"
+          fi
+      - name: Retain contract verification evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: contract-verification-${{ matrix.platform }}
+          path: dist/contract/*.json
+          if-no-files-found: error
+          retention-days: 14
+
   packaged-runtime:
     needs: [context, candidates]
     # Exercise the uploaded archives on native Linux architectures. In particular,
@@ -234,7 +293,7 @@ jobs:
           retention-days: 14
 
   publish:
-    needs: [context, candidates, packaged-runtime]
+    needs: [context, candidates, packaged-contract, packaged-runtime]
     if: >-
       needs.context.outputs.mode == 'publish' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
@@ -260,6 +319,9 @@ jobs:
           for index in 0 1 2 3; do
             gh run download "$GITHUB_RUN_ID" --name "release-candidate-$index" --dir dist/candidates
           done
+          for platform in linux_amd64 linux_arm64 darwin_amd64 darwin_arm64; do
+            gh run download "$GITHUB_RUN_ID" --name "contract-verification-$platform" --dir dist/contract
+          done
       - name: Publish rolling prerelease
         id: publication
         env:
@@ -269,6 +331,7 @@ jobs:
         run: >-
           python3 scripts/publish_release.py publish
           --directory dist/candidates
+          --verification-directory dist/contract
           --branch "$CANDIDATE_BRANCH"
           --source "$CANDIDATE_SOURCE"
       - name: Publish candidate catalog and verify public delivery

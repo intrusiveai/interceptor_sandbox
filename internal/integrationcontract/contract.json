@@ -1,0 +1,478 @@
+{
+  "interceptor_contract_version": "0.1.0",
+  "description": "Interceptor integration capabilities. Availability in a particular sandbox is described by its environment capability manifest.",
+  "capabilities": [
+    {
+      "id": "contract.version",
+      "description": "Automatic integration compatibility check",
+      "operations": [
+        "POST /v1/contract-version"
+      ],
+      "inputs": [
+        "Empty JSON object"
+      ],
+      "outputs": [
+        "interceptor_contract_version"
+      ],
+      "prerequisites": [],
+      "guarantees": [
+        "Read-only before attachment; exact version equality gates campaign execution; no CLI or Internet lookup"
+      ],
+      "references": [
+        "docs/local-api.md"
+      ]
+    },
+    {
+      "id": "environment.build",
+      "description": "Validate and seal blueprints, build and verify isolated application wrappers",
+      "operations": [
+        "environment.validate",
+        "environment.seal",
+        "app.build",
+        "app.verify"
+      ],
+      "inputs": [
+        "Environment Blueprint and referenced assets",
+        "Target container image"
+      ],
+      "outputs": [
+        "Sealed environment, build lock and wrapper image"
+      ],
+      "prerequisites": [
+        "Docker for wrapper build"
+      ],
+      "guarantees": [
+        "Digests bind environment and application inputs; read-only root filesystem and declared writable paths"
+      ],
+      "references": [
+        "docs/environment-blueprint.md",
+        "docs/application-integration.md",
+        "docs/security.md"
+      ]
+    },
+    {
+      "id": "environment.capabilities",
+      "description": "Describe target-specific availability and delivery contracts",
+      "operations": [
+        "capabilities.read",
+        "interceptor capabilities"
+      ],
+      "inputs": [
+        "Verified environment and application identity"
+      ],
+      "outputs": [
+        "Native CapabilityManifest"
+      ],
+      "prerequisites": [
+        "Sealed environment"
+      ],
+      "guarantees": [
+        "Manifest integrity and declared capabilities remain separate from product compatibility and runtime policy"
+      ],
+      "references": [
+        "docs/operator-capabilities.md",
+        "docs/delivery-contracts.md",
+        "internal/adaptive/capability.go"
+      ]
+    },
+    {
+      "id": "campaign.lifecycle",
+      "description": "Bind a campaign, track operations, stop targets and close execution",
+      "operations": [
+        "POST /v1/attach",
+        "POST /v1/status",
+        "POST /v1/lifecycle",
+        "session.owner",
+        "session.status",
+        "operation.status"
+      ],
+      "inputs": [
+        "Lifecycle requests and native operation envelopes"
+      ],
+      "outputs": [
+        "Bindings, session lineage and operation outcomes"
+      ],
+      "prerequisites": [
+        "Existing local Interceptor instance",
+        "Successful compatibility check by consumer"
+      ],
+      "guarantees": [
+        "Trusted-local-host boundary; campaign and revision checks; explicit stop opt-in; terminal closure"
+      ],
+      "references": [
+        "docs/local-api.md",
+        "docs/host-lifetime.md",
+        "docs/cross-vm-gateway.md"
+      ]
+    },
+    {
+      "id": "application.invoke",
+      "description": "Invoke HTTP, command, REPL, Python, Node and custom application interfaces",
+      "operations": [
+        "application.invoke"
+      ],
+      "inputs": [
+        "Declared operation and input; attempt attribution"
+      ],
+      "outputs": [
+        "Turn status, output and observations"
+      ],
+      "prerequisites": [
+        "Configured application interface"
+      ],
+      "guarantees": [
+        "Supervisor-owned observed-turn attribution; supported adapters packaged during wrapper build"
+      ],
+      "references": [
+        "docs/application-interfaces.md",
+        "docs/application-integration.md",
+        "docs/feedback.md"
+      ]
+    },
+    {
+      "id": "model.generation",
+      "description": "Forward native model interactions through host provider adapters",
+      "operations": [
+        "interceptor run",
+        "application.invoke"
+      ],
+      "inputs": [
+        "Configured generation provider, credentials and application requests"
+      ],
+      "outputs": [
+        "Model replies and independently observed exchanges"
+      ],
+      "prerequisites": [
+        "Declared model endpoint and host provider configuration"
+      ],
+      "guarantees": [
+        "Only host adapters contact real providers; credentials remain host-only"
+      ],
+      "references": [
+        "docs/model-providers.md",
+        "docs/credential-stores.md"
+      ]
+    },
+    {
+      "id": "model.embeddings",
+      "description": "Forward remote OpenAI-compatible and Amazon Titan Text Embeddings V2 requests",
+      "operations": [
+        "application.invoke"
+      ],
+      "inputs": [
+        "Configured embeddings routes and model requests"
+      ],
+      "outputs": [
+        "Embeddings and recorded exchanges"
+      ],
+      "prerequisites": [
+        "Configured host embeddings provider"
+      ],
+      "guarantees": [
+        "Generation and embeddings routes are distinct; no runtime model download"
+      ],
+      "references": [
+        "docs/model-providers.md"
+      ]
+    },
+    {
+      "id": "services.http",
+      "description": "Serve declared HTTP/HTTPS fixtures with stateful synthetic service behavior",
+      "operations": [
+        "application.invoke",
+        "capabilities.read"
+      ],
+      "inputs": [
+        "Declared service requests and fixtures"
+      ],
+      "outputs": [
+        "Service responses, state transitions and observations"
+      ],
+      "prerequisites": [
+        "Configured service endpoints"
+      ],
+      "guarantees": [
+        "No general Internet access; service observations independent of application-authored records"
+      ],
+      "references": [
+        "docs/environment-blueprint.md",
+        "docs/adaptive-simulation.md"
+      ]
+    },
+    {
+      "id": "services.mcp",
+      "description": "Serve generic and dedicated MCP-over-HTTP services",
+      "operations": [
+        "application.invoke",
+        "capabilities.read"
+      ],
+      "inputs": [
+        "MCP requests, declared tools, resources and assets"
+      ],
+      "outputs": [
+        "MCP results and service observations"
+      ],
+      "prerequisites": [
+        "Configured MCP service"
+      ],
+      "guarantees": [
+        "Declared endpoints and delivery contracts bound to verified environment"
+      ],
+      "references": [
+        "docs/mcp-services.md",
+        "docs/delivery-contracts.md"
+      ]
+    },
+    {
+      "id": "services.postgresql",
+      "description": "Managed PostgreSQL with pgvector, schema and seed data, TLS and passthrough observation",
+      "operations": [
+        "application.invoke",
+        "capabilities.read"
+      ],
+      "inputs": [
+        "Declared database schema, seeds, tables and connection requests"
+      ],
+      "outputs": [
+        "Query results, errors and observed transaction outcomes"
+      ],
+      "prerequisites": [
+        "PostgreSQL configured in Blueprint and packaged wrapper"
+      ],
+      "guarantees": [
+        "Isolated database state; driver TLS validation; committed outcomes checked independently"
+      ],
+      "references": [
+        "docs/postgresql.md"
+      ]
+    },
+    {
+      "id": "network.dns-tls",
+      "description": "Closed DNS and sandbox HTTPS trust, including declared Python Certifi environments",
+      "operations": [
+        "app.build",
+        "application.invoke"
+      ],
+      "inputs": [
+        "Declared DNS names and TLS/Python environment configuration"
+      ],
+      "outputs": [
+        "Local name resolution and verified sandbox TLS"
+      ],
+      "prerequisites": [
+        "Configured DNS/TLS endpoints"
+      ],
+      "guarantees": [
+        "No upstream DNS forwarding or general egress; private CA keys remain protected; certificate verification stays enabled"
+      ],
+      "references": [
+        "docs/environment-blueprint.md",
+        "docs/application-integration.md",
+        "docs/security.md"
+      ]
+    },
+    {
+      "id": "identity.delegation",
+      "description": "Synthetic workload credentials, principals and delegated identity",
+      "operations": [
+        "interceptor identity",
+        "application.invoke"
+      ],
+      "inputs": [
+        "Declared identities, grants and delegation requests"
+      ],
+      "outputs": [
+        "Synthetic identity decisions and observations"
+      ],
+      "prerequisites": [
+        "Configured identity providers and grants"
+      ],
+      "guarantees": [
+        "No real identity-provider proxying; authorization remains enforced by sandbox policy"
+      ],
+      "references": [
+        "docs/identity.md",
+        "docs/cloud-authentication.md"
+      ]
+    },
+    {
+      "id": "artifacts.attempts",
+      "description": "Register payload artifacts and attributed campaign attempts",
+      "operations": [
+        "artifact.register",
+        "artifact.read",
+        "attempt.register"
+      ],
+      "inputs": [
+        "Artifact descriptors, content and attempt context"
+      ],
+      "outputs": [
+        "Digest-bound artifacts and attempt registrations"
+      ],
+      "prerequisites": [
+        "Attached campaign and valid operation envelope"
+      ],
+      "guarantees": [
+        "Campaign scoping, content integrity and configured limits"
+      ],
+      "references": [
+        "docs/cross-vm-gateway.md",
+        "docs/adaptive-simulation.md"
+      ]
+    },
+    {
+      "id": "injection.responses",
+      "description": "Inject into model tool results, HTTP/MCP service results and PostgreSQL responses",
+      "operations": [
+        "injection.arm",
+        "injection.delete"
+      ],
+      "inputs": [
+        "Declared surface, selector, payload and attempt context"
+      ],
+      "outputs": [
+        "Injection receipts and observed delivery"
+      ],
+      "prerequisites": [
+        "Available surface in environment manifest"
+      ],
+      "guarantees": [
+        "Response injection does not establish committed database changes; observed delivery is independently recorded"
+      ],
+      "references": [
+        "docs/injections-and-evaluation.md",
+        "docs/postgresql.md",
+        "docs/delivery-contracts.md"
+      ]
+    },
+    {
+      "id": "injection.state",
+      "description": "Persist injected payloads into declared environment resources, files and database records",
+      "operations": [
+        "injection.arm",
+        "injection.delete"
+      ],
+      "inputs": [
+        "Declared state target, payload and attempt context"
+      ],
+      "outputs": [
+        "State mutation evidence and receipts"
+      ],
+      "prerequisites": [
+        "State injection surface and allowlisted writable target"
+      ],
+      "guarantees": [
+        "Mutations follow declared constraints; committed database effects verified independently"
+      ],
+      "references": [
+        "docs/injections-and-evaluation.md",
+        "docs/postgresql.md",
+        "docs/file-management.md"
+      ]
+    },
+    {
+      "id": "feedback.observations",
+      "description": "Provide live, filtered turn feedback and content retrieval",
+      "operations": [
+        "observation.read",
+        "observation.content.read"
+      ],
+      "inputs": [
+        "Turn/attempt selection and feedback profile"
+      ],
+      "outputs": [
+        "Observation views, receipts and bounded content"
+      ],
+      "prerequisites": [
+        "Attached campaign and permitted feedback profile"
+      ],
+      "guarantees": [
+        "Profile filtering and scope checks; live database oracle verdicts; observed attribution never trusted from target headers"
+      ],
+      "references": [
+        "docs/feedback.md",
+        "docs/postgresql.md"
+      ]
+    },
+    {
+      "id": "evidence.oracles",
+      "description": "Collect independent evidence and deterministic outcome assessments",
+      "operations": [
+        "POST /v1/evidence",
+        "interceptor evaluate",
+        "interceptor coverage"
+      ],
+      "inputs": [
+        "Session/turn evidence and declared oracle configuration"
+      ],
+      "outputs": [
+        "Evidence bundle, oracle verdicts and coverage"
+      ],
+      "prerequisites": [
+        "Permitted session access and configured oracles"
+      ],
+      "guarantees": [
+        "Required evidence-storage failures prevent false success; database verdicts use committed state, not agent claims"
+      ],
+      "references": [
+        "docs/evidence-and-storage.md",
+        "docs/injections-and-evaluation.md",
+        "docs/postgresql.md"
+      ]
+    },
+    {
+      "id": "snapshot.restore",
+      "description": "Coordinate sandbox state and optional application state checkpoints",
+      "operations": [
+        "snapshot.create",
+        "POST /v1/snapshots/list",
+        "POST /v1/snapshots/inspect",
+        "POST /v1/lifecycle"
+      ],
+      "inputs": [
+        "Checkpoint and session identity"
+      ],
+      "outputs": [
+        "Verified checkpoint metadata and restored session lineage"
+      ],
+      "prerequisites": [
+        "Snapshot-capable environment; state adapter for internal application state"
+      ],
+      "guarantees": [
+        "No process-memory snapshot; coordinated database/service/application state; failed restore cannot claim success"
+      ],
+      "references": [
+        "docs/snapshots-and-restore.md",
+        "docs/application-integration.md",
+        "docs/postgresql.md"
+      ]
+    },
+    {
+      "id": "storage.management",
+      "description": "Manage declared writable paths, retained evidence and host cleanup",
+      "operations": [
+        "interceptor list",
+        "interceptor logs",
+        "interceptor purge",
+        "interceptor delete"
+      ],
+      "inputs": [
+        "Session identifiers and explicit cleanup scope"
+      ],
+      "outputs": [
+        "Retained records or cleanup outcomes"
+      ],
+      "prerequisites": [
+        "Host administrative access"
+      ],
+      "guarantees": [
+        "Target filesystem containment and evidence retention rules remain enforced"
+      ],
+      "references": [
+        "docs/file-management.md",
+        "docs/evidence-and-storage.md",
+        "docs/cli-reference.md"
+      ]
+    }
+  ]
+}

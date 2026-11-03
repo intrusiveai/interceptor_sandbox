@@ -34,6 +34,60 @@ than a version suffix. The tag remains on the candidate source commit. Merge,
 squash, and rebase merges are supported when their resulting tree is identical
 to that commit. Direct pushes to `main` verify code but never promote a release.
 
+## Interceptor integration contract
+
+The initial Interceptor-owned contract version is `0.1.0`, independent of the
+product release version. `internal/integrationcontract/contract.json` is the
+single source for the written capability contract, the local API's
+`POST /v1/contract-version`, and CLI reporting. Update the document and version
+together whenever supported integration capabilities, interfaces or guarantees
+change, including optional additions. Retain the version for changes that leave
+the agreement unchanged, such as documentation corrections. Update the independent
+pin in the repository-local consumer fixture deliberately when the contract changes.
+Operator's implementation and release workflow are maintained separately.
+
+The build embeds that contract and records `interceptor_contract_version` in
+`release.json`. CI runs `contract --json`, `version --json` and plain `version`
+from every actual archived Linux/macOS CLI on a compatible native runner. Linux
+runners also execute the macOS archives' Linux companions. These checks use an
+empty executable search path and no Docker or target. Each report records the
+archive checksum, executable checksum, source revision and observed version.
+Publication requires all six reports to agree with the archived metadata; the
+reports are retained in `candidate.json`. The existing packaged runtime tests
+also check the contract over HTTP before attaching and exercising a campaign.
+
+Catalog entries contain `interceptor_contract_version` and omit
+`contract_package_version`. Promotion preserves the qualified archive bytes and
+contract version; changing a candidate contract requires changed artifacts and
+qualification again. The publisher verifies the release record against the
+checksummed candidate evidence before catalog generation or promotion. Never
+infer a contract version from a product version or an unrelated installation.
+After authorized publication, inspect the public catalog; after promotion, reload
+the releases page and check **Interceptor / Operator contract: 0.1.0** (or the
+version actually released). No site deployment is needed.
+
+The local publisher is a complete reviewed export pinned by
+`tools/release-publisher/publisher-source.json`. Upgrade it using a new reviewed
+export from the releases maintainers, replace the entire source set (including
+removed files), retain provenance, and run `make test-release-publisher`. Never
+patch individual vendored files, fetch private publisher code at runtime, or move
+an immutable old tag to retrofit a publisher. New publishing tags must contain
+the updated publisher. Interceptor publication does not wait for another
+repository's validation jobs; shared synthetic publisher tests remain local.
+
+For a local native archive check, use:
+
+```sh
+python3 scripts/verify_release_contract.py --archive /path/to/archive.tar.gz \
+  --version <product-version> --source <source-commit> \
+  --output ../maintainers/interceptor_sandbox/contract-check.json
+```
+
+Use `--companion` only on the corresponding native Linux runner to verify a
+macOS archive's companion. Local results do not replace the CI matrix or QA
+against the published candidate. Campaign compatibility uses the HTTP API, not
+these CLI inspection commands.
+
 ## GitHub release contents
 
 The managed release contains these immutable release files (v0.1.2 shown):

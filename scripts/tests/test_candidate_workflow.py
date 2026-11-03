@@ -102,6 +102,9 @@ class GitHubFixture:
             return {"tree": {"sha": tree}}
         raise AssertionError((path, method, data))
 
+    def download_asset(self, tag, name):
+        return self.uploaded[name]
+
     def prepare_replacement(self):
         self.deletion_names = sorted(self.uploaded)
 
@@ -121,18 +124,24 @@ class CandidateWorkflowTest(unittest.TestCase):
             path = self.root / name
             path.write_bytes((name + ":" + source).encode())
             files.append(path)
+        inventory = {"version": context["version"], "source_commit": source,
+                     "interceptor_contract_version": "0.1.0",
+                     "archives": {p.name: release.checksum(p) for p in files if p.name.endswith(".tar.gz")}}
+        (self.root / "candidate.json").write_text(json.dumps(inventory))
         self.github.prepare_replacement()
         return release.publish(
             self.github,
             context["branch"],
             context["source"],
-            {"version": context["version"], "source_commit": source},
+            inventory,
             files,
         )
 
     def test_assemble_validates_and_records_all_platform_archives(self):
         candidates = self.root / "candidates"
         candidates.mkdir()
+        verification = self.root / "verification"
+        verification.mkdir()
         executable = b"interceptor executable"
         for platform in sorted(builder.PLATFORMS):
             metadata = {
@@ -141,6 +150,7 @@ class CandidateWorkflowTest(unittest.TestCase):
                 "platform": platform,
                 "binary_sha256": hashlib.sha256(executable).hexdigest(),
                 "toolchain": builder.TOOLCHAIN,
+                "interceptor_contract_version": "0.1.0",
                 "cgo_enabled": False,
             }
             files = [("interceptor", executable, 0o755)]
@@ -157,7 +167,42 @@ class CandidateWorkflowTest(unittest.TestCase):
             builder.archive(path,
                             [("interceptor_sandbox/" + name, data, mode) for name, data, mode in files])
             (candidates / builder.checksum_name("1.2.3", platform)).write_text(builder.checksum_line(path))
-        inventory, files = release.assemble(candidates, self.root / "assembled")
+            for name, execution in [("interceptor", platform)] + ([("interceptor-linux", platform.replace("darwin/", "linux/"))] if platform.startswith("darwin/") else []):
+                report = {"archive_sha256": release.checksum(path)[7:], "source_commit": FIRST,
+                          "version": "1.2.3", "platform": platform, "interceptor_contract_version": "0.1.0",
+                          "executable": name, "binary_sha256": hashlib.sha256(executable).hexdigest(),
+                          "execution_platform": execution,
+                          "checks": ["contract-json", "version-json", "plain-version", "no-runtime-state"]}
+                (verification / (platform.replace("/", "_") + "-" + name + ".json")).write_text(json.dumps(report))
+        inventory, files = release.assemble(candidates, self.root / "assembled", verification)
+        self.assertEqual(inventory["interceptor_contract_version"], "0.1.0")
+        self.assertEqual(len(inventory["contract_verification"]), 6)
+        with self.assertRaisesRegex(ValueError, "reports are required"):
+            release.assemble(candidates, self.root / "missing-evidence")
+        report_path = verification / "darwin_arm64-interceptor.json"
+        original_report = report_path.read_text()
+        for field in ("source_commit", "archive_sha256", "binary_sha256", "interceptor_contract_version", "execution_platform"):
+            report = json.loads(original_report)
+            report[field] = "incorrect"
+            report_path.write_text(json.dumps(report))
+            with self.assertRaisesRegex(ValueError, "actual archive"):
+                release.assemble(candidates, self.root / "bad-evidence", verification)
+        report_path.write_text(original_report)
+        disagreeing = candidates / builder.archive_name("1.2.3", "darwin/arm64")
+        original_archive = disagreeing.read_bytes()
+        with release.tarfile.open(disagreeing) as bundle:
+            changed = []
+            for member in bundle.getmembers():
+                data = bundle.extractfile(member).read()
+                if member.name.endswith("/release.json"):
+                    item = json.loads(data)
+                    item["interceptor_contract_version"] = "0.2.0"
+                    data = json.dumps(item).encode()
+                changed.append((member.name, data, member.mode))
+        builder.archive(disagreeing, changed)
+        with self.assertRaisesRegex(ValueError, "contract.*identities differ"):
+            release.assemble(candidates, self.root / "disagreement", verification)
+        disagreeing.write_bytes(original_archive)
         self.assertEqual(inventory["version"], "1.2.3")
         self.assertEqual(inventory["source_commit"], FIRST)
         self.assertEqual({path.name for path in files}, release.expected_assets("1.2.3"))
@@ -174,10 +219,10 @@ class CandidateWorkflowTest(unittest.TestCase):
         original = broken.read_text()
         broken.write_text("0" * 64 + "  wrong.tar.gz\n")
         with self.assertRaisesRegex(ValueError, "checksum"):
-            release.assemble(candidates, self.root / "rejected")
+            release.assemble(candidates, self.root / "rejected", verification)
         broken.unlink()
         with self.assertRaisesRegex(ValueError, "matching checksum"):
-            release.assemble(candidates, self.root / "rejected")
+            release.assemble(candidates, self.root / "rejected", verification)
         broken.write_text(original)
         before = {path.name: path.read_bytes() for path in files}
         self.assertEqual(release.publish(self.github, BRANCH, FIRST, inventory, files), "prerelease-published")
@@ -212,6 +257,16 @@ class CandidateWorkflowTest(unittest.TestCase):
         self.assertEqual(release.promote(self.github, 42), "already-stable")
         with self.assertRaisesRegex(ValueError, "stable"):
             self.publish(SECOND)
+
+    def test_promotion_rejects_changed_contract_metadata(self):
+        self.publish()
+        self.github.pr = pull(FIRST)
+        record = json.loads(self.github.current["body"].removeprefix(release.MARKER + "\n"))
+        record["interceptor_contract_version"] = "0.2.0"
+        self.github.current["body"] = release.MARKER + "\n" + json.dumps(record)
+        with self.assertRaisesRegex(ValueError, "candidate evidence identity"):
+            release.promote(self.github, 42)
+        self.assertTrue(self.github.current["prerelease"])
 
     def test_old_push_never_replaces_newer_branch_head(self):
         self.github.head = SECOND

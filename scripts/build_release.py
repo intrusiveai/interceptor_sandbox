@@ -19,6 +19,13 @@ PLATFORMS = ("linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64")
 VERSION = r"(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})"
 
 
+def contract_version(value):
+    if (not isinstance(value, str) or len(value) > 128
+            or not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", value)):
+        raise ValueError("interceptor_contract_version must be exact major.minor.patch (at most 128 characters)")
+    return value
+
+
 def archive_name(version, platform):
     if not isinstance(version, str) or not re.fullmatch(VERSION, version):
         raise ValueError("release version must be numeric major.minor.patch")
@@ -66,6 +73,8 @@ def build(root, output, version, platform):
         raise ValueError("release source must be a clean committed checkout")
 
     commit = run(["git", "rev-parse", "HEAD"], root)
+    contract = json.loads((root / "internal/integrationcontract/contract.json").read_text())
+    contract_identity = contract_version(contract.get("interceptor_contract_version"))
     goos, goarch = platform.split("/")
     env = dict(os.environ, GOTOOLCHAIN="local", GOWORK="off", GOFLAGS="", CGO_ENABLED="0",
                GOOS=goos, GOARCH=goarch, GOAMD64="v1", GOARM64="v8.0")
@@ -89,6 +98,7 @@ def build(root, output, version, platform):
             "binary_sha256": hashlib.sha256(executable).hexdigest(),
             "toolchain": TOOLCHAIN,
             "cgo_enabled": False,
+            "interceptor_contract_version": contract_identity,
         }
         files = [("interceptor", executable, 0o755)]
         if goos == "darwin":
