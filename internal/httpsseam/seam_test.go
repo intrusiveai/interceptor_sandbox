@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -75,6 +76,9 @@ func TestForwardingBothTransports(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "spool")
 			if mode == "unix" {
 				path = filepath.Join(t.TempDir(), "s.sock")
+				if runtime.GOOS == "linux" {
+					path = filepath.Join(t.TempDir(), strings.Repeat("session-", 20), "https-seam.sock")
+				}
 				server, listener, err := bridge.ListenUnix(path, host)
 				if err != nil {
 					t.Fatal(err)

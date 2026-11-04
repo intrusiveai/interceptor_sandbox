@@ -1071,7 +1071,7 @@ func unixProxyServer(listener net.Listener, socket string, allowed func(*http.Re
 	target, _ := url.Parse("http://unix")
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Transport = &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		return bridge.DialUnix(ctx, socket)
 	}}
 	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if allowed != nil && !allowed(request) {
@@ -1088,7 +1088,7 @@ func callUnix(ctx context.Context, socket, method, path string, body []byte, max
 		return nil, errors.New("Unix control response limit must be positive")
 	}
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		return bridge.DialUnix(ctx, socket)
 	}}
 	client := &http.Client{Transport: transport}
 	request, err := http.NewRequestWithContext(ctx, method, "http://unix"+path, bytes.NewReader(body))

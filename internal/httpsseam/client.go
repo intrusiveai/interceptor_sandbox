@@ -41,7 +41,7 @@ func NewClient(session, transport, path string, maximum int64, timeout time.Dura
 		}
 	} else if transport == "unix" {
 		c.unix = &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, "unix", path)
+			return bridge.DialUnix(ctx, path)
 		}, DisableKeepAlives: true}, Timeout: timeout}
 	} else {
 		return nil, errors.New("unknown HTTPS seam transport")
