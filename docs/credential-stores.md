@@ -5,7 +5,7 @@ plaintext secrets in an Environment Blueprint, CLI argument, container, or
 application environment variable.
 
 Supported built-in backends are AWS Secrets Manager, Azure Key Vault, Google
-Cloud Secret Manager, and HashiCorp Vault KV v2. AWS, Azure, and Google use
+Cloud Secret Manager, HashiCorp Vault KV v2, and [1Password](ONEPASSWORD.md). AWS, Azure, and Google use
 their official Go clients and ambient instance/workload identity. Vault uses
 the official client with a protected Vault Agent/Proxy token sink. The resolver
 has read-only behavior and cannot list, create, change, rotate, or delete
@@ -59,7 +59,7 @@ no integration token. This credential resolver applies to model providers and de
 [HTTPS seams](https-egress.md). Seams resolve Basic/header credentials on the host;
 SDK placeholders in the container remain synthetic.
 
-Backend locator fields are strict:Backend locator fields are strict:
+Backend locator fields are strict:
 
 | Backend | Locator fields | Bootstrap |
 | --- | --- | --- |
@@ -67,6 +67,7 @@ Backend locator fields are strict:Backend locator fields are strict:
 | `azure-key-vault` | `vault_url`, `secret_name`, optional `version` | workload identity, then managed identity; no interactive credential |
 | `gcp-secret-manager` | `project`, `secret_name`, `version` | application-default workload identity; CRC32C is verified |
 | `hashicorp-vault` | `mount`, `path`, optional numeric `version` | fixed HTTPS origin and protected Agent/Proxy token file from the profile |
+| `onepassword` | `secret_reference`: `op://vault/item/[section/]field` | Explicit `onepassword-desktop` with `onepassword_account`, or `onepassword-service-account` with host `OP_SERVICE_ACCOUNT_TOKEN`; see [setup](ONEPASSWORD.md). |
 
 Profiles constrain exact regions/origins and locator prefixes, request timeout,
 value size, and cache TTL. Values may be a bounded UTF-8 string or one named

@@ -66,7 +66,7 @@ func Validate(config Config) error {
 			return fmt.Errorf("secret-store profile %q has invalid identity or schema", profile.ID)
 		}
 		switch profile.BackendKind {
-		case "aws-secrets-manager", "azure-key-vault", "gcp-secret-manager", "hashicorp-vault":
+		case "aws-secrets-manager", "azure-key-vault", "gcp-secret-manager", "hashicorp-vault", "onepassword":
 		default:
 			return fmt.Errorf("profile %q has unsupported backend %q", profile.ID, profile.BackendKind)
 		}
@@ -87,6 +87,9 @@ func Validate(config Config) error {
 		}
 		if profile.TimeoutSeconds < 1 || profile.TimeoutSeconds > 60 || profile.MaxValueBytes < 1 || profile.MaxValueBytes > 1<<20 || profile.MaxCacheTTLSeconds < 0 || profile.MaxCacheTTLSeconds > 3600 {
 			return fmt.Errorf("profile %q has an out-of-bounds timeout, value, or cache limit", profile.ID)
+		}
+		if err := validateOnePasswordProfile(profile); err != nil {
+			return fmt.Errorf("profile %q: %w", profile.ID, err)
 		}
 		if profile.AWSProfile != "" && (profile.BackendKind != "aws-secrets-manager" || !ValidAWSProfile(profile.AWSProfile)) {
 			return errors.New("invalid AWS named profile selection")
@@ -274,6 +277,12 @@ func selectValue(raw []byte, selection ValueSelection, maximum int64) (string, e
 }
 
 func canonicalLocator(locator Locator) (string, error) {
+	if locator.BackendKind == "onepassword" {
+		return onePasswordLocator(locator)
+	}
+	if locator.SecretReference != "" {
+		return "", errors.New("secret_reference requires the onepassword backend")
+	}
 	switch locator.BackendKind {
 	case "aws-secrets-manager":
 		if locator.Region == "" || locator.SecretID == "" || (locator.VersionID != "" && locator.VersionStage != "") || locator.VaultURL != "" || locator.SecretName != "" || locator.Version != "" || locator.Project != "" || locator.Mount != "" || locator.Path != "" {
@@ -306,6 +315,16 @@ func (e redactedError) Error() string { return e.message }
 func redact(err error) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	var onePassword onePasswordError
+	if errors.As(err, &onePassword) {
+		return safeOnePasswordCode(string(onePassword))
 	}
 	return redactedError{message: "secret-store request failed"}
 }
