@@ -106,3 +106,28 @@ print('Verified TLS with strict certificate and hostname checks on Python', sys.
 	}
 	t.Log(string(output))
 }
+
+func TestSeamTLSIdentityAndPrivateMountRequirement(t *testing.T) {
+	b := &environment.Blueprint{Network: environment.NetworkSimulation{HTTPSSeams: []environment.HTTPSSeam{{ID: "trace", Hostname: "tracing.sandbox.test"}}}}
+	if !NeedsPrivateMounts(b) {
+		t.Fatal("seam wrapper lacks private mounts")
+	}
+	if databaseVersions(b) != "" {
+		t.Fatal("seam introduced a database dependency")
+	}
+	material, err := generateTLSMaterial(time.Now(), simulatedHostnames(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(material.certificate)
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cert.VerifyHostname("tracing.sandbox.test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cert.VerifyHostname("undeclared.example"); err == nil {
+		t.Fatal("certificate covers undeclared destination")
+	}
+}

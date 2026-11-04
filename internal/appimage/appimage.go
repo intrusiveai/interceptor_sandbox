@@ -22,6 +22,7 @@ import (
 )
 
 type Lock struct {
+	PrivateMountUID      int       `json:"private_mount_uid,omitempty"`
 	PostgreSQLUID        int       `json:"postgresql_uid,omitempty"`
 	PostgreSQL           string    `json:"postgresql,omitempty"`
 	SchemaVersion        int       `json:"schema_version"`
@@ -89,7 +90,7 @@ func Build(ctx context.Context, directory, dataRoot, tag, version string, docker
 	}
 	dockerfile := databaseStage + fmt.Sprintf("FROM %s\nCOPY --chmod=0555 interceptor /usr/local/bin/interceptor\n", sourceReference) + databaseCopy
 	dockerfile += "COPY --chmod=0444 postgresql-client.LICENSE /usr/local/share/interceptor/licenses/PostgreSQL-client.txt\n"
-	if databaseCopy != "" {
+	if NeedsPrivateMounts(report.Blueprint) {
 		originalUser, err := docker.ImageUser(ctx, sourceReference)
 		if err != nil {
 			return Lock{}, err
@@ -97,7 +98,11 @@ func Build(ctx context.Context, directory, dataRoot, tag, version string, docker
 		if originalUser == "" {
 			originalUser = "0"
 		}
-		command, _ := json.Marshal([]string{"/usr/local/bin/interceptor", "image-postgresql-user", fmt.Sprint(os.Getuid())})
+		helper := "image-private-mounts"
+		if databaseCopy != "" {
+			helper = "image-postgresql-user"
+		}
+		command, _ := json.Marshal([]string{"/usr/local/bin/interceptor", helper, fmt.Sprint(os.Getuid())})
 		dockerfile += "USER 0:0\nRUN --network=none " + string(command) + "\nUSER " + originalUser + "\n"
 	}
 
@@ -196,6 +201,9 @@ func Build(ctx context.Context, directory, dataRoot, tag, version string, docker
 		InterceptorBinary: digest.Bytes(binary), BlueprintSchema: report.Blueprint.APIVersion,
 		JournalSchemaVersion: 1, TLS: tlsLock, PostgreSQL: databaseVersions(report.Blueprint), ConstructedAt: time.Now().UTC(),
 	}
+	if NeedsPrivateMounts(report.Blueprint) {
+		lock.PrivateMountUID = os.Getuid()
+	}
 	if databaseCopy != "" {
 		lock.PostgreSQLUID = os.Getuid()
 	}
@@ -234,6 +242,9 @@ func Load(path string) (Lock, error) {
 }
 
 func Verify(ctx context.Context, lock Lock, environmentLock *environment.Lock, docker ociruntime.Docker) error {
+	if lock.PrivateMountUID != 0 && lock.PrivateMountUID != os.Getuid() {
+		return errors.New("wrapper belongs to a different supervisor UID; rebuild with interceptor app build on this host")
+	}
 	if lock.PostgreSQL != "" && lock.PostgreSQLUID != os.Getuid() {
 		return errors.New("PostgreSQL wrapper belongs to a different supervisor UID; rebuild with interceptor app build on this host")
 	}

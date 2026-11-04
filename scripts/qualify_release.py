@@ -260,7 +260,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                         if run(docker, 'inspect', '--format', '{{.HostConfig.NetworkMode}}', active[0]) != 'none':
                             raise ValueError('HTTPS seam enabled general container networking')
                         run(docker, 'exec', '--user', '20000:20000', active[0], '/bin/sh', '-c',
-                            'test ! -r /run/interceptor-session/sockets/https-seam-policy.json && test ! -x /run/interceptor-session/logs && test ! -r /run/interceptor-tls/server-key.pem')
+                            'for path in /run/interceptor-session/sockets/https-seam-policy.json /run/interceptor-session/logs/https-seam-connections.jsonl /run/interceptor-tls/server-key.pem; do if head -c 1 "$path" >/dev/null 2>&1; then echo "application can read private path: $path"; exit 1; fi; done; test ! -x /run/interceptor-private')
                     if postgresql:
                         run(docker, 'exec', '--user', str(os.getuid()), active[0], '/bin/sh', '-c',
                             'test -s /opt/interceptor/environment/environment.yaml && test -s /run/interceptor-tls/server-key.pem && test -d /run/interceptor-session/pg/database/data')

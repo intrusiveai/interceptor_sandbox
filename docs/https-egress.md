@@ -43,6 +43,10 @@ CA environment configuration. Custom CA bundles and certificate pinning must be
 configured to trust the sandbox certificate. The declared name can be the real
 service hostname when preserving an existing URL is useful.
 
+Seam wrappers protect supervisor mounts behind a private Linux directory, including
+on Docker Desktop. They are bound to the host user ID; rebuild on another host
+user account. This does not add a database engine to the image.
+
 Names and IDs must be unique and cannot overlap simulated services or identity
 endpoints. DNS and TLS are required. Build and verify the wrapper with the normal
 `environment seal`, `app build`, and `app verify` commands after changing names.

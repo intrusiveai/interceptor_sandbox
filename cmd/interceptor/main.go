@@ -95,6 +95,11 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return sandboxdCommand(arguments[1:])
 	case "app-helper":
 		return sandboxd.RunHelper()
+	case "image-private-mounts":
+		if len(arguments) != 2 {
+			return errors.New("image-private-mounts requires UID")
+		}
+		return appimage.EnsurePrivateMounts(arguments[1])
 	case "image-postgresql-user":
 		if len(arguments) != 2 {
 			return errors.New("image-postgresql-user requires UID")

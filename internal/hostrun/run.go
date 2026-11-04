@@ -104,6 +104,9 @@ func Run(ctx context.Context, config Config) (session.Metadata, error) {
 	if err := appimage.Verify(ctx, applicationLock, lock, config.Docker); err != nil {
 		return session.Metadata{}, err
 	}
+	if len(report.Blueprint.Network.HTTPSSeams) > 0 && applicationLock.PrivateMountUID != os.Getuid() {
+		return session.Metadata{}, errors.New("HTTPS seam wrapper needs private supervisor mounts; rebuild with interceptor app build on this host")
+	}
 	if err := appimage.VerifyTLSMaterial(dataRoot, report.Blueprint, applicationLock); err != nil {
 		return session.Metadata{}, err
 	}
@@ -207,6 +210,9 @@ func Restore(ctx context.Context, config Config, sourceSessionID, checkpointID s
 	}
 	if err := appimage.Verify(ctx, applicationLock, environmentLock, config.Docker); err != nil {
 		return session.Metadata{}, err
+	}
+	if len(report.Blueprint.Network.HTTPSSeams) > 0 && applicationLock.PrivateMountUID != os.Getuid() {
+		return session.Metadata{}, errors.New("HTTPS seam wrapper needs private supervisor mounts; rebuild with interceptor app build on this host")
 	}
 	if err := appimage.VerifyTLSMaterial(dataRoot, report.Blueprint, applicationLock); err != nil {
 		return session.Metadata{}, err

@@ -218,13 +218,9 @@ func New() (*Server, error) {
 	}
 	journal.SetFailureHandler(recorder.Fail)
 	blobRoot := containerBlobs
-	for _, service := range report.Blueprint.Services {
-		if service.Kind == "postgresql" {
-			// Database wrappers put mounts beneath a native, private ancestor.
-			// Open its real directory; blobstore intentionally rejects aliases.
-			blobRoot = "/run/interceptor-private/interceptor-blobs"
-			break
-		}
+	if appimage.NeedsPrivateMounts(report.Blueprint) {
+		// Open the real native-protected mount; blobstore rejects aliases.
+		blobRoot = "/run/interceptor-private/interceptor-blobs"
 	}
 	blobs, err := blobstore.Open(blobRoot, report.Blueprint.Limits.MaxBlobBytes)
 	if err != nil {
@@ -1541,14 +1537,15 @@ func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommit
 	if err := s.quiesce(ctx); err != nil {
 		return snapshot.Checkpoint{}, err
 	}
-	if hasState {
-		if err := stateAdapter.saveState(ctx); err != nil {
-			return snapshot.Checkpoint{}, err
-		}
-	}
+	// Drain external calls before capturing application-owned state as well.
 	if s.httpsSeams != nil {
 		defer s.httpsSeams.Resume()
 		if err := s.httpsSeams.Pause(ctx); err != nil {
+			return snapshot.Checkpoint{}, err
+		}
+	}
+	if hasState {
+		if err := stateAdapter.saveState(ctx); err != nil {
 			return snapshot.Checkpoint{}, err
 		}
 	}
