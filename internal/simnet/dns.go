@@ -20,6 +20,7 @@ type DNSServer struct {
 	udp           net.PacketConn
 	tcp           net.Listener
 	records       map[string]struct{}
+	unobserved    map[string]bool
 	policy        string
 	limit         int64
 	recorder      *recording.Writer
@@ -30,7 +31,7 @@ type DNSServer struct {
 	wg            sync.WaitGroup
 }
 
-func StartDNS(address string, hostnames []string, unknownPolicy string, maximumQueries int64, recorder *recording.Writer) (*DNSServer, error) {
+func StartDNS(address string, hostnames []string, unknownPolicy string, maximumQueries int64, recorder *recording.Writer, unobserved ...string) (*DNSServer, error) {
 	records := make(map[string]struct{}, len(hostnames))
 	for _, hostname := range hostnames {
 		records[normalizeHostname(hostname)] = struct{}{}
@@ -45,6 +46,10 @@ func StartDNS(address string, hostnames []string, unknownPolicy string, maximumQ
 		return nil, err
 	}
 	server := &DNSServer{udp: udp, tcp: tcp, records: records, policy: unknownPolicy, limit: maximumQueries, recorder: recorder, closed: make(chan struct{})}
+	server.unobserved = map[string]bool{}
+	for _, name := range unobserved {
+		server.unobserved[normalizeHostname(name)] = true
+	}
 	server.wg.Add(2)
 	go server.serveUDP()
 	go server.serveTCP()
@@ -155,7 +160,7 @@ func (s *DNSServer) answer(query []byte) ([]byte, error) {
 		response = append(response, 0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01)
 		response = append(response, 0, 0, 0, 0, 0, 4, 127, 0, 0, 1)
 	}
-	if !limitExceeded || s.limitRecorded.CompareAndSwap(false, true) {
+	if !s.unobserved[name] && (!limitExceeded || s.limitRecorded.CompareAndSwap(false, true)) {
 		s.record(name, qtype, outcome, declared)
 	}
 	return response, nil

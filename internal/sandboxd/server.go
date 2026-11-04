@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -32,6 +33,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/environment"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/evaluation"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/httpsseam"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/identity"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/injection"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/postgresql"
@@ -50,6 +52,9 @@ const (
 )
 
 type Server struct {
+	seamLog            *os.File
+	httpsSeams         *httpsseam.Client
+	applicationExited  chan struct{}
 	databases          map[string]*postgresql.Engine
 	databaseProxies    map[string]*postgresql.Proxy
 	databaseOracleMu   sync.Mutex
@@ -278,8 +283,8 @@ func New() (*Server, error) {
 	return &Server{
 		execution: execution, blueprint: report.Blueprint, metadata: metadata, paths: paths, recorder: recorder, journal: journal, blobs: blobs, artifacts: artifacts, attempts: attempts,
 		injections: injection.NewManager(journal, recorder), identities: map[string]*identity.Authority{}, identityEnv: map[string]string{},
-		identityStop: make(chan struct{}),
-		services:     map[string]services.ManagedHandler{}, sinks: map[string]*services.SinkHandler{}, hostRoutes: map[string]http.Handler{},
+		identityStop: make(chan struct{}), applicationExited: make(chan struct{}),
+		services: map[string]services.ManagedHandler{}, sinks: map[string]*services.SinkHandler{}, hostRoutes: map[string]http.Handler{},
 		appUID: appUID, appGID: appGID, hostUID: envInt("INTERCEPTOR_HOST_UID", 0), hostGID: envInt("INTERCEPTOR_HOST_GID", 0),
 		turns: map[string]Turn{}, oracleState: map[string]evaluation.OracleResult{}, virtualTime: report.Blueprint.Time.Base.UTC(), done: make(chan error, 1),
 	}, nil
@@ -463,20 +468,62 @@ func (s *Server) simulatedHostnames() []string {
 }
 
 func (s *Server) startNetworkSimulation() error {
+	quiet := []string{}
+	seamIDs := map[string]string{}
+	var diagnosticMu sync.Mutex
+	connectionFailure := func(id, category string) {
+		diagnosticMu.Lock()
+		defer diagnosticMu.Unlock()
+		if s.seamLog != nil {
+			_ = json.NewEncoder(s.seamLog).Encode(map[string]any{"time": time.Now().UTC(), "session": s.metadata.ID, "seam": id, "event": "failed", "category": category})
+		}
+	}
+	if len(s.blueprint.Network.HTTPSSeams) > 0 {
+		var stripped []string
+		data, err := os.ReadFile(filepath.Join(s.paths.Sockets, "https-seam-policy.json"))
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(data, &stripped); err != nil {
+			return err
+		}
+		transport := s.metadata.BridgeTransport
+		path := filepath.Join(s.paths.Sockets, "https-seam-spool")
+		if transport == "unix" {
+			path = filepath.Join(s.paths.Sockets, "https-seam.sock")
+		}
+		client, err := httpsseam.NewClient(s.metadata.ID, transport, path, s.blueprint.Limits.MaxBlobBytes, httpsseam.Timeout(s.blueprint), stripped)
+		if err != nil {
+			return err
+		}
+		s.seamLog, err = os.OpenFile(filepath.Join(s.paths.Logs, "https-seam-local.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			return err
+		}
+		client.ConnectionFailure = connectionFailure
+		s.httpsSeams = client
+		for _, seam := range s.blueprint.Network.HTTPSSeams {
+			quiet = append(quiet, seam.Hostname)
+			seamIDs[strings.ToLower(strings.TrimSuffix(seam.Hostname, "."))] = seam.ID
+			s.registerHostRoutes([]string{seam.Hostname}, client.Handler(seam.ID))
+		}
+	}
 	if s.blueprint.Network.DNS.Enabled {
-		server, err := simnet.StartDNS(s.blueprint.Network.DNS.Listen, s.simulatedHostnames(), s.blueprint.Network.DNS.UnknownPolicy, s.blueprint.Network.DNS.MaxQueries, s.recorder)
+		server, err := simnet.StartDNS(s.blueprint.Network.DNS.Listen, s.simulatedHostnames(), s.blueprint.Network.DNS.UnknownPolicy, s.blueprint.Network.DNS.MaxQueries, s.recorder, quiet...)
 		if err != nil {
 			return fmt.Errorf("start DNS simulation: %w", err)
 		}
 		s.dnsServer = server
 	}
+	router := simnet.NewHostRouter(s.hostRoutes, s.recorder, quiet...)
+	router.Rejected = func(host, reason string) { connectionFailure(seamIDs[host], reason) }
 	if s.blueprint.Network.HTTP.Enabled {
-		if err := s.serveTCP(s.blueprint.Network.HTTP.Listen, simnet.NewHostRouter(s.hostRoutes, s.recorder)); err != nil {
+		if err := s.serveTCP(s.blueprint.Network.HTTP.Listen, router); err != nil {
 			return fmt.Errorf("start HTTP simulation front door: %w", err)
 		}
 	}
 	if s.blueprint.Network.TLS.Enabled {
-		if err := s.serveTLS(s.blueprint.Network.TLS.Listen, simnet.NewHostRouter(s.hostRoutes, s.recorder)); err != nil {
+		if err := s.serveTLS(s.blueprint.Network.TLS.Listen, router); err != nil {
 			return fmt.Errorf("start HTTPS simulation front door: %w", err)
 		}
 	}
@@ -1499,6 +1546,12 @@ func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommit
 			return snapshot.Checkpoint{}, err
 		}
 	}
+	if s.httpsSeams != nil {
+		defer s.httpsSeams.Resume()
+		if err := s.httpsSeams.Pause(ctx); err != nil {
+			return snapshot.Checkpoint{}, err
+		}
+	}
 	if err := s.recorder.Flush(); err != nil {
 		return snapshot.Checkpoint{}, err
 	}
@@ -1765,12 +1818,29 @@ func (s *Server) Close(ctx context.Context) error {
 		if s.execution != nil {
 			result = errors.Join(result, s.execution.Close("session_stopped"))
 		}
+		if s.httpsSeams != nil {
+			if adapter, ok := s.adapter.(*protocolApplicationAdapter); ok {
+				result = errors.Join(result, adapter.Close(ctx))
+			}
+			if s.app != nil && s.app.Process != nil {
+				_ = syscall.Kill(-s.app.Process.Pid, syscall.SIGTERM)
+				select {
+				case <-s.applicationExited:
+				case <-ctx.Done():
+				case <-time.After(5 * time.Second):
+				}
+			}
+			result = errors.Join(result, s.httpsSeams.Pause(ctx))
+		}
 		close(s.identityStop)
 		if s.dnsServer != nil {
 			result = errors.Join(result, s.dnsServer.Close())
 		}
 		for _, server := range s.servers {
 			result = errors.Join(result, server.Shutdown(ctx))
+		}
+		if s.seamLog != nil {
+			result = errors.Join(result, s.seamLog.Close())
 		}
 		for _, listener := range s.listeners {
 			_ = listener.Close()
@@ -1779,7 +1849,7 @@ func (s *Server) Close(ctx context.Context) error {
 			_ = s.helperIn.Close()
 			s.helperIn = nil
 		}
-		if adapter, ok := s.adapter.(*protocolApplicationAdapter); ok {
+		if adapter, ok := s.adapter.(*protocolApplicationAdapter); ok && s.httpsSeams == nil {
 			result = errors.Join(result, adapter.Close(ctx))
 		}
 		if s.app != nil && s.app.Process != nil {
@@ -1841,6 +1911,9 @@ func (s *Server) serveTLS(address string, handler http.Handler) error {
 		return err
 	}
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{certificate}}}
+	if s.seamLog != nil {
+		server.ErrorLog = log.New(seamTLSLog{file: s.seamLog, session: s.metadata.ID}, "", 0)
+	}
 	s.listeners = append(s.listeners, listener)
 	s.servers = append(s.servers, server)
 	go server.ServeTLS(listener, "", "")
@@ -2095,6 +2168,9 @@ func (s *Server) startApplicationHelper(asApplication bool) error {
 		s.app = helper
 		go func() {
 			err := helper.Wait()
+			if s.applicationExited != nil {
+				close(s.applicationExited)
+			}
 			_ = stderr.Close()
 			select {
 			case s.done <- err:

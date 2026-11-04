@@ -315,3 +315,10 @@ windows; their model/service activity is not assigned a synthetic turn.
 See [PostgreSQL and pgvector](postgresql.md) for the managed database Blueprint,
 wrapper packaging, verified driver TLS, database injection surfaces, independent
 committed-state oracles, evidence and coordinated restore contract.
+
+## External HTTPS services
+
+Declared HTTPS seams drain admitted requests at the snapshot boundary and do not
+replay pending requests after restore. Remote effects, including traces, are not
+rolled back. Restores require the same host origins, credential references and
+private CA contents; debug settings may change. See [HTTPS egress](https-egress.md).

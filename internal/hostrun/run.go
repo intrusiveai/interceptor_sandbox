@@ -32,6 +32,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/filemanagement"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/hostlifetime"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/httpsseam"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/ociruntime"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/postgresql"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/session"
@@ -40,6 +41,7 @@ import (
 )
 
 type Config struct {
+	HTTPSSeams             *httpsseam.Prepared
 	EvidenceMaxBytes       int64
 	SpoolMaxBytes          int64
 	OnFault                func(string, error)
@@ -386,6 +388,8 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 	var workers sync.WaitGroup
 	var stopBridge context.CancelFunc = func() {}
 	var closeServers = func() {}
+	var stopSeams = func() {}
+	var closeSeamDiagnostics = func() {}
 	var quotaDone chan struct{}
 	var dockerWatchDone chan struct{}
 	sessionID := metadata.ID
@@ -449,10 +453,11 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		case <-cleanup.Done():
 			err = errors.Join(err, cleanup.Err())
 		}
+		stopSeams()
 		stopBridge()
 		closeServers()
 		done := make(chan struct{})
-		go func() { workers.Wait(); writer.Close(); close(done) }()
+		go func() { workers.Wait(); closeSeamDiagnostics(); writer.Close(); close(done) }()
 		select {
 		case <-done:
 			if cleanupErr := filemanagement.CleanupSpools(cleanup, dataRoot, metadata, config.Docker); cleanupErr != nil {
@@ -550,6 +555,24 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		metadata.ApplicationURL = "http://" + applicationListener.Addr().String()
 		metadata.ControlURL = "http://" + controlListener.Addr().String()
 	}
+	if err := config.HTTPSSeams.Check(blueprint.Network.HTTPSSeams); err != nil {
+		return metadata, err
+	}
+	if len(blueprint.Network.HTTPSSeams) > 0 {
+		binding := config.HTTPSSeams.Digest()
+		if metadata.ParentSessionID != "" {
+			previous, err := os.ReadFile(filepath.Join(session.PathsFor(dataRoot, metadata.ParentSessionID).Root, "https-seam-binding"))
+			if err != nil || string(previous) != binding {
+				return metadata, errors.New("HTTPS seam bindings changed since snapshot; use the original origin, credential references and trust bundle")
+			}
+		}
+		if err := fsutil.WriteFile(filepath.Join(paths.Root, "https-seam-binding"), []byte(binding), 0600); err != nil {
+			return metadata, err
+		}
+		if err := fsutil.WriteJSON(filepath.Join(paths.Sockets, "https-seam-policy.json"), config.HTTPSSeams.StrippedHeaders(), 0600); err != nil {
+			return metadata, err
+		}
+	}
 	containerName := "interceptor-" + metadata.ID
 	if err := session.Transition(&metadata, session.Starting); err != nil {
 		return metadata, err
@@ -576,6 +599,41 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 	bridgeContext, bridgeCancel := context.WithCancel(ctx)
 	stopBridge = bridgeCancel
 	bridgeErrors := make(chan error, 1)
+	if len(blueprint.Network.HTTPSSeams) > 0 {
+		connector, err := httpsseam.NewConnector(config.HTTPSSeams, metadata.ID, paths.Logs, blueprint.Limits.MaxBlobBytes, httpsseam.Timeout(blueprint))
+		if err != nil {
+			return metadata, err
+		}
+		closeSeamDiagnostics = func() { _ = connector.Close() }
+		seamContext, seamCancel := context.WithCancel(context.WithoutCancel(ctx))
+		stopSeams = seamCancel
+		if config.BridgeTransport == "unix" {
+			server, listener, err := bridge.ListenUnix(filepath.Join(paths.Sockets, "https-seam.sock"), connector)
+			if err != nil {
+				return metadata, err
+			}
+			stopSeams = func() { seamCancel(); _ = server.Close(); _ = listener.Close() }
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				err := server.Serve(listener)
+				select {
+				case bridgeErrors <- err:
+				case <-bridgeContext.Done():
+				}
+			}()
+		} else {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				err := bridge.ServeHTTPSpool(seamContext, bridge.HTTPSpoolServerConfig{Root: filepath.Join(paths.Sockets, "https-seam-spool"), Seam: connector, MaxBytes: httpsseam.FrameLimit(blueprint.Limits.MaxBlobBytes)})
+				select {
+				case bridgeErrors <- err:
+				case <-bridgeContext.Done():
+				}
+			}()
+		}
+	}
 	if config.BridgeTransport == "unix" {
 		connectorServer, connectorListener, listenErr := bridge.ListenUnix(filepath.Join(paths.Sockets, "model.sock"), connector)
 		if listenErr != nil {
@@ -615,6 +673,9 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		}
 		for _, service := range blueprint.AttackerServices {
 			hostnames = append(hostnames, service.Hostnames...)
+		}
+		for _, seam := range blueprint.Network.HTTPSSeams {
+			hostnames = append(hostnames, seam.Hostname)
 		}
 		for _, issuer := range blueprint.Identity.Issuers {
 			hostnames = append(hostnames, issuer.Hostnames...)

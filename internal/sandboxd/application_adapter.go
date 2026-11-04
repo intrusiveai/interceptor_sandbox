@@ -247,6 +247,9 @@ func (s *Server) startApplicationProcess(command *exec.Cmd, stdout, stderr io.Wr
 	s.app = command
 	go func() {
 		err := command.Wait()
+		if s.applicationExited != nil {
+			close(s.applicationExited)
+		}
 		_ = stdout.Close()
 		_ = stderr.Close()
 		select {

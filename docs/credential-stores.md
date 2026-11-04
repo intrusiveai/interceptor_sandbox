@@ -55,7 +55,9 @@ interceptor run \
 ```
 
 Operator integration uses the same-host unauthenticated localhost API; it has
-no integration token. This credential resolver applies to model providers.
+no integration token. This credential resolver applies to model providers and declared
+[HTTPS seams](https-egress.md). Seams resolve Basic/header credentials on the host;
+SDK placeholders in the container remain synthetic.
 
 Backend locator fields are strict:Backend locator fields are strict:
 

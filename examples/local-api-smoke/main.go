@@ -180,6 +180,7 @@ func main() {
 	evidenceFailure := flag.Bool("evidence-failure", false, "test required evidence failure after state qualification; requires isolated --data-root")
 	stateSnapshots := flag.Bool("state-snapshots", false, "qualify packaged application state snapshot and restore")
 	commandOnly := flag.Bool("command-only", false, "qualify a minimal command target's echo operation without snapshots or model calls")
+	httpsSeams := flag.Bool("https-seams", false, "qualify declared HTTPS egress")
 	adapterOnly := flag.Bool("adapter-only", false, "qualify the stateful invocation-adapter example without snapshots or model calls")
 	maximumEvidence := flag.Int64("evidence-max-bytes", evidencepolicy.DefaultMaxBytes, "local evidence archive acceptance ceiling")
 	root := flag.String("data-root", "", "optional host data root to check reference application state rollback")
@@ -204,6 +205,10 @@ func main() {
 	must(limitErr)
 	limit := min(*maximumEvidence, attached.EvidenceMaxBytes)
 	first := attached.Binding
+	if *httpsSeams {
+		qualifyHTTPSSeams(first, *output, limit)
+		return
+	}
 	if *customerSupport {
 		qualifyCustomerSupport(first, *output, limit)
 		return

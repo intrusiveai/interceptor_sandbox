@@ -230,3 +230,11 @@ blobs from those journals. Each blob appears once. Export verifies its digest an
 recorded size; a missing or corrupt blob fails the export and leaves any previous
 output archive intact. Export uses retained bytes and never reconnects to a live
 database to reconstruct missing evidence.
+
+## HTTPS seam diagnostics
+
+Declared HTTPS seams create connection logs and optional bounded payload debug
+files under the session `logs/` directory. These files are not campaign evidence,
+are excluded from standard evidence exports and snapshots, and are removed by
+session purge. Debug capture is disabled by default; see
+[HTTPS egress troubleshooting](https-egress.md#logging-and-troubleshooting).

@@ -59,6 +59,12 @@ capabilities and AEF consumption rules without redefining these schemas.
 the written capability contract, automatic API-based version compatibility check and
 release publishing requirements.
 
+## Declared HTTPS egress
+
+[`https-egress-seam.md`](https-egress-seam.md) defines declared HTTPS access to
+public and private external services, host-managed credentials, connection
+diagnostics and qualification with tracing and guardrail integrations.
+
 ## Application state snapshots
 
 [`application-state-snapshots.md`](application-state-snapshots.md) defines optional

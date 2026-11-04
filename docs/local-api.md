@@ -61,7 +61,7 @@ Before attaching a campaign, an integration calls `POST /v1/contract-version`
 with `{}` on the same Interceptor API instance it will use for execution:
 
 ```json
-{"status":200,"body":{"interceptor_contract_version":"0.1.0"},"session_revision":0}
+{"status":200,"body":{"interceptor_contract_version":"0.2.0"},"session_revision":0}
 ```
 
 This endpoint returns the service's embedded integration contract version. It

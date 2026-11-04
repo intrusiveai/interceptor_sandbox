@@ -91,10 +91,16 @@ type FileNamespaceCapability struct {
 	MaxFiles     int    `json:"max_files,omitempty"`
 	MaxFileBytes int64  `json:"max_file_bytes,omitempty"`
 }
+type HTTPSSeamCapability struct {
+	ID                  string `json:"id"`
+	MaximumMessageBytes int64  `json:"maximum_message_bytes"`
+}
+
 type NetworkCapability struct {
-	DNS   DNSCapability `json:"dns"`
-	HTTP  bool          `json:"http_frontdoor"`
-	HTTPS TLSCapability `json:"https_frontdoor"`
+	HTTPSSeams []HTTPSSeamCapability `json:"https_seams,omitempty"`
+	DNS        DNSCapability         `json:"dns"`
+	HTTP       bool                  `json:"http_frontdoor"`
+	HTTPS      TLSCapability         `json:"https_frontdoor"`
 }
 type DNSCapability struct {
 	Enabled        bool     `json:"enabled"`
@@ -126,6 +132,10 @@ func BuildCapabilityManifest(blueprint *environment.Blueprint, environmentDigest
 		HTTP:  blueprint.Network.HTTP.Enabled,
 		HTTPS: TLSCapability{Enabled: blueprint.Network.TLS.Enabled, TrustMode: blueprint.Network.TLS.TrustMode},
 	}
+	for _, seam := range blueprint.Network.HTTPSSeams {
+		m.Network.HTTPSSeams = append(m.Network.HTTPSSeams, HTTPSSeamCapability{ID: seam.ID, MaximumMessageBytes: blueprint.Limits.MaxBlobBytes})
+	}
+	sort.Slice(m.Network.HTTPSSeams, func(i, j int) bool { return m.Network.HTTPSSeams[i].ID < m.Network.HTTPSSeams[j].ID })
 	if m.Network.DNS.Enabled {
 		m.Network.DNS.RecordTypes = []string{"A"}
 	}

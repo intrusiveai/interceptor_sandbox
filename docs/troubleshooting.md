@@ -305,3 +305,10 @@ an exact request retry. Native experiment lookup uses `operation.status`.
 In-progress/unavailable/missing results never authorize a fresh-ID replay.
 `execution_closed` is permanent; host-service loss is terminal to the campaign.
 See [Local integration](local-api.md) for failure and evidence handling.
+
+## External HTTPS integrations
+
+Check the host session connection logs for DNS, TLS or upstream failures. Enable
+per-seam payload diagnostics explicitly when a service rejects a request. If an
+SDK sends no request, inspect application stdout/stderr instead. See
+[HTTPS seam diagnostics](https-egress.md#logging-and-troubleshooting).
