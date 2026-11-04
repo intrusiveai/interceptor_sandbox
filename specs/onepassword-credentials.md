@@ -3,8 +3,9 @@
 ## Required behavior
 
 Interceptor MUST resolve configured credentials from 1Password on the host using
-the installed `op` CLI. Administrators MUST be able to use desktop authentication
-for foreground development and a service account for unattended execution.
+the official 1Password Go SDK embedded in the product. Administrators MUST be
+able to use desktop authentication for foreground development and a service
+account for unattended execution.
 Resolved values MUST flow through the existing credential resolver to existing
 host-side consumers. Implement this as another credential backend, without a
 new service, credential transport, or guest tool.
@@ -20,7 +21,7 @@ Existing configurations MUST retain their current behavior.
 | --- | --- |
 | Profile `backend_kind` | Accept `onepassword`. |
 | Profile `authentication` | Require explicit `onepassword-desktop` or `onepassword-service-account`. No inferred selection. |
-| Profile `onepassword_account` | Required for desktop mode: an account ID or sign-in address passed as `--account`. Reject this field for service-account mode; the token selects its account. |
+| Profile `onepassword_account` | Required for desktop mode: the account name shown in the desktop app, or account UUID, passed to the SDK. Reject this field for service-account mode; the token selects its account. |
 | Locator `backend_kind` | Must be `onepassword` and match the profile. |
 | Locator `secret_reference` | Required bounded `op://vault/item/field` or `op://vault/item/section/field` reference. |
 | Profile `allowed_locator_prefixes` | Require one or more complete vault, item, or section prefixes ending in `/`, such as `op://development/`. |
@@ -28,8 +29,8 @@ Existing configurations MUST retain their current behavior.
 | Time, size, cache settings | Reuse `timeout_seconds`, `max_value_bytes`, `max_cache_ttl_seconds`, and credential `cache_ttl_seconds`. |
 
 The account selector MUST be nonempty, at most 256 UTF-8 bytes, and contain no
-whitespace or control characters. References and prefixes MUST be at most 2,048
-UTF-8 bytes. They MUST have nonempty path components and no control characters,
+control characters; account names containing spaces MUST be accepted. References
+and prefixes MUST be at most 2,048 UTF-8 bytes. They MUST have nonempty path components and no control characters,
 query, fragment, or `.`/`..` components. Names and IDs MUST both work, including
 spaces in names. Treat components as literal 1Password names/IDs; do not apply
 HTTP URL decoding, path cleaning, case folding, or template expansion. Reject
@@ -49,7 +50,7 @@ profiles:
     id: developer-secrets
     backend_kind: onepassword
     authentication: onepassword-desktop
-    onepassword_account: example.1password.com
+    onepassword_account: "Development Team"
     allowed_locator_prefixes:
       - op://development/
     timeout_seconds: 60
@@ -76,76 +77,87 @@ through this backend. Administrators SHOULD grant only read access to the needed
 vaults. The local prefix allowlist further limits configured reads; it does not
 replace 1Password permissions.
 
-## Host CLI and authentication
+## Go SDK integration and authentication
 
-Implementation MUST use the existing `Backend.Read` and backend factory pattern
-in `internal/credentials`. Extend `types.go`, `resolver.go`,
-`local_identity.go`, and `backends.go`; put the bounded CLI adapter and focused
-tests in `onepassword.go` and `onepassword_test.go` in that package.
+Implementation MUST use `github.com/1password/onepassword-sdk-go` through the
+existing `Backend.Read` and backend factory pattern in `internal/credentials`.
+Pin one reviewed published SDK version in `go.mod` and `go.sum` in both products.
+Extend `types.go`, `resolver.go`, `local_identity.go`, and `backends.go`; place the
+SDK adapter and focused tests in `onepassword.go` and `onepassword_test.go`.
+Use a small injectable client interface matching `Secrets().Resolve(ctx, ref)`
+for controlled tests, following existing backend test patterns.
 
-The administrator MUST install 1Password CLI v2 with service-account support
-(2.18.0 or later). Resolve `op` through the host's trusted executable PATH to an
-absolute executable path. Interceptor MUST NOT install it or search a guest/workspace
-for it. Missing CLI errors MUST explain the host prerequisite.
+Create clients with `onepassword.NewClient` and explicit authentication options:
 
-Reads MUST execute `op read --no-newline <secret_reference>` directly with an
-argument array, never a shell. Desktop reads MUST add the explicit `--account`
-selector. No secret values or tokens may appear in arguments. References remain
-host-private configuration and MUST NOT be logged as command lines.
+- Desktop: `WithDesktopAppIntegration(profile.OnePasswordAccount)`. The account
+  value is the account name shown in the app, or its UUID, as supported by the
+  pinned SDK. Administrators MUST enable the app's SDK integration. Approval
+  remains in the 1Password UI; Interceptor MUST NOT collect account passwords.
+- Service account: `WithServiceAccountToken(token)`, reading the token from
+  `OP_SERVICE_ACCOUNT_TOKEN` in the host environment. Missing or empty bootstrap
+  material MUST fail before a remote request. Service processes and CI MUST use
+  this mode; desktop access is for interactive host sessions.
+- Both: `WithIntegrationInfo` MUST identify the product and its actual build
+  version. Use exactly one authentication option. Configuration MUST determine
+  the mode; ambient CLI account, session, Connect or biometric settings MUST NOT
+  select or override it. Do not mutate the process environment to configure SDK
+  clients or pass credentials to guests.
 
-Each subprocess MUST receive a deliberately constructed environment. Strip
-ambient `OP_*` values, permitting the administrator's `OP_CONFIG_DIR` for local
-CLI configuration. Set `OP_DEBUG=false` and `OP_CACHE=false` so the product's
-existing cache policy governs reads. Preserve the ordinary host environment
-needed for desktop IPC, OS identity, TLS and network connectivity.
+Only resolve the configured field with `Secrets().Resolve`. SDK capabilities to
+list, create, edit or delete items MUST NOT become product operations. Instantiate
+the backend lazily so unrelated credentials and offline version/contract commands
+work without an account, token or installed desktop app.
 
-- Desktop mode MUST set `OP_BIOMETRIC_UNLOCK_ENABLED=true`, exclude service and
-  session tokens, and use the administrator-enabled app integration. Approval
-  happens in 1Password's UI under the caller's host identity. Interceptor MUST NOT
-  collect account passwords or invoke `op signin`.
-- Service-account mode MUST require a nonempty `OP_SERVICE_ACCOUNT_TOKEN`, copy
-  it only into the credential subprocess environment, and set
-  `OP_BIOMETRIC_UNLOCK_ENABLED=false`. It MUST NOT fall back to desktop/session
-  authentication. An unattended service or CI job MUST use this mode.
-- Both modes MUST exclude `OP_CONNECT_HOST`, `OP_CONNECT_TOKEN`, `OP_ACCOUNT`,
-  and `OP_SESSION`/`OP_SESSION_*` inherited selectors. The selected mode MUST NOT
-  be overridden by ambient configuration.
+Pass the caller's bounded context through client creation and resolution. Apply
+existing `max_value_bytes` and value validation immediately to returned UTF-8
+bytes, without whitespace trimming. Reject any value returned with an error or
+after deadline/cancellation. The SDK returns a complete string: this check limits
+accepted secret size, not all memory allocated internally by the SDK. Tests and
+documentation MUST describe that distinction accurately.
 
-Subprocess stdin MUST be closed. Authentication approval and reads MUST respect
-the resolver's deadline and caller cancellation. Products MUST terminate and
-reap the credential subprocess on cancellation or output overflow; inherited
-pipes MUST NOT make cleanup hang. No automatic retry is required.
+Before enabling a pinned SDK, inspect and test its native calls, concurrency,
+client lifetime, account selection and cancellation. The upstream desktop path
+uses synchronous native calls; a context parameter alone does not demonstrate
+interruptibility. Do not implement an unbounded background goroutine to conceal
+an uninterruptible read. If the pinned SDK cannot meet bounded shutdown, report
+the specific failure and obtain a decision before adding process isolation or
+changing the timeout guarantee. No extra service or helper is authorized here.
 
-Capture stdout only in memory, bounded to `max_value_bytes` plus one overflow
-sentinel byte; bound any captured stderr to 4 KiB. Excess output MUST fail the
-read and stop the child. A nonzero exit MUST discard even partially returned
-stdout. Raw stderr, stdout, process arguments, and unrestricted subprocess errors
-MUST NOT enter diagnostics. Preserve the value bytes exactly: use `--no-newline`
-rather than trimming whitespace, then apply existing value validation.
+SDK-global state MUST NOT mix profiles, accounts or tokens. Test multiple
+profiles and concurrent reads. If a pinned version cannot safely select distinct
+desktop accounts in one process, fail conflicting configuration before reading
+and document the SDK restriction; never resolve through the first account by
+accident. Use SDK-supported cleanup when available; otherwise drop client
+references and document its lifecycle without promising immediate memory erasure.
 
 ## Cache, audit and diagnostics
 
-Reuse resolver caching, TTL limits, invalidation, value selection, and close
+Reuse resolver caching, TTL limits, invalidation, value selection and close
 behavior. Failed reads MUST NOT populate the cache. Cache expiry/invalidation
-MUST cause a fresh CLI read; service tokens MUST be read from the selected host
-environment for that invocation. Do not add persistent secret storage.
+MUST invoke SDK resolution again. Reuse profile clients safely; if the bootstrap
+token changes before an uncached read, replace the service-account client without
+logging either token. A changed remote secret becomes visible on the next
+uncached read subject to the provider's consistency behavior. Do not add
+persistent secret storage or a second product cache.
 
-`op read` does not supply an item version in its value output. Backend version
-MUST remain absent; do not substitute a value digest or perform additional item
-lookups to manufacture one.
+`Secrets().Resolve` returns the value without an item version. Backend version
+MUST remain absent; do not substitute a value digest or make extra item lookups.
+Inspect SDK refresh/retry behavior and keep it within the same request deadline;
+do not add product retries or claim one SDK call equals one network request.
 
-Use bounded product-authored errors for missing CLI, missing bootstrap token,
-deadline, cancellation, output overflow, invalid value, and a nonzero CLI exit.
-An opaque CLI rejection MUST say that authentication, permission or reference
-resolution failed without claiming which unobserved condition occurred. The
-redaction path MUST preserve only recognized safe error facts, never arbitrary
-backend messages. Reuse existing audit outcome/code conventions and preserve
-context cancellation identity. Do not introduce a separate error framework.
+Use bounded product-authored errors for missing bootstrap material, unavailable
+desktop integration, deadline, cancellation, invalid/oversized value and SDK
+rejection. Map recognized SDK error types to safe facts; never forward raw SDK
+error strings, SDK debug logs, response bodies or arbitrary account/item details.
+An opaque error MUST not invent a specific authentication/permission cause.
+The existing redaction path MUST preserve recognized safe facts and context
+cancellation identity. Reuse audit outcome/code conventions without introducing
+a separate diagnostic framework.
 
-Secrets, bootstrap tokens, account selectors, secret references, secret hashes,
-and raw CLI responses MUST NOT appear in campaign/session data, reports,
-exports, guest inputs, or diagnostic output. Reuse existing audit failure rules;
-do not allow a dependent request after a required audit write fails.
+Secrets, bootstrap tokens, account selectors, secret references, secret hashes
+and raw SDK responses MUST NOT appear in campaign/session data, reports, exports,
+guest inputs or diagnostics. Reuse audit failure rules; do not allow a dependent
+request after a required audit write fails.
 
 ## Interceptor integration
 
@@ -164,35 +176,120 @@ guest environment variables. Operator and Interceptor each resolve their own
 credentials. No public contract identity change is required for this host-only
 extension.
 
+## Cross-compilation and release packaging
+
+Release compilation MUST continue using the existing Linux AMD64 build jobs to
+produce Linux/macOS AMD64/ARM64 artifacts. Configure destination compilers and
+sysroots (the destination's headers and libraries), rather than adding a build
+runner for every destination. Existing native artifact-verification jobs MUST
+remain: compiling and executing a destination binary are different checks.
+
+Extend the existing build script and `.github/workflows/verify-release.yml` with
+an explicit per-target toolchain selection. Add `release/native-toolchains.json`
+to record pinned compiler/toolchain revisions, target triples, sysroot identities,
+SDK checksum/version and deployment/libc baseline. Paths may be supplied by the
+build environment, but the selected versions MUST match the recorded identities.
+Extend existing setup scripts to provision/cache these inputs before compilation.
+
+| Destination | Build requirements on the Linux AMD64 builder |
+| --- | --- |
+| `linux/amd64` | Pinned GNU compiler/binutils and x86_64 glibc headers/libraries compatible with the documented Linux profile. |
+| `linux/arm64` | Pinned `aarch64-linux-gnu` cross-compiler/binutils and ARM64 glibc sysroot. |
+| `darwin/amd64` | Pinned osxcross/Clang toolchain targeting x86_64 Darwin with an administrator-provided Apple macOS SDK. |
+| `darwin/arm64` | The same pinned macOS toolchain/SDK targeting ARM64 Darwin. |
+
+macOS SDK acquisition/use MUST follow its distribution terms. Document how an
+authorized maintainer supplies its checksum-verified build input; do not assume
+an arbitrary public SDK mirror is an acceptable dependency. No Apple SDK belongs
+in the product archive. If this input cannot be provisioned for the existing
+Linux builders, request a decision instead of silently substituting native builds.
+
+For host binaries set `CGO_ENABLED=1`, `GOOS`, `GOARCH`, the target `CC` (and `CXX`
+when needed), and appropriate sysroot/compiler/linker flags. Darwin builds MUST
+set a deployment target compatible with the documented host profile. Linux builds
+MUST check the resulting libc symbol requirements against that profile. Merely
+setting GOOS/GOARCH or copying libraries is insufficient. Fail clearly when a
+target compiler/sysroot is absent; do not fall back to the host compiler or
+disable desktop support. Keep host-native build helpers in a separate environment
+so a cross-compiler never produces a helper the build job tries to execute.
+
+Inspect the pinned SDK dependency tree for required native libraries and embedded
+resources. Its desktop adapter loads the IPC library installed with 1Password:
+`libop_sdk_ipc_client.so` on Linux or `.dylib` on macOS. This is a desktop-mode
+runtime prerequisite supplied by the app, not a library to copy from a developer
+machine or link from the build host. Verify architecture and app-version support
+for each advertised desktop combination; service-account support MUST work without
+the app. Do not equate successful cross-compilation with desktop-app availability.
+
+Audit ELF/Mach-O architecture, loader paths, dynamic dependencies and deployment
+requirements of every artifact. Document ordinary OS library prerequisites.
+Any other required redistributable runtime files MUST be packaged with stable
+relative lookup, checksums and notices using the existing archive/manifest
+machinery; installation MUST need neither a compiler nor runtime downloads.
+Keep the SDK's embedded resources in the verified binary/module inventory.
+
+Preserve archive names/layout, checksums, contract metadata, source identity,
+candidate qualification and promotion behavior. Update build metadata/provenance
+to record actual CGO settings and toolchain/sysroot/SDK identities; include SDK
+and redistributed dependency licenses and SBOM entries where the product emits
+an SBOM. Remove fixed `cgo_enabled: false` assertions for host outputs. Retain
+deterministic two-build comparisons, including external linker path/build-ID
+normalization. Cache toolchains by their pinned identities; do not rebuild them
+for every test or add duplicate full-suite qualification jobs.
+
+Interceptor MUST update `scripts/build_release.py`, archive verification,
+`scripts/tests/test_release_archives.py`, and packaged-contract tests. Preserve a
+`CGO_ENABLED=0` Linux guest companion: the CGO-enabled host CLI MUST NOT be copied
+into arbitrary application images that lack its dynamic loader/libraries.
+Reuse the existing `interceptor-linux` companion and `linux_companion` metadata
+for Linux as well as macOS archives. Update `internal/appimage/companion.go` and
+`appimage.go` to select and verify that static companion for released host CLIs,
+including version, source, architecture, digest and CGO-disabled identity. Keep
+source-development builds working through the existing static-build path.
+Reset compiler flags when switching from host to companion builds. Extend archive
+inventories and existing native companion checks without weakening identities.
+Exercise application-image creation and supervisor startup with the packaged
+companion, including a minimal image without the host's glibc loader. Guest
+execution MUST never resolve host credentials or load the desktop SDK library.
+
 ## Verification
 
 Both repositories MUST carry matching configuration fixtures (including both
-accepted schema namespaces) and the same configuration rejection cases. Tests
-MUST run independently without requiring a sibling checkout or real account.
+schema namespaces) and rejection cases, independently of a sibling checkout.
+Use an injected SDK factory/client for deterministic tests, plus the actual
+SDK in build/runtime checks; a fake SDK alone cannot qualify native integration.
 
-Using a controlled executable standing in for `op`, tests MUST cover:
+1. Test explicit desktop/service options and integration identity, missing token,
+   account names containing spaces, ambient-mode interference, profile isolation,
+   concurrent reads and client replacement on bootstrap changes.
+2. Cover named/ID/section references, allowlist boundaries, invalid references,
+   field conflicts, both value selections and exact byte preservation.
+3. Cover successful reads, cache hits/expiry/invalidation, changed secrets,
+   errors returning partial values, invalid UTF-8, empty/oversized results,
+   canceled/deadline contexts, late results and resource cleanup.
+4. Inject synthetic secrets into SDK errors/results. Verify their absence from
+   logs, retained records, exports and safe diagnostics, including audit failure.
+5. Exercise a representative existing command with private configuration, the
+   production resolver, a controlled SDK client and a local model HTTP endpoint.
+   Verify the endpoint receives the resolved credential, retained audit facts are
+   correct, and a failed resolution prevents the dependent model request.
+6. Cross-build all four host destinations using the pinned toolchains. Verify
+   actual build settings and dependency metadata, not just mocked compiler
+   arguments. Keep existing repeat-build comparisons and run installed binaries
+   from those archives in the existing native verification jobs, without rebuilding.
+7. Add an offline SDK initialization/load smoke check to the native jobs. Verify
+   service-mode code has no desktop library dependency and desktop support has not
+   been compiled out. A missing app may produce the expected safe prerequisite
+   error; that is not evidence of successful authentication. Unit tests MUST
+   exercise SDK-specific errors without requiring an account or desktop app.
 
-1. Desktop and service-account argument/environment selection, ambient-mode
-   interference, missing CLI/token, and desktop account selection.
-2. Named and ID references, section fields, allowlist boundaries, malformed
-   references, field conflicts, and value selection without whitespace changes.
-3. Successful reads, cache hits, expiry, explicit invalidation, changed values,
-   nonzero exits with partial stdout, invalid UTF-8, empty/oversized values,
-   excessive stderr, cancellation and child/pipe cleanup.
-4. Synthetic credentials and tokens in stdout/stderr/errors staying absent from
-   logs, retained records and exports, including failure paths and audit failure.
-5. A representative existing command workflow using a private credential file,
-   the production resolver, and a controlled local model HTTP endpoint. The
-   endpoint MUST verify the resolved credential was used; inspection of retained
-   evidence MUST verify allowed audit facts and absence of secret material.
-   A failed credential read MUST prevent the dependent model request.
-
-Run affected credential, configuration, authentication and command integration
-tests and existing repository-required checks. Real desktop approval and service
-account reads SHOULD be qualified separately through the existing opt-in
-credential checks using a dedicated test item. Controlled tests MUST NOT be
-represented as live qualification. Tests MUST NOT require cloud writes, paid
-model requests, or printing a secret.
+Run affected credential/configuration/authentication/command and release-script
+tests, plus existing required checks. Existing opt-in credential checks SHOULD
+qualify actual desktop approval (including locked/denied/canceled approval) and
+service-account reads using a dedicated test item. Confirm actual cancellation,
+account isolation and cleanup for the pinned SDK. Record real platform/app/SDK
+combinations separately from controlled tests. No test may require cloud writes,
+paid model calls, or printing a secret without separate authorization.
 
 ## Documentation
 
@@ -202,17 +299,26 @@ the existing run and credential-check commands, including foreground and optiona
 service environments. Add a discoverable link from the existing specification
 index and keep the README overview brief.
 
-Instructions MUST cover CLI installation, desktop app integration and account
-selection, copying a secret reference, vault read permissions, service-token
+Instructions MUST cover enabling desktop SDK integration and selecting an account,
+copying a secret reference, vault read permissions, service-token
 bootstrap, private configuration, the existing credential selector, timeout and
 cache behavior, and actionable safe troubleshooting. Include a desktop example
 and its service-account variant. Explain that host access must be supplied to
 the actual foreground/service process, and that approval time counts toward the
 configured credential timeout. Do not suggest putting secrets in shell history
-or enabling CLI debug output to troubleshoot production credentials.
+or enabling unrestricted SDK debug output to troubleshoot production credentials.
 
-Implementers MUST verify command semantics against the official references:
-[read](https://www.1password.dev/cli/reference/commands/read),
-[authentication environment](https://www.1password.dev/cli/environment-variables),
-[service accounts](https://www.1password.dev/service-accounts/use-with-1password-cli),
-and [secret references](https://www.1password.dev/cli/secret-references).
+Update `.github/maintainers/CANDIDATE_RELEASES.md` with toolchain setup,
+Apple SDK provisioning, per-target compiler/sysroot selection, dependency checks
+and native artifact verification. Document build prerequisites separately from
+administrator runtime prerequisites. Installation MUST not require `op`.
+
+Implementers MUST verify the pinned SDK and toolchain behavior against:
+[official Go SDK](https://github.com/1Password/onepassword-sdk-go),
+[SDK desktop option](https://github.com/1Password/onepassword-sdk-go/blob/main/client_builder_cgo.go),
+[desktop library loading](https://github.com/1Password/onepassword-sdk-go/blob/main/internal/shared_lib_core.go),
+[secret resolution](https://github.com/1Password/onepassword-sdk-go/blob/main/secrets.go),
+[Go CGO cross-compilation](https://pkg.go.dev/cmd/cgo), and
+[osxcross SDK/toolchain setup](https://github.com/tpoechtrager/osxcross).
+Commit the selected dependency versions and build inputs; these upstream `main`
+links are implementation references, not release pins.
