@@ -115,28 +115,28 @@ after deadline/cancellation. The SDK returns a complete string: this check limit
 accepted secret size, not all memory allocated internally by the SDK. Tests and
 documentation MUST describe that distinction accurately.
 
-Before enabling a pinned SDK, inspect and test its native calls, concurrency,
-client lifetime, account selection and cancellation. The upstream desktop path
-uses synchronous native calls; a context parameter alone does not demonstrate
-interruptibility. Do not implement an unbounded background goroutine to conceal
-an uninterruptible read. If the pinned SDK cannot meet bounded shutdown, report
-the specific failure and obtain a decision before adding process isolation or
-changing the timeout guarantee. No extra service or helper is authorized here.
+Run each uncached SDK lookup in a short-lived child of the existing product
+executable, selected by the private `__onepassword-read` entry point. Pass bounded
+authentication, account, reference and value-limit fields through stdin, and
+return one bounded JSON value or allowlisted error code through stdout. Secret
+values and bootstrap tokens MUST NOT be command arguments or persisted files.
+The child MUST receive explicit SDK options and no ambient `OP_*` environment.
+Discard unrestricted SDK stderr. The parent MUST bound output, terminate the
+child process group on timeout/cancellation/overflow, and reap the child. An error
+or late result MUST never disclose a partially returned value to a consumer.
 
-SDK-global state MUST NOT mix profiles, accounts or tokens. Test multiple
-profiles and concurrent reads. If a pinned version cannot safely select distinct
-desktop accounts in one process, fail conflicting configuration before reading
-and document the SDK restriction; never resolve through the first account by
-accident. Use SDK-supported cleanup when available; otherwise drop client
-references and document its lifecycle without promising immediate memory erasure.
+The worker MUST initialize and read through the pinned SDK, then exit. It MUST
+not run a shell, listen on a socket, remain resident, or require another installed
+executable. Independent children MUST isolate accounts, tokens and SDK-global
+state. The existing parent resolver remains responsible for cache policy and
+required audit recording before a credential is given to a model or target.
 
 ## Cache, audit and diagnostics
 
 Reuse resolver caching, TTL limits, invalidation, value selection and close
 behavior. Failed reads MUST NOT populate the cache. Cache expiry/invalidation
-MUST invoke SDK resolution again. Reuse profile clients safely; if the bootstrap
-token changes before an uncached read, replace the service-account client without
-logging either token. A changed remote secret becomes visible on the next
+MUST invoke SDK resolution again. Each uncached read MUST use the current bootstrap token and a fresh child
+client without logging either token. A changed remote secret becomes visible on the next
 uncached read subject to the provider's consistency behavior. Do not add
 persistent secret storage or a second product cache.
 
@@ -176,81 +176,51 @@ guest environment variables. Operator and Interceptor each resolve their own
 credentials. No public contract identity change is required for this host-only
 extension.
 
-## Cross-compilation and release packaging
+## Native compilation and release packaging
 
-Release compilation MUST continue using the existing Linux AMD64 build jobs to
-produce Linux/macOS AMD64/ARM64 artifacts. Configure destination compilers and
-sysroots (the destination's headers and libraries), rather than adding a build
-runner for every destination. Existing native artifact-verification jobs MUST
-remain: compiling and executing a destination binary are different checks.
+Build each host release on a matching GitHub-hosted OS and architecture:
 
-Extend the existing build script and `.github/workflows/verify-release.yml` with
-an explicit per-target toolchain selection. Add `release/native-toolchains.json`
-to record pinned compiler/toolchain revisions, target triples, sysroot identities,
-SDK checksum/version and deployment/libc baseline. Paths may be supplied by the
-build environment, but the selected versions MUST match the recorded identities.
-Extend existing setup scripts to provision/cache these inputs before compilation.
-
-| Destination | Build requirements on the Linux AMD64 builder |
+| Platform | Runner |
 | --- | --- |
-| `linux/amd64` | Pinned GNU compiler/binutils and x86_64 glibc headers/libraries compatible with the documented Linux profile. |
-| `linux/arm64` | Pinned `aarch64-linux-gnu` cross-compiler/binutils and ARM64 glibc sysroot. |
-| `darwin/amd64` | Pinned osxcross/Clang toolchain targeting x86_64 Darwin with an administrator-provided Apple macOS SDK. |
-| `darwin/arm64` | The same pinned macOS toolchain/SDK targeting ARM64 Darwin. |
+| `linux/amd64` | `ubuntu-24.04` |
+| `linux/arm64` | `ubuntu-24.04-arm` |
+| `darwin/amd64` | `macos-15-intel` |
+| `darwin/arm64` | `macos-15` |
 
-macOS SDK acquisition/use MUST follow its distribution terms. Document how an
-authorized maintainer supplies its checksum-verified build input; do not assume
-an arbitrary public SDK mirror is an acceptable dependency. No Apple SDK belongs
-in the product archive. If this input cannot be provisioned for the existing
-Linux builders, request a decision instead of silently substituting native builds.
+The build script MUST reject a destination different from its running OS or
+architecture. Use the runner's native C compiler with `CGO_ENABLED=1` so the
+1Password desktop integration is present. Clear inherited target/compiler flags.
+Use the pinned Go version, module checksums and native dependency cache. macOS
+builds MUST use the runner's installed Xcode SDK with deployment target 15.0;
+Linux builds use Ubuntu 24.04's libc baseline. Record the native platform,
+compiler version, CGO setting and macOS SDK/deployment target in existing build
+metadata or provenance. No additional SDK download configuration is required.
 
-For host binaries set `CGO_ENABLED=1`, `GOOS`, `GOARCH`, the target `CC` (and `CXX`
-when needed), and appropriate sysroot/compiler/linker flags. Darwin builds MUST
-set a deployment target compatible with the documented host profile. Linux builds
-MUST check the resulting libc symbol requirements against that profile. Merely
-setting GOOS/GOARCH or copying libraries is insufficient. Fail clearly when a
-target compiler/sysroot is absent; do not fall back to the host compiler or
-disable desktop support. Keep host-native build helpers in a separate environment
-so a cross-compiler never produces a helper the build job tries to execute.
+The SDK desktop adapter loads the IPC library installed by 1Password:
+`libop_sdk_ipc_client.so` on Linux or `.dylib` on macOS. The app supplies this
+runtime prerequisite; do not copy a developer's app library into releases.
+Service-account authentication MUST work without the desktop app. Include SDK
+license notices and dependencies in the existing SBOM where one is emitted.
 
-Inspect the pinned SDK dependency tree for required native libraries and embedded
-resources. Its desktop adapter loads the IPC library installed with 1Password:
-`libop_sdk_ipc_client.so` on Linux or `.dylib` on macOS. This is a desktop-mode
-runtime prerequisite supplied by the app, not a library to copy from a developer
-machine or link from the build host. Verify architecture and app-version support
-for each advertised desktop combination; service-account support MUST work without
-the app. Do not equate successful cross-compilation with desktop-app availability.
+Preserve archive names/layout, checksums, source and contract identities,
+deterministic two-build comparisons, candidate qualification and promotion gates.
+Execute each archived host binary on its matching runner and verify its version,
+contract and CGO build identity. Inspect native dependencies and deployment
+requirements. Keep existing packaged-runtime checks; do not add duplicate full
+suite jobs or equate compilation with live 1Password account qualification.
 
-Audit ELF/Mach-O architecture, loader paths, dynamic dependencies and deployment
-requirements of every artifact. Document ordinary OS library prerequisites.
-Any other required redistributable runtime files MUST be packaged with stable
-relative lookup, checksums and notices using the existing archive/manifest
-machinery; installation MUST need neither a compiler nor runtime downloads.
-Keep the SDK's embedded resources in the verified binary/module inventory.
+Every archive MUST include a static `CGO_ENABLED=0` Linux companion for the
+same architecture, version, source revision and integration contract. Build it
+on the matching Linux runner. macOS packaging MUST obtain the checksum-verified
+Linux archive produced by that same workflow and reuse its companion bytes,
+rejecting mismatched source, version, platform or contract identity.
 
-Preserve archive names/layout, checksums, contract metadata, source identity,
-candidate qualification and promotion behavior. Update build metadata/provenance
-to record actual CGO settings and toolchain/sysroot/SDK identities; include SDK
-and redistributed dependency licenses and SBOM entries where the product emits
-an SBOM. Remove fixed `cgo_enabled: false` assertions for host outputs. Retain
-deterministic two-build comparisons, including external linker path/build-ID
-normalization. Cache toolchains by their pinned identities; do not rebuild them
-for every test or add duplicate full-suite qualification jobs.
-
-Interceptor MUST update `scripts/build_release.py`, archive verification,
-`scripts/tests/test_release_archives.py`, and packaged-contract tests. Preserve a
-`CGO_ENABLED=0` Linux guest companion: the CGO-enabled host CLI MUST NOT be copied
-into arbitrary application images that lack its dynamic loader/libraries.
-Reuse the existing `interceptor-linux` companion and `linux_companion` metadata
-for Linux as well as macOS archives. Update `internal/appimage/companion.go` and
-`appimage.go` to select and verify that static companion for released host CLIs,
-including version, source, architecture, digest and CGO-disabled identity. Keep
-source-development builds working through the existing static-build path.
-Reset compiler flags when switching from host to companion builds. Extend archive
-inventories and existing native companion checks without weakening identities.
-Exercise application-image creation and supervisor startup with the packaged
-companion, including a minimal image without the host's glibc loader. Guest
-execution MUST never resolve host credentials or load the desktop SDK library.
+The host CLI MUST select the packaged companion for container construction on
+both Linux and macOS. Validate its digest, ELF architecture and static Go build
+identity before use. Never copy a CGO-enabled host CLI into an arbitrary app
+image. Released CLIs MUST require no local source checkout or compiler. Keep
+native Linux tests of both Linux and macOS packages' companions and existing
+wrapper/runtime qualification.
 
 ## Verification
 
@@ -261,19 +231,20 @@ SDK in build/runtime checks; a fake SDK alone cannot qualify native integration.
 
 1. Test explicit desktop/service options and integration identity, missing token,
    account names containing spaces, ambient-mode interference, profile isolation,
-   concurrent reads and client replacement on bootstrap changes.
+   concurrent reads, process isolation and bootstrap changes on uncached reads.
 2. Cover named/ID/section references, allowlist boundaries, invalid references,
    field conflicts, both value selections and exact byte preservation.
 3. Cover successful reads, cache hits/expiry/invalidation, changed secrets,
    errors returning partial values, invalid UTF-8, empty/oversized results,
-   canceled/deadline contexts, late results and resource cleanup.
+   canceled/deadline contexts, late results, bounded output and child reaping.
+   Include a worker that ignores cancellation to verify parent-enforced termination.
 4. Inject synthetic secrets into SDK errors/results. Verify their absence from
    logs, retained records, exports and safe diagnostics, including audit failure.
 5. Exercise a representative existing command with private configuration, the
    production resolver, a controlled SDK client and a local model HTTP endpoint.
    Verify the endpoint receives the resolved credential, retained audit facts are
    correct, and a failed resolution prevents the dependent model request.
-6. Cross-build all four host destinations using the pinned toolchains. Verify
+6. Build all four host destinations on their matching native runners. Verify
    actual build settings and dependency metadata, not just mocked compiler
    arguments. Keep existing repeat-build comparisons and run installed binaries
    from those archives in the existing native verification jobs, without rebuilding.
@@ -287,7 +258,7 @@ Run affected credential/configuration/authentication/command and release-script
 tests, plus existing required checks. Existing opt-in credential checks SHOULD
 qualify actual desktop approval (including locked/denied/canceled approval) and
 service-account reads using a dedicated test item. Confirm actual cancellation,
-account isolation and cleanup for the pinned SDK. Record real platform/app/SDK
+account isolation and forced child cleanup for the pinned SDK. Record real platform/app/SDK
 combinations separately from controlled tests. No test may require cloud writes,
 paid model calls, or printing a secret without separate authorization.
 
@@ -308,8 +279,8 @@ the actual foreground/service process, and that approval time counts toward the
 configured credential timeout. Do not suggest putting secrets in shell history
 or enabling unrestricted SDK debug output to troubleshoot production credentials.
 
-Update `.github/maintainers/CANDIDATE_RELEASES.md` with toolchain setup,
-Apple SDK provisioning, per-target compiler/sysroot selection, dependency checks
+Update `.github/maintainers/CANDIDATE_RELEASES.md` with the native runner matrix,
+compiler prerequisites, companion assembly where applicable, dependency checks
 and native artifact verification. Document build prerequisites separately from
 administrator runtime prerequisites. Installation MUST not require `op`.
 
@@ -318,7 +289,6 @@ Implementers MUST verify the pinned SDK and toolchain behavior against:
 [SDK desktop option](https://github.com/1Password/onepassword-sdk-go/blob/main/client_builder_cgo.go),
 [desktop library loading](https://github.com/1Password/onepassword-sdk-go/blob/main/internal/shared_lib_core.go),
 [secret resolution](https://github.com/1Password/onepassword-sdk-go/blob/main/secrets.go),
-[Go CGO cross-compilation](https://pkg.go.dev/cmd/cgo), and
-[osxcross SDK/toolchain setup](https://github.com/tpoechtrager/osxcross).
+[Go CGO](https://pkg.go.dev/cmd/cgo).
 Commit the selected dependency versions and build inputs; these upstream `main`
 links are implementation references, not release pins.

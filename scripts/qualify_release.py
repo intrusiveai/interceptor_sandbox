@@ -152,7 +152,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
             if python_ca:
                 tls_directory = work / "data/apps/python-ca/1/tls"
                 trust_checks = python_ca_fixture.inspect_images(run, docker, target, wrapper, tls_directory)
-            packaged = install / ("interceptor-linux" if host.startswith("darwin/") else "interceptor")
+            packaged = install / "interceptor-linux"
             expected = hashlib.sha256(packaged.read_bytes()).hexdigest()
             if lock["interceptor_binary_digest"] != "sha256:"+expected or lock["interceptor_version"] != version:
                 raise ValueError("wrapper lock does not identify the packaged executable")

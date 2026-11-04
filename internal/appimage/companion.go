@@ -27,24 +27,17 @@ type releaseMetadata struct {
 }
 
 func copyLinuxBinary(executable, destination, hostOS, arch, version, source string) error {
-	if hostOS == "linux" {
-		data, err := os.ReadFile(executable)
-		if err != nil {
-			return fmt.Errorf("read running Linux interceptor: %w", err)
-		}
-		return os.WriteFile(destination, data, 0555)
-	}
-	if hostOS != "darwin" {
+	if hostOS != "darwin" && hostOS != "linux" {
 		return fmt.Errorf("wrapper builds are unsupported on %s", hostOS)
 	}
-	data, err := packagedLinuxBinary(executable, arch, version, source)
+	data, err := packagedLinuxBinary(executable, hostOS, arch, version, source)
 	if err != nil {
-		return fmt.Errorf("packaged Linux companion: %w; re-extract the complete darwin-%s release archive for interceptor %s and keep interceptor, interceptor-linux and release.json together", err, arch, version)
+		return fmt.Errorf("packaged Linux companion: %w; re-extract the complete %s-%s release archive for interceptor %s and keep interceptor, interceptor-linux and release.json together", err, hostOS, arch, version)
 	}
 	return os.WriteFile(destination, data, 0555)
 }
 
-func packagedLinuxBinary(executable, arch, version, source string) ([]byte, error) {
+func packagedLinuxBinary(executable, hostOS, arch, version, source string) ([]byte, error) {
 	// Resolve symlink installations too; never search PATH or the working directory.
 	executable, err := filepath.EvalSymlinks(executable)
 	if err != nil {
@@ -59,7 +52,7 @@ func packagedLinuxBinary(executable, arch, version, source string) ([]byte, erro
 	if err := json.Unmarshal(raw, &metadata); err != nil {
 		return nil, fmt.Errorf("invalid release.json: %w", err)
 	}
-	if metadata.Version != version || source == "" || metadata.SourceCommit != source || metadata.Platform != "darwin/"+arch {
+	if metadata.Version != version || source == "" || metadata.SourceCommit != source || metadata.Platform != hostOS+"/"+arch {
 		return nil, fmt.Errorf("release.json does not match this CLI's version, source revision or platform")
 	}
 	host, err := os.ReadFile(executable)

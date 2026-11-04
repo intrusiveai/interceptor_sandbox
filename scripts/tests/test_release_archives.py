@@ -24,6 +24,8 @@ class ReleaseArchivesTest(unittest.TestCase):
         (self.root / "internal/appimage/postgresql-go.LICENSE").write_text("protocol client notices")
         (self.root / "internal/integrationcontract").mkdir(parents=True)
         (self.root / "internal/integrationcontract/contract.json").write_text(json.dumps({"interceptor_contract_version": "0.1.0"}))
+        (self.root / "docs").mkdir()
+        (self.root / "docs/ONEPASSWORD_NOTICES.md").write_text("SDK notices")
         self.calls = []
 
     def run_build_command(self, args, root, env=None):
@@ -38,11 +40,26 @@ class ReleaseArchivesTest(unittest.TestCase):
             Path(args[args.index("-o") + 1]).write_bytes((env["GOOS"] + env["GOARCH"]).encode())
         return ""
 
-    def build(self, platform):
-        output = self.root / platform.replace("/", "-")
-        with patch.object(builder, "run", side_effect=self.run_build_command):
-            builder.build(self.root, output, "0.1.2", platform)
+    def native_env(self, platform):
+        osname, arch = platform.split("/")
+        return {"GOOS": osname, "GOARCH": arch, "CGO_ENABLED": "1"}, {"cgo_enabled": True}
+
+    def build_at(self, output, platform):
+        companion = None
+        if platform.startswith("darwin/"):
+            companion = self.root / ("import-" + platform.replace("/", "-")) / builder.archive_name("0.1.2", platform.replace("darwin/", "linux/"))
+            if not companion.exists():
+                self.build_at(companion.parent, platform.replace("darwin/", "linux/"))
+                self.calls.clear()
+        with patch.object(builder, "run", side_effect=self.run_build_command), \
+             patch.object(builder, "native_environment", side_effect=self.native_env), \
+             patch.object(builder, "inspect_binary", return_value={}), \
+             patch.object(builder, "static_guest_environment", side_effect=lambda env: dict(env, CGO_ENABLED="0")):
+            builder.build(self.root, output, "0.1.2", platform, companion)
         return output / builder.archive_name("0.1.2", platform)
+
+    def build(self, platform):
+        return self.build_at(self.root / platform.replace("/", "-"), platform)
 
     def test_contents_integrity_and_identical_build_identity(self):
         for platform in builder.PLATFORMS:
@@ -56,8 +73,7 @@ class ReleaseArchivesTest(unittest.TestCase):
                 metadata = publisher.read_archive(path)
                 publisher.verify_archive_checksum(path, metadata)
                 names = ["interceptor", "release.json", "LICENSE"]
-                if platform.startswith("darwin/"):
-                    names.insert(1, "interceptor-linux")
+                names.insert(1, "interceptor-linux")
                 with tarfile.open(path) as archive:
                     self.assertEqual(archive.getnames(), ["interceptor_sandbox/" + name for name in names])
                     install = self.root / ("extracted-" + platform.replace("/", "-"))
@@ -66,27 +82,36 @@ class ReleaseArchivesTest(unittest.TestCase):
                     self.assertEqual(sorted(entry.name for entry in (install / "interceptor_sandbox").iterdir()),
                                      sorted(names))
                 repeated = self.root / ("repeat-" + platform.replace("/", "-"))
-                with patch.object(builder, "run", side_effect=self.run_build_command):
-                    builder.build(self.root, repeated, "0.1.2", platform)
+                self.build_at(repeated, platform)
                 self.assertEqual(path.read_bytes(), (repeated / path.name).read_bytes())
                 self.assertEqual(sums.read_bytes(), (repeated / sums.name).read_bytes())
                 self.assertEqual(metadata["version"], "0.1.2")
                 self.assertEqual(metadata["interceptor_contract_version"], "0.1.0")
                 self.assertEqual(metadata["source_commit"], "a" * 40)
                 builds = [(args, env) for args, env in self.calls if args[:2] == ["go", "build"]]
-                self.assertEqual(len(builds), 4 if platform.startswith("darwin/") else 2)
+                self.assertEqual(len(builds), 2 if platform.startswith("darwin/") else 4)
                 for args, env in builds:
                     flags = args[args.index("-ldflags") + 1]
                     self.assertIn("buildinfo.Version=0.1.2", flags)
                     self.assertIn("buildinfo.SourceCommit=" + "a" * 40, flags)
                     self.assertEqual(env["GOARCH"], platform.split("/")[1])
-                    self.assertEqual(env["CGO_ENABLED"], "0")
+                    self.assertEqual(env["CGO_ENABLED"], "0" if args[args.index("-o")+1].endswith("interceptor-linux") else "1")
+                self.assertTrue(metadata["cgo_enabled"])
+                self.assertEqual(metadata["linux_companion"]["platform"], "linux/" + platform.split("/")[1])
                 if platform.startswith("darwin/"):
-                    self.assertEqual(builds[1][1]["GOOS"], "linux")
-                    self.assertEqual(builds[0][0][builds[0][0].index("-ldflags")+1], builds[1][0][builds[1][0].index("-ldflags")+1])
-                    self.assertEqual(metadata["linux_companion"]["platform"], platform.replace("darwin/", "linux/"))
+                    self.assertTrue(all(env["GOOS"] == "darwin" for _, env in builds))
                 else:
-                    self.assertNotIn("linux_companion", metadata)
+                    self.assertEqual(builds[0][0][builds[0][0].index("-ldflags")+1], builds[1][0][builds[1][0].index("-ldflags")+1])
+
+    def test_imported_companion_rejects_mismatches_and_checksums(self):
+        path = self.build("linux/amd64")
+        good = (path, "0.1.2", "a"*40, "amd64", "0.1.0")
+        self.assertTrue(builder.imported_companion(*good))
+        for index, value in ((1, "0.1.3"), (2, "b"*40), (3, "arm64"), (4, "0.2.0")):
+            changed = list(good); changed[index] = value
+            with self.assertRaises(ValueError): builder.imported_companion(*changed)
+        path.with_name(builder.checksum_name("0.1.2", "linux/amd64")).write_text("wrong")
+        with self.assertRaises(ValueError): builder.imported_companion(*good)
 
     def test_both_macos_archives_reject_incomplete_or_changed_companion(self):
         for platform in ("darwin/amd64", "darwin/arm64"):
