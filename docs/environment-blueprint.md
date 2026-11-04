@@ -803,3 +803,10 @@ requires review and resealing.
 See [PostgreSQL and pgvector](postgresql.md) for the managed database Blueprint,
 wrapper packaging, verified driver TLS, database injection surfaces, independent
 committed-state oracles, evidence and coordinated restore contract.
+
+## Declared HTTPS seams
+
+`network.https_seams` declares exact DNS hostnames and IDs for external HTTPS
+services. DNS and TLS must be enabled. Host origins, real authentication and debug
+settings are provided separately to `interceptor run --https-seam-config FILE`.
+See [Declared HTTPS egress](https-egress.md) for configuration and limits.

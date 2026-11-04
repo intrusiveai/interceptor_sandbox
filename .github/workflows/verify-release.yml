@@ -224,6 +224,22 @@ jobs:
           python3 scripts/qualify_release.py --archive "dist/archives/interceptor_sandbox-v${RELEASE_VERSION}-linux_${ARCH}.tar.gz" \
             --version "$RELEASE_VERSION" --source "$GITHUB_SHA" --adapter-language node \
             --image node:22-bookworm-slim --client "$RUNNER_TEMP/local-api-smoke" --output dist/qualification/node-adapter
+      - name: Qualify declared HTTPS seams from the downloaded archive
+        env:
+          ARCH: ${{ matrix.arch }}
+          RELEASE_VERSION: ${{ needs.context.outputs.version }}
+        run: |
+          for transport in spool unix; do
+            for debug in off on; do
+              debug_args=()
+              if [ "$debug" = on ]; then debug_args+=(--seam-debug); fi
+              python3 scripts/qualify_release.py --archive "dist/archives/interceptor_sandbox-v${RELEASE_VERSION}-linux_${ARCH}.tar.gz" \
+                --version "$RELEASE_VERSION" --source "$GITHUB_SHA" --adapter-language python --https-seams \
+                --bridge-transport "$transport" "${debug_args[@]}" \
+                --image python:3.12-slim --client "$RUNNER_TEMP/local-api-smoke" \
+                --output "dist/qualification/https-seams-$transport-$debug"
+            done
+          done
       - name: Qualify application state snapshots from the downloaded archive
         env:
           ARCH: ${{ matrix.arch }}

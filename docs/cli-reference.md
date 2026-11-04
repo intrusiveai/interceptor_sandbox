@@ -363,3 +363,10 @@ execution. See [host lifetime and recovery](host-lifetime.md).
 Host provider/store authentication, foreground execution, explicit environment keys
 and GitHub OIDC MUST follow [the common auth contract](cloud-authentication.md).
 Optional services run the same `run` command; see [host lifetime](host-lifetime.md).
+
+### HTTPS seam bindings
+
+`run --https-seam-config FILE` loads host-only fixed HTTPS destinations, optional
+private CA bundles, authentication references and per-seam debugging. Credentials
+use `--credential-config FILE`, which can be shared with model-provider references.
+Every Blueprint seam requires one binding. See [HTTPS egress](https-egress.md).

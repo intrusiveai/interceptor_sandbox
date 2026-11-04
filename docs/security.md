@@ -46,8 +46,8 @@ hard-codes an external resolver is still blocked by `--network none`; Intercepto
 does not add packet-redirection or firewall authority merely to disguise that
 failure as a local DNS response.
 
-Local TLS is termination by the simulated-service front door, not a proxy to a
-real origin. A build-generated private CA signs a certificate limited to
+Local TLS terminates at the sandbox front door. Simulated services stay local;
+explicit HTTPS seams use separate host-owned fixed-origin bindings. A build-generated private CA signs a certificate limited to
 declared hostnames. Only the public CA enters the wrapper image. The server
 private key is stored under the private host data root and mounted read-only in
 a supervisor-only directory. The CA signing key is discarded after issuance.
@@ -58,14 +58,19 @@ injection may change only a successful response body; it cannot add a listener,
 route, redirect, upstream destination, or generic proxy behavior. Static
 attacker sinks reject response injection.
 
-The only intended external request path is:
+Model traffic uses this external request path:
 
 ```text
 application -> loopback model proxy -> protected bridge
             -> host connector -> selected fixed provider or AWS Bedrock
 ```
 
-The connector accepts only a native model API supported by the selected host
+Declared [HTTPS seams](https-egress.md) provide a separate request/response path
+through the same private transport. Seam traffic is excluded from response
+injection and campaign evidence. Host-managed authentication, verified upstream
+TLS and fixed origins are required; general container networking stays disabled.
+
+The model connector accepts only a native model API supported by the selected host
 adapter, requests from the current session, bounded request bodies, and model
 names explicitly allowed by the operator. The application cannot choose a
 different HTTP destination or host AWS region. HTTP connectors reject redirects

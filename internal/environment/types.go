@@ -161,11 +161,17 @@ type TimeConfig struct {
 }
 
 // NetworkSimulation defines the closed, loopback-only name and HTTP transport
-// plane visible to the application. It never configures upstream forwarding.
+// plane visible to the application. Upstream seam bindings stay on the host.
+type HTTPSSeam struct {
+	ID       string `yaml:"id" json:"id"`
+	Hostname string `yaml:"hostname" json:"hostname"`
+}
+
 type NetworkSimulation struct {
-	DNS  DNSConfig       `yaml:"dns,omitempty" json:"dns,omitempty"`
-	HTTP FrontDoorConfig `yaml:"http,omitempty" json:"http,omitempty"`
-	TLS  TLSConfig       `yaml:"tls,omitempty" json:"tls,omitempty"`
+	HTTPSSeams []HTTPSSeam     `yaml:"https_seams,omitempty" json:"https_seams,omitempty"`
+	DNS        DNSConfig       `yaml:"dns,omitempty" json:"dns,omitempty"`
+	HTTP       FrontDoorConfig `yaml:"http,omitempty" json:"http,omitempty"`
+	TLS        TLSConfig       `yaml:"tls,omitempty" json:"tls,omitempty"`
 }
 
 type DNSConfig struct {

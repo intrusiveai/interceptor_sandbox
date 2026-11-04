@@ -266,7 +266,7 @@ type UnixConnectorClient struct {
 
 func NewUnixConnectorClient(socketPath string) *UnixConnectorClient {
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+		return DialUnix(ctx, socketPath)
 	}}
 	return &UnixConnectorClient{client: &http.Client{Transport: transport}}
 }
@@ -329,7 +329,7 @@ func ListenUnix(socketPath string, handler http.Handler) (*http.Server, net.List
 	} else if !os.IsNotExist(err) {
 		return nil, nil, err
 	}
-	listener, err := net.Listen("unix", socketPath)
+	listener, err := listenUnix(socketPath)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -154,6 +154,12 @@ func List(dataRoot string) ([]Metadata, error) {
 			continue
 		}
 		metadata, _, err := Load(dataRoot, entry.Name())
+		// The directory becomes visible before the first atomic metadata write,
+		// and may disappear during purge. Only published metadata is listable;
+		// malformed or unreadable metadata must still fail discovery.
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}

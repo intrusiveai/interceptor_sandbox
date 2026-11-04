@@ -381,6 +381,23 @@ func Validate(directory string) (*ValidationReport, error) {
 			add(fmt.Errorf("%s.max_capture_bytes must not be negative", prefix))
 		}
 	}
+	seamIDs := map[string]struct{}{}
+	for i, seam := range blueprint.Network.HTTPSSeams {
+		prefix := fmt.Sprintf("network.https_seams[%d]", i)
+		add(validateID(prefix+".id", seam.ID, seamIDs))
+		_, attacker := attackerIDs[seam.ID]
+		_, issuer := identityResult.issuerIDs[seam.ID]
+		if _, exists := serviceIDs[seam.ID]; exists || attacker || issuer || seam.ID == "model-proxy" {
+			add(fmt.Errorf("%s.id conflicts with a service", prefix))
+		}
+		if seam.Hostname != strings.TrimSpace(seam.Hostname) {
+			add(fmt.Errorf("%s.hostname must not contain surrounding whitespace", prefix))
+		}
+		add(validateHostnames(prefix, []string{seam.Hostname}, hostnames, seam.ID))
+		if !blueprint.Network.DNS.Enabled || !blueprint.Network.TLS.Enabled {
+			add(errors.New("HTTPS seams require network DNS and TLS"))
+		}
+	}
 	if (blueprint.Network.DNS.Enabled || blueprint.Network.HTTP.Enabled || blueprint.Network.TLS.Enabled) && len(hostnames) == 0 {
 		add(errors.New("enabled network simulation requires at least one declared service hostname"))
 	}
@@ -441,7 +458,8 @@ func Validate(directory string) (*ValidationReport, error) {
 		if credential.Value == "" {
 			add(fmt.Errorf("%s.value is required", prefix))
 		}
-		if _, exists := serviceIDs[credential.AcceptedBy]; !exists && credential.AcceptedBy != "model-proxy" {
+		_, seam := seamIDs[credential.AcceptedBy]
+		if _, exists := serviceIDs[credential.AcceptedBy]; !exists && !seam && credential.AcceptedBy != "model-proxy" {
 			add(fmt.Errorf("%s.accepted_by references unknown service %q", prefix, credential.AcceptedBy))
 		}
 		if current, exists := blueprint.Application.Launch.Environment[credential.EnvironmentVariable]; exists && current != credential.Value {

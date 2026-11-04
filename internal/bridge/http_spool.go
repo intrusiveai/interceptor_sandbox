@@ -22,11 +22,13 @@ import (
 )
 
 const (
-	ApplicationChannel = "application"
-	ControlChannel     = "control"
-	defaultHTTPMax     = int64(32 << 20)
-	defaultHTTPTimeout = 10 * time.Minute
-	orphanGrace        = time.Minute
+	DefaultHTTPConcurrency = 8
+	SeamChannel            = "https-seam"
+	ApplicationChannel     = "application"
+	ControlChannel         = "control"
+	defaultHTTPMax         = int64(32 << 20)
+	defaultHTTPTimeout     = 10 * time.Minute
+	orphanGrace            = time.Minute
 )
 
 type HTTPRequestFrame struct {
@@ -80,7 +82,7 @@ func NewHTTPSpoolClient(root string, maxBytes int64, timeout time.Duration) (*HT
 }
 
 func (c *HTTPSpoolClient) Do(ctx context.Context, channel, method, path string, headers http.Header, body []byte) (HTTPResponseFrame, error) {
-	if channel != ApplicationChannel && channel != ControlChannel {
+	if channel != ApplicationChannel && channel != ControlChannel && channel != SeamChannel {
 		return HTTPResponseFrame{}, fmt.Errorf("unsupported HTTP spool channel %q", channel)
 	}
 	if method == "" || !strings.HasPrefix(path, "/") || strings.ContainsAny(path, "\x00\r\n") {
@@ -143,6 +145,7 @@ func (c *HTTPSpoolClient) Do(ctx context.Context, channel, method, path string, 
 }
 
 type HTTPSpoolServerConfig struct {
+	Seam http.Handler // Exclusive outbound seam lane; cannot dispatch application/control calls.
 	// ControlClass opts self-serializing handlers into bounded concurrent dispatch.
 	// Return "operation" for ordinary work, "priority" for closure/status, or ""
 	// for the legacy serial control path. Classification does not grant authority.
@@ -160,14 +163,14 @@ type HTTPSpoolServerConfig struct {
 // configured bound. Legacy control requests retain stable serial ordering;
 // an explicitly configured handler may own its own mutation serialization.
 func ServeHTTPSpool(ctx context.Context, config HTTPSpoolServerConfig) error {
-	if config.Root == "" || config.Application == nil || config.Control == nil {
-		return errors.New("HTTP spool requires a root and both handlers")
+	if config.Root == "" || (config.Seam == nil && (config.Application == nil || config.Control == nil)) || (config.Seam != nil && (config.Application != nil || config.Control != nil)) {
+		return errors.New("HTTP spool requires a root and either both inbound handlers or an exclusive seam handler")
 	}
 	if config.MaxBytes <= 0 {
 		config.MaxBytes = defaultHTTPMax
 	}
 	if config.MaxConcurrentApplication <= 0 {
-		config.MaxConcurrentApplication = 8
+		config.MaxConcurrentApplication = DefaultHTTPConcurrency
 	}
 	if config.PollPeriod <= 0 {
 		config.PollPeriod = 10 * time.Millisecond
@@ -238,7 +241,7 @@ func serviceHTTPSpoolBatch(ctx context.Context, config HTTPSpoolServerConfig, se
 			continue
 		}
 		var frame HTTPRequestFrame
-		if err := decodeStrictJSON(data, &frame); err != nil || !validHTTPRequestFrame(frame, name, config.MaxBytes) {
+		if err := decodeStrictJSON(data, &frame); err != nil || !validHTTPRequestFrame(frame, name, config.MaxBytes) || (frame.Channel == SeamChannel) != (config.Seam != nil) {
 			_ = os.Remove(processingPath)
 			continue
 		}
@@ -297,6 +300,9 @@ func processHTTPSpoolRequest(parent context.Context, config HTTPSpoolServerConfi
 	watchDone := make(chan struct{})
 	go watchHTTPCancellation(requestContext, cancelPath, cancel, watchDone)
 	handler := config.Application
+	if frame.Channel == SeamChannel {
+		handler = config.Seam
+	}
 	if frame.Channel == ControlChannel {
 		handler = config.Control
 	}
@@ -398,7 +404,7 @@ func cleanupHTTPSpool(root string, now time.Time) error {
 }
 
 func validHTTPRequestFrame(frame HTTPRequestFrame, filename string, maxBytes int64) bool {
-	return filename == frame.ID+".json" && (frame.Channel == ApplicationChannel || frame.Channel == ControlChannel) && frame.Method != "" && strings.HasPrefix(frame.Path, "/") && !strings.ContainsAny(frame.Path, "\x00\r\n") && !frame.CreatedAt.IsZero() && frame.ExpiresAt.After(frame.CreatedAt) && int64(len(frame.Body)) <= maxBytes
+	return filename == frame.ID+".json" && (frame.Channel == ApplicationChannel || frame.Channel == ControlChannel || frame.Channel == SeamChannel) && frame.Method != "" && strings.HasPrefix(frame.Path, "/") && !strings.ContainsAny(frame.Path, "\x00\r\n") && !frame.CreatedAt.IsZero() && frame.ExpiresAt.After(frame.CreatedAt) && int64(len(frame.Body)) <= maxBytes
 }
 
 func httpSpoolPath(root, directory, id string) string {
