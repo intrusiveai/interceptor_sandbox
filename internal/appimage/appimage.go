@@ -270,7 +270,7 @@ func buildLinuxBinary(ctx context.Context, destination string) error {
 	if err != nil {
 		return fmt.Errorf("locate running interceptor: %w", err)
 	}
-	if runtime.GOOS == "linux" || !strings.HasSuffix(buildinfo.Version, "-dev") || buildinfo.SourceCommit != "" {
+	if !strings.HasSuffix(buildinfo.Version, "-dev") || buildinfo.SourceCommit != "" {
 		return copyLinuxBinary(current, destination, runtime.GOOS, runtime.GOARCH, buildinfo.Version, buildinfo.SourceCommit)
 	}
 	// Source builds only. Released CLIs never search for a checkout or invoke Go.

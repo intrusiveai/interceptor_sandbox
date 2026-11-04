@@ -114,10 +114,8 @@ def read_archive(path):
         if platform not in PLATFORMS or path.name != archive_name(metadata.get("version"), platform):
             raise ValueError("release archive platform/filename differs")
         names = ["interceptor", "release.json", "LICENSE"]
-        if platform.startswith("darwin/"):
+        if platform.startswith("darwin/") or metadata.get("cgo_enabled") is True:
             names.insert(1, "interceptor-linux")
-        elif "linux_companion" in metadata:
-            raise ValueError("Linux releases must not declare a companion")
         if [member.name for member in members] != [prefix + name for name in names]:
             raise ValueError("release archive has an unexpected file inventory")
         executable = archive.extractfile(prefix + "interceptor").read()
@@ -125,7 +123,7 @@ def read_archive(path):
             raise ValueError("release archive binary digest differs")
         if archive.getmember(prefix + "interceptor").mode != 0o755:
             raise ValueError("release CLI must be executable")
-        if platform.startswith("darwin/"):
+        if platform.startswith("darwin/") or metadata.get("cgo_enabled") is True:
             companion = archive.extractfile(prefix + "interceptor-linux").read()
             expected = {"filename": "interceptor-linux", "platform": platform.replace("darwin/", "linux/"),
                         "sha256": hashlib.sha256(companion).hexdigest()}

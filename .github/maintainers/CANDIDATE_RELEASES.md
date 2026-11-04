@@ -480,3 +480,32 @@ in the standard public documentation or release archives.
    Deliver them to both `main` and the next candidate before its tag is built.
    Confirm live OIDC and public delivery using step 7; local tests alone cannot
    establish deployment readiness.
+
+## Native release builds
+
+Candidate host binaries compile on matching runners: `ubuntu-24.04` (AMD64),
+`ubuntu-24.04-arm` (ARM64), `macos-15-intel` (AMD64) and `macos-15` (ARM64).
+The scripts select the native compiler, enable CGO for desktop SDK support and
+reject a different requested OS/architecture. macOS uses Xcode's installed SDK
+and deployment target 15.0. No Apple SDK URL or checksum repository setting is
+needed. Keep the pinned Go version in the workflow and build script aligned.
+
+Each job builds twice and compares bytes, verifies native library requirements,
+and checks SDK initialization offline without credentials. Existing archived
+contract checks and runtime qualification remain publication gates. Linux uses
+the Ubuntu 24.04 libc baseline; macOS links system libraries. The 1Password app
+supplies its desktop IPC library at runtime and is not included in the archive.
+
+For a local release build, use a clean committed checkout, the pinned Go version
+and a native C compiler. Select only the current host platform. Run the existing
+archive and installed-binary checks before publication. CI's four native runners
+are required to validate all four release outputs.
+
+Linux jobs also build a static `interceptor-linux` companion. Every archive includes
+it alongside `interceptor` and `release.json`; keep all three together. macOS jobs
+wait for the corresponding Linux job and import its checksum-verified archive
+using `--linux-companion-archive PATH`. The source revision, version, architecture
+and contract must match. To build a macOS release locally, first obtain that Linux
+archive plus its `-SHA256SUMS` file from the same source revision's native Linux
+build. Linux builds do not take this option. The static companion runs inside the
+sandbox; the CGO host executable stays on the host.
