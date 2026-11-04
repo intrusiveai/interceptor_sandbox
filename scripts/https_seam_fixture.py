@@ -52,7 +52,7 @@ authorityKeyIdentifier=keyid:always
                 self.wfile.write(body)
 
             def do_GET(self):
-                if self.path != '/v1/secret/data/qa':
+                if self.path.split('?', 1)[0] != '/v1/secret/data/qa':
                     self.reply(404, {})
                     return
                 self.reply(200, {'data': {'data': fixture.secrets, 'metadata': {'version': 1}}})
@@ -127,6 +127,11 @@ authorityKeyIdentifier=keyid:always
 
     def verify(self, output, data, debug):
         if self.failures: raise ValueError(self.failures)
+        if sum(c['kind']=='tracing' for c in self.calls) != 4:
+            raise ValueError('unexpected SDK request count, including pre-request failure')
+        stderr = '\n'.join(p.read_text() for p in data.glob('sessions/*/logs/application.stderr.log'))
+        if 'Langfuse initialization failed before a request' not in stderr or 'Sample rate must be between' not in stderr:
+            raise ValueError('SDK initialization failure not diagnosable through application stderr')
         if not any(c.get('startup') for c in self.calls): raise ValueError('startup trace not delivered')
         if not any(c.get('shutdown') for c in self.calls): raise ValueError('shutdown trace not delivered')
         if [c['message'] for c in self.calls if c['kind']=='guardrail'] != ['allow','deny']:
@@ -155,4 +160,4 @@ authorityKeyIdentifier=keyid:always
             shutil.copyfile(file,output/file.name)
         return {'pinned_langfuse_sdk':'4.7.0','live_langfuse':False,'upstream':'local HTTPS fixture',
                 'private_ca':True,'host_managed_auth':True,'startup_and_shutdown_export':True,
-                'guardrail_allow_deny':True,'debug':debug,'payloads_excluded_from_evidence':True}
+                'guardrail_allow_deny':True,'sdk_pre_request_failure_diagnosed':True,'debug':debug,'payloads_excluded_from_evidence':True}

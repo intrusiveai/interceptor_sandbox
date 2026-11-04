@@ -390,6 +390,9 @@ func Validate(directory string) (*ValidationReport, error) {
 		if _, exists := serviceIDs[seam.ID]; exists || attacker || issuer || seam.ID == "model-proxy" {
 			add(fmt.Errorf("%s.id conflicts with a service", prefix))
 		}
+		if seam.Hostname != strings.TrimSpace(seam.Hostname) {
+			add(fmt.Errorf("%s.hostname must not contain surrounding whitespace", prefix))
+		}
 		add(validateHostnames(prefix, []string{seam.Hostname}, hostnames, seam.ID))
 		if !blueprint.Network.DNS.Enabled || !blueprint.Network.TLS.Enabled {
 			add(errors.New("HTTPS seams require network DNS and TLS"))

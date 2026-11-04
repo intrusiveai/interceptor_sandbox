@@ -555,23 +555,8 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		metadata.ApplicationURL = "http://" + applicationListener.Addr().String()
 		metadata.ControlURL = "http://" + controlListener.Addr().String()
 	}
-	if err := config.HTTPSSeams.Check(blueprint.Network.HTTPSSeams); err != nil {
+	if err := bindHTTPSSeams(config.HTTPSSeams, blueprint, dataRoot, metadata, paths); err != nil {
 		return metadata, err
-	}
-	if len(blueprint.Network.HTTPSSeams) > 0 {
-		binding := config.HTTPSSeams.Digest()
-		if metadata.ParentSessionID != "" {
-			previous, err := os.ReadFile(filepath.Join(session.PathsFor(dataRoot, metadata.ParentSessionID).Root, "https-seam-binding"))
-			if err != nil || string(previous) != binding {
-				return metadata, errors.New("HTTPS seam bindings changed since snapshot; use the original origin, credential references and trust bundle")
-			}
-		}
-		if err := fsutil.WriteFile(filepath.Join(paths.Root, "https-seam-binding"), []byte(binding), 0600); err != nil {
-			return metadata, err
-		}
-		if err := fsutil.WriteJSON(filepath.Join(paths.Sockets, "https-seam-policy.json"), config.HTTPSSeams.StrippedHeaders(), 0600); err != nil {
-			return metadata, err
-		}
 	}
 	containerName := "interceptor-" + metadata.ID
 	if err := session.Transition(&metadata, session.Starting); err != nil {
@@ -1226,4 +1211,26 @@ func embeddingsProvider(ctx context.Context, config Config) (bridge.ModelProvide
 		return nil, errors.New("unsupported embeddings provider")
 	}
 	return bridge.NewOpenAIEmbeddingsProvider(bridge.HTTPProviderConfig{BaseURL: config.EmbeddingsURL, APIKey: config.EmbeddingsAPIKey})
+}
+
+func bindHTTPSSeams(prepared *httpsseam.Prepared, blueprint *environment.Blueprint, dataRoot string, metadata session.Metadata, paths session.Paths) error {
+	if err := prepared.Check(blueprint.Network.HTTPSSeams); err != nil {
+		return err
+	}
+	if len(blueprint.Network.HTTPSSeams) > 0 {
+		binding := prepared.Digest()
+		if metadata.ParentSessionID != "" {
+			previous, err := os.ReadFile(filepath.Join(session.PathsFor(dataRoot, metadata.ParentSessionID).Root, "https-seam-binding"))
+			if err != nil || string(previous) != binding {
+				return errors.New("HTTPS seam bindings changed since snapshot; use the original origin, credential references and trust bundle")
+			}
+		}
+		if err := fsutil.WriteFile(filepath.Join(paths.Root, "https-seam-binding"), []byte(binding), 0600); err != nil {
+			return err
+		}
+		if err := fsutil.WriteJSON(filepath.Join(paths.Sockets, "https-seam-policy.json"), prepared.StrippedHeaders(), 0600); err != nil {
+			return err
+		}
+	}
+	return nil
 }

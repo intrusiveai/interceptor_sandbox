@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/intrusive-ai/interceptor-sandbox/internal/bridge"
 	"golang.org/x/net/http/httpguts"
 )
 
@@ -33,6 +34,7 @@ type Response struct {
 	Body    []byte      `json:"body"`
 }
 type Connector struct {
+	slots       chan struct{}
 	prepared    *Prepared
 	session     string
 	maximum     int64
@@ -52,7 +54,7 @@ func NewConnector(p *Prepared, session, logs string, maximum int64, timeout time
 	if err != nil {
 		return nil, err
 	}
-	c := &Connector{prepared: p, session: session, maximum: maximum, timeout: timeout, diagnostics: d, clients: map[string]*http.Client{}, seen: map[uint64]bool{}}
+	c := &Connector{slots: make(chan struct{}, bridge.DefaultHTTPConcurrency), prepared: p, session: session, maximum: maximum, timeout: timeout, diagnostics: d, clients: map[string]*http.Client{}, seen: map[uint64]bool{}}
 	for id, e := range p.endpoints {
 		// No pooled-connection retry: even an idempotent-looking request can have
 		// external effects. A new connection also makes connection logs unambiguous.
@@ -90,6 +92,13 @@ func decode(data []byte, out any) error {
 	return nil
 }
 func (c *Connector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	select {
+	case c.slots <- struct{}{}:
+		defer func() { <-c.slots }()
+	default:
+		http.Error(w, "HTTPS seam is busy", 503)
+		return
+	}
 	if r.Method != "POST" || r.URL.RequestURI() != "/v1/https-seam" {
 		http.Error(w, "invalid seam bridge route", 400)
 		return

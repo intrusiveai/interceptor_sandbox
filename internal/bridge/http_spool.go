@@ -22,12 +22,13 @@ import (
 )
 
 const (
-	SeamChannel        = "https-seam"
-	ApplicationChannel = "application"
-	ControlChannel     = "control"
-	defaultHTTPMax     = int64(32 << 20)
-	defaultHTTPTimeout = 10 * time.Minute
-	orphanGrace        = time.Minute
+	DefaultHTTPConcurrency = 8
+	SeamChannel            = "https-seam"
+	ApplicationChannel     = "application"
+	ControlChannel         = "control"
+	defaultHTTPMax         = int64(32 << 20)
+	defaultHTTPTimeout     = 10 * time.Minute
+	orphanGrace            = time.Minute
 )
 
 type HTTPRequestFrame struct {
@@ -169,7 +170,7 @@ func ServeHTTPSpool(ctx context.Context, config HTTPSpoolServerConfig) error {
 		config.MaxBytes = defaultHTTPMax
 	}
 	if config.MaxConcurrentApplication <= 0 {
-		config.MaxConcurrentApplication = 8
+		config.MaxConcurrentApplication = DefaultHTTPConcurrency
 	}
 	if config.PollPeriod <= 0 {
 		config.PollPeriod = 10 * time.Millisecond

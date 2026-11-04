@@ -337,3 +337,117 @@ func TestBindingValidation(t *testing.T) {
 		t.Fatal("origin change not bound")
 	}
 }
+
+func TestDiagnosticFailureDoesNotChangeExchange(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(401)
+		_, _ = w.Write([]byte("configuration rejected"))
+	}))
+	defer upstream.Close()
+	p, _ := configuration(t, upstream, Auth{Kind: "none"}, true)
+	host, err := NewConnector(p, "session-test", t.TempDir(), 1024, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	_ = host.diagnostics.captures["tracing"].Close()
+	result, _, err := host.forward(context.Background(), frame("request"))
+	if err != nil || result.Status != 401 || string(result.Body) != "configuration rejected" || calls.Load() != 1 {
+		t.Fatalf("diagnostic failure changed upstream exchange: %+v %v", result, err)
+	}
+}
+func TestSnapshotWaitsForAdmittedSeamRequest(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { close(entered); <-release; w.WriteHeader(204) }))
+	defer upstream.Close()
+	p, _ := configuration(t, upstream, Auth{Kind: "none"}, false)
+	host, err := NewConnector(p, "session-test", t.TempDir(), 1024, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	directory, err := os.MkdirTemp("", "seam-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	path := filepath.Join(directory, "seam.sock")
+	server, listener, err := bridge.ListenUnix(path, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	go server.Serve(listener)
+	client, err := NewClient("session-test", "unix", path, 1024, time.Second, p.StrippedHeaders())
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan int, 1)
+	go func() {
+		r := httptest.NewRequest("POST", "https://trace.example/", nil)
+		r.RequestURI = "/"
+		w := httptest.NewRecorder()
+		client.Handler("tracing").ServeHTTP(w, r)
+		done <- w.Code
+	}()
+	<-entered
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := client.Pause(ctx); err == nil {
+		t.Fatal("snapshot admitted before in-flight request drained")
+	}
+	close(release)
+	if status := <-done; status != 204 {
+		t.Fatalf("drain altered exchange: %d", status)
+	}
+	if err := client.Pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	client.Resume()
+}
+
+func TestConnectorBoundsConcurrentExchanges(t *testing.T) {
+	entered := make(chan struct{}, bridge.DefaultHTTPConcurrency)
+	release := make(chan struct{})
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { entered <- struct{}{}; <-release; w.WriteHeader(204) }))
+	defer upstream.Close()
+	p, _ := configuration(t, upstream, Auth{Kind: "none"}, false)
+	host, err := NewConnector(p, "session-test", t.TempDir(), 1024, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	done := make(chan int, bridge.DefaultHTTPConcurrency)
+	for n := 1; n <= bridge.DefaultHTTPConcurrency; n++ {
+		go func(n int) {
+			f := frame("")
+			f.Sequence = uint64(n)
+			f.Expires = time.Now().Add(4 * time.Second)
+			raw, _ := json.Marshal(f)
+			w := httptest.NewRecorder()
+			host.ServeHTTP(w, httptest.NewRequest("POST", "http://bridge/v1/https-seam", bytes.NewReader(raw)))
+			done <- w.Code
+		}(n)
+	}
+	for n := 0; n < bridge.DefaultHTTPConcurrency; n++ {
+		select {
+		case <-entered:
+		case <-time.After(3 * time.Second):
+			close(release)
+			t.Fatal("requests did not reach upstream")
+		}
+	}
+	w := httptest.NewRecorder()
+	host.ServeHTTP(w, httptest.NewRequest("POST", "http://bridge/v1/https-seam", nil))
+	close(release)
+	if w.Code != 503 {
+		t.Fatalf("overload accepted: %d", w.Code)
+	}
+	for n := 0; n < bridge.DefaultHTTPConcurrency; n++ {
+		if code := <-done; code != 200 {
+			t.Errorf("admitted request failed: %d", code)
+		}
+	}
+}

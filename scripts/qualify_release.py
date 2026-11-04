@@ -31,6 +31,8 @@ from build_release import ARCHIVE_ROOT
 
 
 def qualify(archive, version, source, base_image, output, client, adapter_language=None, embeddings=False, python_ca=False, state_snapshots=False, evidence_failure=False, postgresql=False, example_directory=None, customer_support=False, database_test=None, titan=False, public_ca_umask=None, https_seams=False, seam_debug=False, bridge_transport="spool"):
+    if seam_debug and not https_seams:
+        raise ValueError("--seam-debug requires --https-seams")
     if https_seams and (adapter_language != "python" or embeddings or python_ca or state_snapshots or postgresql or titan or public_ca_umask):
         raise ValueError("HTTPS seam qualification requires standalone Python mode")
     if public_ca_umask is not None and (public_ca_umask not in ('022', '077') or adapter_language or embeddings or python_ca or state_snapshots or postgresql or titan):
@@ -254,6 +256,11 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                     if any(m["Destination"] == "/app" or m["Destination"].startswith("/app/") for m in mounts):
                         raise ValueError("application/adapter source is mounted instead of installed")
                     (output / "mounts.json").write_text(json.dumps(mounts, indent=2)+"\n")
+                    if https_seams:
+                        if run(docker, 'inspect', '--format', '{{.HostConfig.NetworkMode}}', active[0]) != 'none':
+                            raise ValueError('HTTPS seam enabled general container networking')
+                        run(docker, 'exec', '--user', '20000:20000', active[0], '/bin/sh', '-c',
+                            'test ! -r /run/interceptor-session/sockets/https-seam-policy.json && test ! -x /run/interceptor-session/logs && test ! -r /run/interceptor-tls/server-key.pem')
                     if postgresql:
                         run(docker, 'exec', '--user', str(os.getuid()), active[0], '/bin/sh', '-c',
                             'test -s /opt/interceptor/environment/environment.yaml && test -s /run/interceptor-tls/server-key.pem && test -d /run/interceptor-session/pg/database/data')
@@ -310,6 +317,8 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                 result['state_snapshots'] = {'model_requests': len(requests), 'identical_continuation': True, 'restores': 2,
                                              'sessions': native['sessions'], 'live_provider': False}
                 result['observed_evidence'] = verify_observed_evidence(output, evidence_failure)
+            elif https_seams:
+                result['https_seams'] = fixture.verify(output, work / 'data', seam_debug)
             elif fixture:
                 result['embeddings'] = fixture.verify(output)
             (output / "result.json").write_text(json.dumps(result, indent=2)+"\n")

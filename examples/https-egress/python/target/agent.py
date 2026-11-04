@@ -1,13 +1,15 @@
 """A normal tracing + guardrail application, with no Interceptor imports."""
 import json
+import logging
 import os
 import socket
 import sys
 import urllib.request
-from langfuse import get_client
+from langfuse import Langfuse, get_client
 
 class Agent:
     def __init__(self):
+        print("application initialized", file=sys.stderr)
         self.tracing = get_client()
         with self.tracing.start_as_current_observation(name="https-seam-startup"):
             pass
@@ -21,6 +23,12 @@ class Agent:
 
     def invoke(self, value):
         message = value["message"]
+        if message == "sdk-error":
+            try:
+                Langfuse(sample_rate=2.0)
+            except ValueError:
+                logging.exception("Langfuse initialization failed before a request")
+                raise
         with self.tracing.start_as_current_observation(name="https-seam-guardrail"):
             request = urllib.request.Request(os.environ["GUARDRAIL_BASE_URL"] + "/check",
                 data=json.dumps({"text": message, "diagnostic": "request-sentinel"}).encode(),

@@ -12,7 +12,7 @@ import (
 
 func qualifyHTTPSSeams(binding localapi.Binding, output string, limit int64) {
 	a := attempt(binding)
-	for _, message := range []string{"allow", "deny"} {
+	for _, message := range []string{"allow", "deny", "sdk-error"} {
 		input, _ := json.Marshal(map[string]string{"message": message})
 		raw := success(operation(binding, "application.invoke", map[string]any{"operation": "ask", "input": input, "media_type": "application/json", "attempt_id": a.AttemptID, "payload_digest": a.Payload.Digest}, &a))
 		var turn struct {
@@ -20,6 +20,10 @@ func qualifyHTTPSSeams(binding localapi.Binding, output string, limit int64) {
 			Status string `json:"status"`
 		}
 		must(json.Unmarshal(raw, &turn))
+		if message == "sdk-error" {
+			require(turn.Status != "complete", "invalid SDK configuration reported success")
+			continue
+		}
 		require(turn.Status == "complete", string(raw))
 		var view adaptive.ObservationView
 		must(json.Unmarshal(success(operation(binding, "observation.read", adaptive.ObservationRequest{TurnID: turn.ID}, &a)), &view))

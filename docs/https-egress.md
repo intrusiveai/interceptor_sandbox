@@ -113,7 +113,9 @@ The initial transport supports bounded exchanges, not gRPC, WebSockets, streamin
 CONNECT tunnels, cookie-based authentication, or mutual TLS. Message bodies use
 the Blueprint's `limits.max_blob_bytes` bound. Exchange deadlines use the existing
 application turn timeout, capped at the private bridge's ten-minute limit, including
-background requests. For credential-bearing responses and debug decoding, content
+background requests. Admission uses the existing private HTTP bridge concurrency
+bound; overload returns a failure without queuing unlimited exchanges.
+For credential-bearing responses and debug decoding, content
 encoding must be identity or gzip; unsafe/uninspectable content fails closed.
 
 Background SDK batching works without an active turn. During coordinated snapshots,

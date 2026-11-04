@@ -15,6 +15,7 @@ import (
 )
 
 type Client struct {
+	slots             chan struct{}
 	ConnectionFailure func(string, string)
 	session           string
 	maximum           int64
@@ -30,7 +31,7 @@ type Client struct {
 }
 
 func NewClient(session, transport, path string, maximum int64, timeout time.Duration, stripped []string) (*Client, error) {
-	c := &Client{session: session, maximum: maximum, timeout: timeout, stripped: stripped, idle: make(chan struct{})}
+	c := &Client{slots: make(chan struct{}, bridge.DefaultHTTPConcurrency), session: session, maximum: maximum, timeout: timeout, stripped: stripped, idle: make(chan struct{})}
 	close(c.idle)
 	if transport == "spool" {
 		var err error
@@ -70,6 +71,13 @@ func (c *Client) Handler(id string) http.Handler {
 				c.ConnectionFailure(id, "invalid_or_plaintext_request")
 			}
 			http.Error(w, "HTTPS seam requires bounded HTTPS request/response", 400)
+			return
+		}
+		select {
+		case c.slots <- struct{}{}:
+			defer func() { <-c.slots }()
+		default:
+			http.Error(w, "HTTPS seam is busy", 503)
 			return
 		}
 		c.mu.Lock()
