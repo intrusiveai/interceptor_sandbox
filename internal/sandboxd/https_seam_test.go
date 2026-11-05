@@ -1,6 +1,7 @@
 package sandboxd
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 
@@ -9,7 +10,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/injection"
 )
 
-func TestHTTPSSeamsExposeNoInjectionOrHostPolicy(t *testing.T) {
+func TestHTTPSSeamsExposeNoCapabilitiesOrInjection(t *testing.T) {
 	blueprint := &environment.Blueprint{Network: environment.NetworkSimulation{HTTPSSeams: []environment.HTTPSSeam{{ID: "tracing", Hostname: "private.example"}}}}
 	blueprint.Limits.ApplyDefaults()
 	blueprint.Adaptive.ApplyDefaults()
@@ -25,8 +26,17 @@ func TestHTTPSSeamsExposeNoInjectionOrHostPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(manifest.Network.HTTPSSeams) != 1 || manifest.Network.HTTPSSeams[0].ID != "tracing" || len(manifest.Services) != 0 {
+	if len(manifest.Services) != 0 {
 		t.Fatal("seam projected as simulated service")
+	}
+	encoded, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, private := range []string{`"https_seams"`, `"tracing"`, "private.example"} {
+		if bytes.Contains(encoded, []byte(private)) {
+			t.Fatalf("private seam detail exposed in capabilities: %s", private)
+		}
 	}
 	for _, surface := range manifest.InjectionSurfaces {
 		if surface == "service_response" {
