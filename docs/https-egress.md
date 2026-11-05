@@ -193,8 +193,8 @@ that deployment. Record the server/SDK versions and archive checksum; remove the
 created test data afterward. SDK success or a fixture's HTTP 200 alone does not
 prove ingestion by Langfuse.
 
-The environment capability manifest adds `network.https_seams` with each seam's
-ID and `maximum_message_bytes`. It exposes no host origin, credentials, trust
-configuration or injection surface. This is informational: Interceptor manages
-the seam without requiring Operator to configure or invoke it. The seam does not
-change the Interceptor/Operator integration contract or require an Operator update.
+Seam configuration stays within Interceptor. The environment capability manifest
+and Interceptor/Operator integration contract do not expose seam identifiers,
+hostnames, limits, credentials or controls. Operator and Attack Harness interact
+with the target through its ordinary invocation and permitted feedback interfaces;
+neither needs seam-specific integration support.

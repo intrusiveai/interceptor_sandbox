@@ -230,10 +230,10 @@ and approved origin determine the external authority available to the applicatio
 - The seam MUST remain Interceptor-managed functionality and MUST NOT require
   Operator integration changes or an integration contract version bump. Follow
   the [contract scope guidance](../internal/integrationcontract/README.md).
-  The existing environment manifest projection of seam IDs and relevant limits
-  is informational; it MUST NOT impose a new Operator compatibility requirement.
-  Keep real endpoints, authentication and private trust configuration out of
-  that projection. Reuse release contract metadata and verification.
+  The environment capability manifest MUST NOT expose seam IDs, hostnames,
+  limits, origins, credentials, trust configuration or controls. The seam MUST
+  NOT add Operator operations, Harness tools, injection surfaces or feedback.
+  Blueprint and host configuration remain private Interceptor inputs.
 - Keep implementation in this repository; do not edit Operator or make
   Interceptor validation depend on its workflow.
 - Update the architecture, security, network Blueprint, credential-store,

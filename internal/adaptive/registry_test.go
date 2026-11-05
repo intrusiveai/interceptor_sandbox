@@ -91,7 +91,19 @@ func TestCapabilityManifestIsDeterministicAndSecretFree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A seam is application infrastructure, not an Operator capability. Even
+	// with a seam configured, the projection stays identical for these bindings.
+	blueprint.Network.HTTPSSeams = []environment.HTTPSSeam{{ID: "private-seam-marker", Hostname: "private-seam.invalid"}}
 	second, _ := BuildCapabilityManifest(blueprint, binding, binding)
+	seamEncoded, err := json.Marshal(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"https_seams", "private-seam-marker", "private-seam.invalid"} {
+		if bytes.Contains(seamEncoded, []byte(forbidden)) {
+			t.Fatalf("private seam leaked in capabilities: %s", forbidden)
+		}
+	}
 	encoded, _ := json.Marshal(first)
 	if first.Digest != second.Digest || bytes.Contains(encoded, []byte("do-not-export")) || bytes.Contains(encoded, []byte("/secret/container/path")) {
 		t.Fatalf("manifest is unstable or contains secret material: %s", encoded)
