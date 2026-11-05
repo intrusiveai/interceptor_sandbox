@@ -6,7 +6,22 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/intrusive-ai/interceptor-sandbox/internal/localapi"
 )
+
+func TestConsumerAgainstInterceptorContractAPI(t *testing.T) {
+	// Use the real endpoint before campaign attachment, with no target or runtime.
+	// The consumer's independent pin must agree with the embedded contract.
+	s := httptest.NewServer(&localapi.Service{})
+	defer s.Close()
+	if err := checkContract(s.Client(), s.URL, supportedContractVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkContract(s.Client(), s.URL, "0.2.0"); err == nil {
+		t.Fatal("accepted the seam-only contract version")
+	}
+}
 
 func TestConsumerContractCheck(t *testing.T) {
 	for _, tc := range []struct {
@@ -14,17 +29,17 @@ func TestConsumerContractCheck(t *testing.T) {
 		status     int
 		pass       bool
 	}{
-		{"match", `{"status":200,"body":{"interceptor_contract_version":"0.2.0"}}`, 200, true},
-		{"different product release", `{"status":200,"body":{"version":"42.0.0","interceptor_contract_version":"0.2.0"}}`, 200, true},
-		{"mismatch", `{"status":200,"body":{"interceptor_contract_version":"0.3.0"}}`, 200, false},
+		{"match", `{"status":200,"body":{"interceptor_contract_version":"0.1.0"}}`, 200, true},
+		{"different product release", `{"status":200,"body":{"version":"42.0.0","interceptor_contract_version":"0.1.0"}}`, 200, true},
+		{"mismatch", `{"status":200,"body":{"interceptor_contract_version":"0.2.0"}}`, 200, false},
 		{"missing", `{"status":200,"body":{}}`, 200, false},
-		{"malformed", `{"status":200,"body":{"interceptor_contract_version":"v0.2.0"}}`, 200, false},
+		{"malformed", `{"status":200,"body":{"interceptor_contract_version":"v0.1.0"}}`, 200, false},
 		{"wrong type", `{"status":200,"body":{"interceptor_contract_version":1}}`, 200, false},
 		{"unreadable", `{`, 200, false},
-		{"trailing", `{"status":200,"body":{"interceptor_contract_version":"0.2.0"}} {}`, 200, false},
+		{"trailing", `{"status":200,"body":{"interceptor_contract_version":"0.1.0"}} {}`, 200, false},
 		{"unavailable", `{}`, 404, false},
 		{"failed", `{}`, 503, false},
-		{"native error", `{"status":503,"body":{"interceptor_contract_version":"0.2.0"}}`, 200, false},
+		{"native error", `{"status":503,"body":{"interceptor_contract_version":"0.1.0"}}`, 200, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
@@ -41,7 +56,7 @@ func TestConsumerContractCheck(t *testing.T) {
 			if (err == nil) != tc.pass || calls != 1 {
 				t.Fatal(err, calls)
 			}
-			if tc.name == "mismatch" && (!strings.Contains(err.Error(), "expected 0.2.0") || !strings.Contains(err.Error(), "actual 0.3.0")) {
+			if tc.name == "mismatch" && (!strings.Contains(err.Error(), "expected 0.1.0") || !strings.Contains(err.Error(), "actual 0.2.0")) {
 				t.Fatal(err)
 			}
 		})

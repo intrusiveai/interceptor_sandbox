@@ -10,7 +10,7 @@ import (
 )
 
 // This independent consumer pin models Operator without depending on its code.
-const supportedContractVersion = "0.2.0"
+const supportedContractVersion = "0.1.0"
 
 func checkContract(httpClient *http.Client, baseURL, expected string) error {
 	r, err := httpClient.Post(baseURL+"/v1/contract-version", "application/json", bytes.NewBufferString(`{}`))
