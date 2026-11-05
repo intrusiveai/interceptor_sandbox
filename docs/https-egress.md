@@ -195,5 +195,6 @@ prove ingestion by Langfuse.
 
 The environment capability manifest adds `network.https_seams` with each seam's
 ID and `maximum_message_bytes`. It exposes no host origin, credentials, trust
-configuration or injection surface. Consumers must support the updated Interceptor
-integration contract before running campaigns with this release.
+configuration or injection surface. This is informational: Interceptor manages
+the seam without requiring Operator to configure or invoke it. The seam does not
+change the Interceptor/Operator integration contract or require an Operator update.

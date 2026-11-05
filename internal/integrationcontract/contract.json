@@ -1,5 +1,5 @@
 {
-  "interceptor_contract_version": "0.2.0",
+  "interceptor_contract_version": "0.1.0",
   "description": "Interceptor integration capabilities. Availability in a particular sandbox is described by its environment capability manifest.",
   "capabilities": [
     {
@@ -472,47 +472,6 @@
         "docs/file-management.md",
         "docs/evidence-and-storage.md",
         "docs/cli-reference.md"
-      ]
-    },
-    {
-      "id": "network.https-seams",
-      "description": "Declared HTTPS request/response access to public or private external services",
-      "operations": [
-        "environment.build",
-        "session.start",
-        "session.stop",
-        "snapshot.create",
-        "snapshot.restore"
-      ],
-      "inputs": [
-        "Blueprint network.https_seams IDs and DNS names",
-        "Host-owned fixed HTTPS origin bindings, credential references, optional private CA and debug settings"
-      ],
-      "outputs": [
-        "Faithfully forwarded bounded HTTPS responses",
-        "Basic connection logs; opt-in private diagnostics accessible on the host",
-        "Environment manifest network.https_seams IDs and maximum_message_bytes"
-      ],
-      "prerequisites": [
-        "Closed DNS and sandbox TLS",
-        "Host bindings for every declared seam",
-        "Compatible application trust configuration"
-      ],
-      "guarantees": [
-        "No general container networking, automatic redirects or connector retries",
-        "Real credentials resolved and added only on the host",
-        "No seam response injection, turn observation, feedback or oracle evidence",
-        "Debug disabled by default, bounded and credential-redacted",
-        "Background requests do not require a turn",
-        "Remote effects are outside snapshot rollback; in-flight calls are coordinated and never replayed",
-        "Host authority bindings must match across restore"
-      ],
-      "limitations": [
-        "No gRPC, WebSockets, streaming, mTLS or cookie-based authentication",
-        "Consumers must support this contract version; manifest declares availability, not host policy"
-      ],
-      "references": [
-        "docs/https-egress.md"
       ]
     }
   ]

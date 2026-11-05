@@ -12,7 +12,9 @@ configuration and GitHub Actions workflows are outside this specification's scop
 ## Written contract
 
 Interceptor MUST own and embed one versioned, machine-readable contract describing
-its implemented capabilities in full. Each capability MUST have a stable
+the implemented capabilities and guarantees Operator must understand or rely on
+to integrate with Interceptor. It MUST NOT serve as an inventory of all
+Interceptor features. Each capability MUST have a stable
 identifier, a short description and references to its operations, required inputs,
 outputs, prerequisites and essential behavioral guarantees. Reuse existing
 interface definitions and documentation instead of duplicating their schemas.
@@ -29,6 +31,16 @@ independent of product release versions. Changes to
 supported integration capabilities, interfaces or guarantees MUST update the
 contract and its version together. Product changes that leave that agreement
 unchanged, including documentation corrections, SHOULD retain the version.
+
+Before changing the contract, the implementation MUST identify the affected
+Operator API call, required input, consumed output, or relied-upon behavior.
+Interceptor-only functionality MUST NOT trigger a contract change or version bump
+merely because it adds a feature or configuration. An HTTPS seam configured and
+operated entirely by Interceptor, with no required Operator interaction, is one
+such example. Adding a feature MUST NOT automatically add it to the environment
+capability manifest either. If the Operator dependency is unclear, it MUST be
+clarified with the user before changing the contract. Follow the
+[contract scope and maintenance guidance](../internal/integrationcontract/README.md).
 
 ## Automatic campaign compatibility check
 

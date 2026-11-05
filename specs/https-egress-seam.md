@@ -227,14 +227,15 @@ and approved origin determine the external authority available to the applicatio
   loading, credential resolution and lifecycle handling in the existing CLI and
   host runtime, and seam routing in the supervisor with connection diagnostics
   accessible on the host.
-- Update the product integration contract and its version to describe the new
-  capability. Extend the environment capability manifest only with the declared
-  seam availability and relevant limits; keep real endpoints, authentication and
-  private trust configuration out of the public capability projection. Reuse
-  release contract metadata and verification rather than adding another manifest.
-- Keep implementation in this repository. Document the consumer-facing manifest
-  addition for a separate Operator integration update; do not edit Operator or
-  make Interceptor validation depend on its workflow.
+- The seam MUST remain Interceptor-managed functionality and MUST NOT require
+  Operator integration changes or an integration contract version bump. Follow
+  the [contract scope guidance](../internal/integrationcontract/README.md).
+  The existing environment manifest projection of seam IDs and relevant limits
+  is informational; it MUST NOT impose a new Operator compatibility requirement.
+  Keep real endpoints, authentication and private trust configuration out of
+  that projection. Reuse release contract metadata and verification.
+- Keep implementation in this repository; do not edit Operator or make
+  Interceptor validation depend on its workflow.
 - Update the architecture, security, network Blueprint, credential-store,
   application integration, troubleshooting and snapshot guides. Replace
   statements that only model traffic can leave the sandbox with the precise
