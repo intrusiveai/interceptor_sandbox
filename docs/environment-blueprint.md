@@ -149,6 +149,39 @@ same loopback server without `/v1`, such as `http://127.0.0.1:18080`. Their
 synthetic AWS signing values must be declared under `credentials` with
 `accepted_by: model-proxy`. See [Model providers](model-providers.md).
 
+### Credential-name exceptions
+
+Names containing `TOKEN`, `SECRET`, or `PASSWORD`, or ending in `_KEY`, normally
+require a matching [synthetic credential](#synthetic-credentials) declaration.
+For ordinary non-secret configuration whose name matches that heuristic, add an
+explicit exception alongside `launch.environment`:
+
+```yaml
+application:
+  launch:
+    environment:
+      MODEL_BASE_URL: http://127.0.0.1:18080/v1
+      SUPPORT_MODEL_MAX_TOKENS: "4096"
+    credential_name_exceptions:
+      - SUPPORT_MODEL_MAX_TOKENS
+```
+
+This fragment passes `SUPPORT_MODEL_MAX_TOKENS=4096` to the application without
+classifying it as a credential. Merge it into your complete Blueprint.
+
+Each exception must be an exact, valid uppercase environment variable name
+already present in `application.launch.environment`. Patterns, duplicates,
+unknown names, and names also declared under `credentials` are rejected.
+Unlisted variables still undergo credential-name validation. Exceptions skip
+only that name check: value validation, endpoint restrictions, reserved-variable
+rules and all other checks still apply. Never use an exception to put a real
+credential in the Blueprint.
+
+The exception list is part of the sealed environment. After editing it, run
+`interceptor environment seal <directory>` and rebuild the wrapper with
+`interceptor app build`. Validation, sealing, building and startup apply the same
+rules; there is no global CLI bypass.
+
 ## `network`
 
 The optional closed network simulation replaces hostname shortcuts with a

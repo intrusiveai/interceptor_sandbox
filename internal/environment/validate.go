@@ -467,14 +467,34 @@ func Validate(directory string) (*ValidationReport, error) {
 		}
 		credentialVariables[credential.EnvironmentVariable] = credential.Value
 	}
+	credentialNameExceptions := map[string]struct{}{}
+	for i, name := range blueprint.Application.Launch.CredentialNameExceptions {
+		prefix := fmt.Sprintf("application.launch.credential_name_exceptions[%d]", i)
+		if !environmentName.MatchString(name) {
+			add(fmt.Errorf("%s must be an exact valid environment variable name", prefix))
+		}
+		if _, exists := credentialNameExceptions[name]; exists {
+			add(fmt.Errorf("%s duplicates %q", prefix, name))
+		}
+		credentialNameExceptions[name] = struct{}{}
+		if _, exists := blueprint.Application.Launch.Environment[name]; !exists {
+			add(fmt.Errorf("%s references %q, which is not declared in application.launch.environment", prefix, name))
+		}
+		if _, exists := credentialVariables[name]; exists {
+			add(fmt.Errorf("%s cannot exempt %q because it is also declared as a synthetic credential", prefix, name))
+		}
+	}
 	for name, value := range blueprint.Application.Launch.Environment {
 		upper := strings.ToUpper(name)
 		looksCredential := strings.Contains(upper, "TOKEN") || strings.Contains(upper, "SECRET") || strings.Contains(upper, "PASSWORD") || strings.HasSuffix(upper, "_KEY")
 		if !looksCredential {
 			continue
 		}
+		if _, exempt := credentialNameExceptions[name]; exempt {
+			continue
+		}
 		if declared, exists := credentialVariables[name]; !exists || declared != value {
-			add(fmt.Errorf("credential-like application environment variable %q must be declared as a synthetic credential", name))
+			add(fmt.Errorf("credential-like application environment variable %q must be declared as a synthetic credential with the same value, or, for ordinary non-secret configuration, listed by exact name in application.launch.credential_name_exceptions", name))
 		}
 	}
 

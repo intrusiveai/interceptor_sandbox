@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise an extracted release with Docker, outside the checkout and without Go.
 
-Uses the documented command application interface with /bin/cat as the target.
+Uses the command interface to verify an exempted configuration value and echo input.
 The supplied image must already exist locally and match the host architecture.
 Only uniquely named test images/containers and an isolated data root are removed.
 """
@@ -117,8 +117,9 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                 "metadata": {"name": "release-qualification", "version": version,
                              "reviewed_by": "release-qualification", "reviewed_at": "2026-01-01T00:00:00Z"},
                 "application": {"image": target+"@"+base["Id"],
-                    "launch": {"command": ["/bin/cat"], "workdir": "/tmp",
-                               "environment": {"MODEL_BASE_URL": "http://127.0.0.1:18080/v1"}},
+                    "launch": {"command": ["/bin/sh", "-c", 'test "$SUPPORT_MODEL_MAX_TOKENS" = 4096 || exit 78; exec /bin/cat'], "workdir": "/tmp",
+                               "environment": {"MODEL_BASE_URL": "http://127.0.0.1:18080/v1", "SUPPORT_MODEL_MAX_TOKENS": "4096"},
+                               "credential_name_exceptions": ["SUPPORT_MODEL_MAX_TOKENS"]},
                     "interface": {"kind": "command", "operations": [{"id": "echo"}],
                         "command": {"stdin": "raw", "output_media_type": "text/plain", "success_exit_codes": [0], "concurrency": 1},
                         "startup_timeout_ms": 30000, "turn_timeout_ms": 30000},

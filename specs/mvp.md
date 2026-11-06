@@ -1050,6 +1050,8 @@ content.
 Every credential-looking application setting MUST be classified as one of:
 
 - absent;
+- ordinary non-secret configuration explicitly listed by exact name in
+  `application.launch.credential_name_exceptions`;
 - a synthetic canary accepted only by a named local service or by the reserved
   local `model-proxy` target; or
 - a host-side provider credential used only by the model connector.
@@ -1057,6 +1059,41 @@ Every credential-looking application setting MUST be classified as one of:
 Blueprint validation fails if an application environment entry appears to
 contain a live credential or references a host credential path. Validation uses
 explicit declarations and SHOULD also warn on common credential formats.
+
+`application.launch.credential_name_exceptions` MUST be an optional list of
+exact environment variable names. It MUST exempt only those variables from the
+credential-name heuristic (names containing `TOKEN`, `SECRET`, or `PASSWORD`, or
+ending in `_KEY`). It MUST NOT disable any other validation or authorize real
+credentials in the target environment. No wildcard or global bypass is permitted.
+
+Every exception MUST use valid uppercase environment-name syntax and reference
+an entry in `application.launch.environment`. Validation MUST reject duplicates,
+unknown variables, patterns, and variables also declared as synthetic credentials.
+Unlisted variables MUST retain existing credential validation. The rejection
+message MUST explain both paths: declaring an actual synthetic credential with
+the same value, or explicitly exempting ordinary non-secret configuration.
+
+Exceptions MUST be included in the sealed Blueprint digest. Changing exceptions
+MUST require resealing, and the same validation MUST apply during validation,
+sealing, wrapper building, and startup verification. Valid exempted values MUST
+be passed unchanged to the target using existing application environment handling.
+
+For example, a model token-count setting is ordinary configuration:
+
+```yaml
+application:
+  launch:
+    environment:
+      SUPPORT_MODEL_MAX_TOKENS: "4096"
+    credential_name_exceptions:
+      - SUPPORT_MODEL_MAX_TOKENS
+```
+
+Tests MUST cover exact-name acceptance, non-exempt credential rejection, invalid
+and conflicting exceptions, preservation of other validation, seal mutation,
+and a real wrapper invocation receiving the exempted value. Documentation MUST
+describe the field, its scope and resealing requirement. This configuration-only
+feature MUST NOT change the Operator integration contract or capability manifest.
 
 #### 6.6.1 Synthetic identity and delegated access
 
