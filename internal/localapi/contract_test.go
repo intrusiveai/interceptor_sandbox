@@ -1,7 +1,9 @@
 package localapi
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -41,7 +43,8 @@ func TestContractBeforeAttachmentWithoutRuntimeOrState(t *testing.T) {
 			if err := json.Unmarshal(result.Body, &body); err != nil {
 				t.Fatal(err)
 			}
-			if w.Code != 200 || result.Status != 200 || len(body) != 1 || body["interceptor_contract_version"] != integrationcontract.Version() || w.Header().Get("Cache-Control") != "no-store" {
+			wantHash := fmt.Sprintf("%x", sha256.Sum256(integrationcontract.JSON()))
+			if w.Code != 200 || result.Status != 200 || len(body) != 2 || body["interceptor_contract_version"] != integrationcontract.Version() || body["interceptor_contract_sha256"] != wantHash || w.Header().Get("Cache-Control") != "no-store" {
 				t.Fatal(w)
 			}
 		}

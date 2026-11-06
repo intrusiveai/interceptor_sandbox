@@ -169,7 +169,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !read(w, r, &input, 4096) {
 			return
 		}
-		write(w, response(200, map[string]string{"interceptor_contract_version": integrationcontract.Version()}))
+		write(w, response(200, map[string]string{
+			"interceptor_contract_version": integrationcontract.Version(),
+			"interceptor_contract_sha256":  integrationcontract.SHA256(),
+		}))
 		return
 	}
 	if runtime, ok := s.runtime.(interface{ CheckHost() error }); ok {

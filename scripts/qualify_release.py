@@ -25,6 +25,7 @@ import tarfile
 import tempfile
 import time
 import uuid
+import urllib.request
 
 from publish_release import read_archive
 from build_release import ARCHIVE_ROOT
@@ -244,6 +245,18 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                     if session and "Interceptor local API:" in (output / "run.log").read_text(): break
                     time.sleep(0.25)
                 if not session: raise RuntimeError("release readiness timed out")
+                # Hash exact bytes, including the trailing newline; run() strips
+                # output and therefore cannot be used for this comparison.
+                contract_bytes = subprocess.check_output([cli, "contract", "--json"], cwd=outside, env=env, timeout=30)
+                contract_sha256 = hashlib.sha256(contract_bytes).hexdigest()
+                request = urllib.request.Request("http://127.0.0.1:8080/v1/contract-version", data=b"{}",
+                                                 headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    identity = json.load(response)
+                if identity.get("status") != 200 or identity.get("body") != {
+                        "interceptor_contract_version": metadata["interceptor_contract_version"],
+                        "interceptor_contract_sha256": contract_sha256}:
+                    raise ValueError("running API contract identity differs from the installed CLI's complete export")
                 public_ca_checks = None
                 if public_ca_umask is not None:
                     public_ca_checks = verify_public_ca_permissions(run, docker, wrapper, work / 'data', version)
@@ -279,6 +292,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
             for verified_session in native.get("sessions", [session["id"]]):
                 run(cli, "logs", "verify", verified_session)
             result = {"platform": host, "source_commit": source, "version": version,
+                      "interceptor_contract_sha256": contract_sha256,
                       "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
                       "container_binary_sha256": expected, "go_available": False,
                       "target_output": native["target_output"].strip(), "session_id": session["id"]}

@@ -46,10 +46,11 @@ def verify(path, source, version, companion=False):
         contract = json.loads(command("contract", "--json"))
         reported = json.loads(command("version", "--json"))
         expected = contract_version(metadata.get("interceptor_contract_version"))
-        if (contract.get("interceptor_contract_version") != expected
+        if (contract.get("info", {}).get("version") != expected
                 or reported != {"version": version, "source_commit": source, "interceptor_contract_version": expected}
                 or command("version").strip() != version
-                or not contract.get("capabilities")):
+                or contract.get("openapi") != "3.1.0"
+                or not contract.get("paths") or not contract.get("components", {}).get("schemas")):
             raise ValueError("archived contract, version reporting and release metadata disagree")
         if (root / "unused-state").exists():
             raise ValueError("contract commands created runtime state")

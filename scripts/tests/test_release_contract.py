@@ -34,7 +34,7 @@ class ContractTest(unittest.TestCase):
             self.assertNotEqual(kwargs["cwd"], Path.cwd())
             calls.append(args[1:])
             if args[1:] == ["contract", "--json"]:
-                return json.dumps({"interceptor_contract_version":"0.1.0", "capabilities":[{"id":"example"}]})
+                return json.dumps({"openapi":"3.1.0", "info":{"version":"0.1.0"}, "paths":{"/example":{}}, "components":{"schemas":{"Example":{}}}})
             if args[1:] == ["version", "--json"]:
                 return json.dumps({"version":"0.1.2", "source_commit":"a"*40, "interceptor_contract_version":"0.1.0"})
             return "0.1.2\n"

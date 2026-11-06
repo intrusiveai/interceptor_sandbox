@@ -1,8 +1,19 @@
 # Contract scope and maintenance
 
-The embedded [contract](contract.json) describes the agreement Operator relies on
-when integrating with Interceptor. It is not a catalog of all Interceptor
-functionality. Its version is independent of the product release version.
+The embedded [OpenAPI 3.1 contract](contract.json) describes only the Interceptor API used by
+Operator's integration: public routes and native operations, their inputs,
+outputs, prerequisites, errors, and behavioral guarantees. It excludes
+administrative CLI commands, build/setup procedures, service/provider inventories,
+and Interceptor-only configuration. It is not a target capability manifest.
+Its `info.version` is independent of the product release version and the OpenAPI
+dialect version (`openapi`). API and release reporting retain the field name
+`interceptor_contract_version`.
+
+Operator pins the supported contract version and complete document SHA-256, not an Interceptor source
+commit or the commit that introduced or published the contract. Interceptor can
+release new commits with unchanged contract version and bytes without requiring an
+Operator update. Source revisions and artifact hashes remain release provenance
+and integrity records, not additional compatibility pins.
 
 Change the contract and its version together when that agreement changes. First
 identify the affected Operator API call, required input, consumed output, or
@@ -16,7 +27,8 @@ entirely by Interceptor, without a required Operator interaction, does not.
 
 Keep these responsibilities separate:
 
-- The contract describes supported Operator integration behavior.
+- The contract describes supported Operator-facing API behavior, including how to
+  retrieve and interpret the separate environment capability manifest.
 - The build-generated environment capability manifest describes availability in
   a particular sandbox for campaign planning and execution.
 - Interceptor owns runtime configuration, credentials, policy, and enforcement.
@@ -25,3 +37,49 @@ A new feature does not automatically belong in either the contract or the
 capability manifest. If its Operator dependency is unclear, clarify that boundary
 with the user before changing the contract. See the repository
 [agent instructions](../../AGENTS.md).
+
+## Document identity
+
+`POST /v1/contract-version` returns `interceptor_contract_version` and
+`interceptor_contract_sha256`. The latter is 64 lowercase hexadecimal SHA-256
+digits over the complete embedded UTF-8 file bytes, including formatting and the
+final newline. It is not a release-archive, binary, capability-manifest, or API
+response hash. The digest value is not stored inside the document it hashes.
+
+`interceptor contract --json` emits those exact bytes for optional developer and
+release verification. Reformatting the file changes its hash; a documentation-only
+edit need not change the version when the API agreement remains unchanged.
+Campaign compatibility requires exact equality of both the version and document
+hash with the consumer's independently recorded pins. A document edit, including
+formatting alone, blocks consumers retaining the old hash even if the version is
+unchanged. Update pins deliberately after review; never learn the expected hash
+from the running service. Users need not export a document.
+
+Contract `0.2.0` adds the document digest to the identity API response. That API
+addition justifies this version change; narrowing the previous feature inventory
+alone would not. Release metadata continues to derive the version from this file.
+
+## Maintaining the OpenAPI definitions
+
+Edit the checked-in OpenAPI JSON document directly. Define paths, methods, stable
+operation IDs, typed request/response bodies, required fields, permitted values,
+and reusable models. Keep every reference inside the file so the digest covers
+all definitions. Preserve exact-byte exports; never hash only the schema subset.
+
+The native endpoint uses `oneOf` request variants selected by `request.operation`.
+Each variant's `x-response-schema` reference identifies its specific successful
+response; the HTTP operation also exposes the full response union for ordinary
+OpenAPI tooling. This is a dispatch mapping, not an additional compatibility
+manifest. Do not invent routes for native operations. Arbitrary JSON is reserved
+for explicitly documented application-defined payloads, schemas and observations.
+
+Run the contract, local API and consumer tests. They check OpenAPI structure,
+compile schemas offline, compare route and Go field inventories, and validate
+actual API exchanges. The packaged smoke client also checks operation-specific
+responses. Retain behavioral tests for retry, ordering, evidence and restore
+semantics: schema validation cannot prove those guarantees.
+
+Review the final document and update the consumer fixture's version/hash pins
+explicitly. Do not generate the expected hash during tests or learn it from the
+running service. Operator maintainers can use this specification to validate their
+integration during development; startup still requires only the identity API.

@@ -14,9 +14,11 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/intrusive-ai/interceptor-sandbox/internal/adaptive"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/contracttest"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/digest"
 	evidencepolicy "github.com/intrusive-ai/interceptor-sandbox/internal/evidence"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/localapi"
@@ -29,6 +31,7 @@ var client = &http.Client{Timeout: 6 * time.Minute}
 const campaign = "local-api-smoke"
 
 var sequence int
+var apiContract = func() *contracttest.Validator { v, err := contracttest.New(); must(err); return v }()
 
 func must(err error) {
 	if err != nil {
@@ -51,6 +54,7 @@ func postRaw(path string, raw []byte) adaptive.GatewayResponse {
 	defer response.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(response.Body, 5<<20))
 	must(err)
+	must(apiContract.Exchange(path, raw, response.StatusCode, data))
 	var result adaptive.GatewayResponse
 	if err = json.Unmarshal(data, &result); err != nil {
 		panic(fmt.Sprintf("%s HTTP %d: %s: %v", path, response.StatusCode, data, err))
@@ -188,13 +192,14 @@ func main() {
 	postgresql := flag.Bool("postgresql", false, "qualify managed PostgreSQL")
 	flag.Parse()
 	// No attach or target operation is sent until the API identity matches.
-	require(checkContract(client, "http://127.0.0.1:8080", "999.0.0") != nil, "contract mismatch was accepted")
-	must(checkContract(client, "http://127.0.0.1:8080", supportedContractVersion))
+	require(checkContract(client, "http://127.0.0.1:8080", "999.0.0", supportedContractSHA256) != nil, "contract mismatch was accepted")
+	require(checkContract(client, "http://127.0.0.1:8080", supportedContractVersion, strings.Repeat("0", 64)) != nil, "contract hash mismatch was accepted")
+	must(checkContract(client, "http://127.0.0.1:8080", supportedContractVersion, supportedContractSHA256))
 	_, limitErr := evidencepolicy.ParseLimit(strconv.FormatInt(*maximumEvidence, 10))
 	must(limitErr)
 	require(*output != "", "--output is required")
 	must(os.MkdirAll(*output, 0700))
-	must(os.WriteFile(filepath.Join(*output, "contract-check.json"), []byte(`{"transport":"http","interceptor_contract_version":"`+supportedContractVersion+`","matched_before_attach":true,"mismatch_rejected":true}`+"\n"), 0600))
+	must(os.WriteFile(filepath.Join(*output, "contract-check.json"), []byte(`{"transport":"http","interceptor_contract_version":"`+supportedContractVersion+`","interceptor_contract_sha256":"`+supportedContractSHA256+`","matched_before_attach":true,"mismatch_rejected":true,"hash_mismatch_rejected":true}`+"\n"), 0600))
 	attach := localapi.AttachRequest{WorkerInstanceID: "smoke-worker", APIVersion: localapi.Version, CampaignID: campaign, AllowTargetStop: true}
 	var attached struct {
 		Binding          localapi.Binding `json:"binding"`
