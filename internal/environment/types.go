@@ -49,9 +49,10 @@ type Application struct {
 }
 
 type Launch struct {
-	Command     []string          `yaml:"command" json:"command"`
-	Workdir     string            `yaml:"workdir" json:"workdir"`
-	Environment map[string]string `yaml:"environment,omitempty" json:"environment,omitempty"`
+	Command                  []string          `yaml:"command" json:"command"`
+	Workdir                  string            `yaml:"workdir" json:"workdir"`
+	Environment              map[string]string `yaml:"environment,omitempty" json:"environment,omitempty"`
+	CredentialNameExceptions []string          `yaml:"credential_name_exceptions,omitempty" json:"credential_name_exceptions,omitempty"`
 }
 
 type ApplicationInterface struct {
