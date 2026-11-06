@@ -1,10 +1,12 @@
-package integrationcontract
+package integrationcontract_test
 
 import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/contracttest"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/integrationcontract"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -19,14 +21,14 @@ func TestContractHashCoversExactDocument(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(raw, JSON()) || SHA256() != fmt.Sprintf("%x", sha256.Sum256(raw)) {
+	if !bytes.Equal(raw, integrationcontract.JSON()) || integrationcontract.SHA256() != fmt.Sprintf("%x", sha256.Sum256(raw)) {
 		t.Fatal("hash/export do not identify the entire embedded contract file")
 	}
 	var compact bytes.Buffer
 	if err := json.Compact(&compact, raw); err != nil {
 		t.Fatal(err)
 	}
-	if SHA256() == fmt.Sprintf("%x", sha256.Sum256(compact.Bytes())) {
+	if integrationcontract.SHA256() == fmt.Sprintf("%x", sha256.Sum256(compact.Bytes())) {
 		t.Fatal("hash discarded document whitespace")
 	}
 }
@@ -49,25 +51,35 @@ func TestContractOperationsMatchPublicAPI(t *testing.T) {
 	if len(want) == 0 {
 		t.Fatal("no API definitions found")
 	}
-	var doc struct {
-		Capabilities []struct {
-			ID                                              string
-			Operations, Inputs, Outputs, Errors, Guarantees []string
-		}
-	}
-	if err := json.Unmarshal(JSON(), &doc); err != nil {
+	v, err := contracttest.New()
+	if err != nil {
 		t.Fatal(err)
 	}
 	seen := map[string]bool{}
-	for _, capability := range doc.Capabilities {
-		if len(capability.Inputs)*len(capability.Outputs)*len(capability.Errors)*len(capability.Guarantees) == 0 {
-			t.Fatalf("missing API behavior details: %s", capability.ID)
+	for route, item := range v.Document["paths"].(map[string]any) {
+		if _, ok := item.(map[string]any)["post"]; !ok {
+			t.Fatalf("missing POST %s", route)
 		}
-		for _, operation := range capability.Operations {
-			if !want[operation] || seen[operation] {
-				t.Errorf("non-API or duplicated operation %q in %s", operation, capability.ID)
-			}
-			seen[operation] = true
+		seen["POST "+route] = true
+	}
+	schemas := v.Document["components"].(map[string]any)["schemas"].(map[string]any)
+	for _, branch := range schemas["NativeRequest"].(map[string]any)["oneOf"].([]any) {
+		ref := branch.(map[string]any)["$ref"].(string)
+		variant := schemas[strings.TrimPrefix(ref, "#/components/schemas/")].(map[string]any)
+		props := variant["properties"].(map[string]any)
+		header := props["request"].(map[string]any)["properties"].(map[string]any)
+		operation := header["operation"].(map[string]any)["const"].(string)
+		if seen[operation] || !want[operation] {
+			t.Errorf("duplicate or non-API operation %s", operation)
+		}
+		if props["body"].(map[string]any)["$ref"] == nil || variant["x-response-schema"] == nil {
+			t.Errorf("untyped operation %s", operation)
+		}
+		seen[operation] = true
+	}
+	for operation := range seen {
+		if !want[operation] {
+			t.Errorf("non-API operation %s", operation)
 		}
 	}
 	for operation := range want {

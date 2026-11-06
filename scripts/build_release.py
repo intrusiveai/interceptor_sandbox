@@ -75,7 +75,7 @@ def build(root, output, version, platform, linux_archive=None):
 
     commit = run(["git", "rev-parse", "HEAD"], root)
     contract = json.loads((root / "internal/integrationcontract/contract.json").read_text())
-    contract_identity = contract_version(contract.get("interceptor_contract_version"))
+    contract_identity = contract_version(contract.get("info", {}).get("version"))
     goos, goarch = platform.split("/")
     env, native = native_environment(platform)
     env.update(GOOS=goos, GOARCH=goarch)

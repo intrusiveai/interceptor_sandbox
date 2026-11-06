@@ -33,9 +33,9 @@ func TestConsumerContractCheck(t *testing.T) {
 		status     int
 		pass       bool
 	}{
-		{"match", `{"status":200,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"8a073e2d88fcad4152eb53abfa512a20e8733d2baaacff3b77daec5e10280f30"}}`, 200, true},
-		{"different product release", `{"status":200,"body":{"version":"42.0.0","interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"8a073e2d88fcad4152eb53abfa512a20e8733d2baaacff3b77daec5e10280f30"}}`, 200, true},
-		{"mismatch", `{"status":200,"body":{"interceptor_contract_version":"0.3.0","interceptor_contract_sha256":"8a073e2d88fcad4152eb53abfa512a20e8733d2baaacff3b77daec5e10280f30"}}`, 200, false},
+		{"match", `{"status":200,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"b6353d6dfb3d8fe13b68ff5242b1b42bec890e9f77630d4779e255f41f640310"}}`, 200, true},
+		{"different product release", `{"status":200,"body":{"version":"42.0.0","interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"b6353d6dfb3d8fe13b68ff5242b1b42bec890e9f77630d4779e255f41f640310"}}`, 200, true},
+		{"mismatch", `{"status":200,"body":{"interceptor_contract_version":"0.3.0","interceptor_contract_sha256":"b6353d6dfb3d8fe13b68ff5242b1b42bec890e9f77630d4779e255f41f640310"}}`, 200, false},
 		{"hash mismatch", `{"status":200,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`, 200, false},
 		{"missing hash", `{"status":200,"body":{"interceptor_contract_version":"0.2.0"}}`, 200, false},
 		{"malformed hash", `{"status":200,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"sha256:abcd"}}`, 200, false},
@@ -44,10 +44,10 @@ func TestConsumerContractCheck(t *testing.T) {
 		{"malformed", `{"status":200,"body":{"interceptor_contract_version":"v0.2.0"}}`, 200, false},
 		{"wrong type", `{"status":200,"body":{"interceptor_contract_version":1}}`, 200, false},
 		{"unreadable", `{`, 200, false},
-		{"trailing", `{"status":200,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"8a073e2d88fcad4152eb53abfa512a20e8733d2baaacff3b77daec5e10280f30"}} {}`, 200, false},
+		{"trailing", `{"status":200,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"b6353d6dfb3d8fe13b68ff5242b1b42bec890e9f77630d4779e255f41f640310"}} {}`, 200, false},
 		{"unavailable", `{}`, 404, false},
 		{"failed", `{}`, 503, false},
-		{"native error", `{"status":503,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"8a073e2d88fcad4152eb53abfa512a20e8733d2baaacff3b77daec5e10280f30"}}`, 200, false},
+		{"native error", `{"status":503,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"b6353d6dfb3d8fe13b68ff5242b1b42bec890e9f77630d4779e255f41f640310"}}`, 200, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
@@ -89,7 +89,7 @@ func TestConsumerRejectsChangedContractBytesBeforeAttach(t *testing.T) {
 	}
 	for name, altered := range map[string][]byte{
 		"formatting": compact.Bytes(),
-		"content":    bytes.Replace(raw, []byte("Discover the supported Operator API agreement"), []byte("Changed API agreement"), 1),
+		"content":    bytes.Replace(raw, []byte("Interceptor API for Operator"), []byte("Changed API agreement"), 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			hash := fmt.Sprintf("%x", sha256.Sum256(altered))

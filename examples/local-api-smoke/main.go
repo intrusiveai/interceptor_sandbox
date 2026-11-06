@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/intrusive-ai/interceptor-sandbox/internal/adaptive"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/contracttest"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/digest"
 	evidencepolicy "github.com/intrusive-ai/interceptor-sandbox/internal/evidence"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/localapi"
@@ -30,6 +31,7 @@ var client = &http.Client{Timeout: 6 * time.Minute}
 const campaign = "local-api-smoke"
 
 var sequence int
+var apiContract = func() *contracttest.Validator { v, err := contracttest.New(); must(err); return v }()
 
 func must(err error) {
 	if err != nil {
@@ -52,6 +54,7 @@ func postRaw(path string, raw []byte) adaptive.GatewayResponse {
 	defer response.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(response.Body, 5<<20))
 	must(err)
+	must(apiContract.Exchange(path, raw, response.StatusCode, data))
 	var result adaptive.GatewayResponse
 	if err = json.Unmarshal(data, &result); err != nil {
 		panic(fmt.Sprintf("%s HTTP %d: %s: %v", path, response.StatusCode, data, err))

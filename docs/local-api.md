@@ -92,10 +92,20 @@ API response field; an integration pinned to `0.1.0` will report a version misma
 Users do not export or supply a contract to run campaigns. The optional
 `interceptor contract --json` command exports the exact document bytes for
 developers and release verification; it is not an Operator API operation or a
-startup requirement. The contract describes only Operator-facing API routes,
+startup requirement. The contract is a self-contained OpenAPI 3.1 JSON document. Its `info.version`
+is the contract version; `openapi` identifies the specification format. It defines
+only Operator-facing API routes,
 operations, requests, responses, prerequisites, errors and guarantees. It excludes
 administrative CLI commands and general Interceptor feature inventories. The environment
 capability manifest still determines what the particular sandbox offers.
+
+During integration development, use the document's request/response schemas to
+validate traffic. `/v1/operations` has typed `oneOf` requests selected by
+`request.operation`; each variant's `x-response-schema` reference links its
+success response. All definitions are included in the export, so validation can
+work offline. Descriptions and behavioral tests cover ordering, retries and
+evidence guarantees that schemas cannot establish. Campaign startup requires
+only the pinned version/hash check, not downloading or parsing this document.
 `interceptor run` retains its existing startup behavior; the compatibility check
 precedes campaign attachment and operations, not initial sandbox creation.
 

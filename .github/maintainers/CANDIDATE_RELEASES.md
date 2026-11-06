@@ -38,12 +38,15 @@ to that commit. Direct pushes to `main` verify code but never promote a release.
 
 The Interceptor-owned API contract version is independent of the product release
 version. `internal/integrationcontract/contract.json` is the
-single source for the Operator-facing API agreement, the local API's
+self-contained OpenAPI 3.1 document. Its `info.version` is the
+single source for the Operator-facing API agreement's version, the local API's
 `POST /v1/contract-version`, and CLI reporting. Update the document and version
 together whenever supported integration capabilities, interfaces or guarantees
 change, including optional additions. Retain the version for changes that leave
 the agreement unchanged, such as documentation corrections. Update the independent
-pin in the repository-local consumer fixture deliberately when the contract changes.
+version and hash pins in the repository-local consumer fixture deliberately when
+the contract changes. Validate OpenAPI structure, internal references, Go wire
+field coverage and representative requests/responses before qualification.
 Operator's implementation and release workflow are maintained separately.
 
 Operator's Interceptor compatibility pins are the contract version and complete
@@ -70,7 +73,7 @@ without necessarily changing the API version; both version and hash must match
 the consumer's pins before campaign execution. Catalog fields and publication
 mechanisms remain unchanged.
 
-The build embeds that contract and records `interceptor_contract_version` in
+The build reads `info.version` from and embeds that OpenAPI contract, and records `interceptor_contract_version` in
 `release.json`. CI runs `contract --json`, `version --json` and plain `version`
 from every actual archived Linux/macOS CLI on a compatible native runner. Linux
 runners also execute the macOS archives' Linux companions. These checks use an
@@ -79,7 +82,9 @@ archive checksum, executable checksum, source revision and observed version.
 Publication requires all six reports to agree with the archived metadata; the
 reports are retained in `candidate.json`. The existing packaged runtime tests
 also check the contract over HTTP and compare its document hash with the installed
-CLI's full export before attaching and exercising a campaign.
+CLI's full export before attaching and exercising a campaign. The smoke consumer
+validates its JSON exchanges against the OpenAPI schemas, including each native
+operation's specific response. No runtime schema download is required.
 
 Catalog entries contain `interceptor_contract_version` and omit
 `contract_package_version`. Promotion preserves the qualified archive bytes and

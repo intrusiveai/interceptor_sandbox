@@ -36,3 +36,8 @@ never Interceptor's source
 commit or the commit that introduced or published the contract. Preserve source
 revisions and artifact hashes for Interceptor release provenance and integrity,
 without turning them into Operator compatibility or release requirements.
+
+The contract MUST be a self-contained OpenAPI document with typed requests and
+responses, not a prose capability inventory. Keep `info.version` authoritative,
+all schema references local, and descriptions for behavior schemas cannot express.
+Test actual API traffic and model/route drift when changing the definitions.

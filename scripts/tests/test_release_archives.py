@@ -23,7 +23,7 @@ class ReleaseArchivesTest(unittest.TestCase):
         (self.root / "internal/appimage").mkdir(parents=True)
         (self.root / "internal/appimage/postgresql-go.LICENSE").write_text("protocol client notices")
         (self.root / "internal/integrationcontract").mkdir(parents=True)
-        (self.root / "internal/integrationcontract/contract.json").write_text(json.dumps({"interceptor_contract_version": "0.1.0"}))
+        (self.root / "internal/integrationcontract/contract.json").write_text(json.dumps({"openapi":"3.1.0", "info":{"version":"0.1.0"}}))
         (self.root / "docs").mkdir()
         (self.root / "docs/ONEPASSWORD_NOTICES.md").write_text("SDK notices")
         self.calls = []

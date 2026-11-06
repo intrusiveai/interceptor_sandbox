@@ -12,22 +12,41 @@ configuration and GitHub Actions workflows are outside this specification's scop
 
 ## Written contract
 
-Interceptor MUST own and embed one versioned, machine-readable contract describing
-only the Interceptor API capabilities used by Operator's integration. It MUST
-exclude administrative CLI commands, build/setup procedures, general provider or
-service inventories, Interceptor-only configuration, and target-specific
-capability values. It MUST describe how the API retrieves the separate environment
-capability manifest without duplicating that manifest. Each capability MUST have a stable
-identifier, a short description and references to its operations, required inputs,
-outputs, prerequisites, errors and essential behavioral guarantees. Public routes,
-native operation routing, shared framing, campaign binding and retry semantics
-MUST be explicit. Reuse existing
-interface definitions and documentation instead of duplicating their schemas.
+Interceptor MUST own and embed one self-contained OpenAPI 3.1 JSON document in
+`internal/integrationcontract/contract.json`. It MUST describe only the API used
+by Operator's integration. It MUST exclude administrative CLI commands, build/setup
+procedures, general provider/service inventories and Interceptor-only configuration.
+The capability manifest's returned structure MUST be defined, but target-specific
+values and availability MUST remain in the separate generated manifest.
+
+The document MUST define actual paths and methods, stable `operationId` values,
+request and response schemas, required fields, types, permitted values, error
+shapes, and binary evidence responses. Reusable models MUST be included under
+`components.schemas`, with only internal references. Request/response bodies MUST
+NOT be untyped objects where Interceptor defines a concrete structure. Fields
+whose contents are intentionally application-defined MAY accept arbitrary JSON,
+but MUST explain why. Do not encode runtime budgets as fixed schema limits.
+
+`/v1/operations` MUST remain one HTTP route. Its request schema MUST use `oneOf`
+variants that constrain `request.operation` and the corresponding body. Each
+variant MUST link its specific success response with an `x-response-schema`
+reference; this extension is necessary because OpenAPI associates responses with
+HTTP operations rather than nested dispatch values. Standard OpenAPI response
+schemas MUST also expose the union of those responses. Do not invent HTTP paths
+for native operations. Lifecycle variants MUST similarly distinguish stop/restore.
+
+Use descriptions for ordering, exact-byte digests, retries, ownership, uncertainty,
+and evidence guarantees that schemas cannot establish. Existing wire types and
+handlers MUST guide the schemas; tests MUST detect divergence. This replaces the
+previous prose inventory rather than creating a second contract system.
 Planned enhancements and settings for a particular environment MUST NOT appear as
 supported product capabilities.
 
 `interceptor contract --json` MUST export the embedded contract, including
-`interceptor_contract_version`, offline without Docker or starting a target. The written
+`info.version` as the authoritative contract version, offline without Docker or
+starting a target. The OpenAPI dialect version (`openapi`) MUST remain distinct.
+The identity API, CLI version report and release metadata MUST continue using the
+field name `interceptor_contract_version`, derived from `info.version`. The written
 contract, API and CLI version reporting, and release metadata MUST use the same
 authoritative contract version. The exported contract MUST describe the installed executable.
 
@@ -174,6 +193,17 @@ offline without Docker or starting a target. API tests MUST verify the endpoint'
 response framing, strict request parsing, availability before attachment, absence
 of state changes or target calls, and agreement with the embedded contract and CLI
 reporting.
+
+Tests MUST validate the OpenAPI document against the official structural schema
+and compile all component schemas with the existing JSON Schema validator,
+offline. Tests MUST reject broken/external references and verify request and
+response validation rejects missing fields, wrong types, unknown operations and
+bodies belonging to a different native operation. Tests MUST compare serialized
+Go model fields with schema fields and validate representative actual API traffic.
+The packaged consumer qualification MUST validate its JSON requests/responses,
+including operation-specific responses, against the embedded OpenAPI definitions.
+Schema validation supports development and release testing; campaign startup
+MUST continue to use only version/hash identity, not full-document validation.
 
 Tests MUST compare the documented routes/native operations to the implemented
 public API inventory and reject non-API operations such as administrative CLI

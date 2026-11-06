@@ -31,7 +31,8 @@ aliases for `help`.
 
 `version --json` reports `version`, `source_commit` and
 `interceptor_contract_version`. `contract --json` exports the exact bytes of the
-complete embedded Operator-facing API contract and its independent version. Its
+complete embedded OpenAPI 3.1 document for the Operator-facing API. Its independent
+contract version is `info.version`; `openapi` identifies the document format. Its
 SHA-256, including whitespace and the final newline, matches
 `interceptor_contract_sha256` returned by `/v1/contract-version`. The document
 describes API operations rather than administrative CLI commands or a target's

@@ -28,7 +28,11 @@ func TestContractCommandsWithoutRuntime(t *testing.T) {
 			if err := json.Unmarshal(out.Bytes(), &result); err != nil {
 				t.Fatal(err)
 			}
-			if result["interceptor_contract_version"] != integrationcontract.Version() {
+			actual := result["interceptor_contract_version"]
+			if command == "contract" {
+				actual = result["info"].(map[string]any)["version"]
+			}
+			if actual != integrationcontract.Version() {
 				t.Fatal(result)
 			}
 			if command == "version" && (result["version"] != productVersion || result["source_commit"] != buildinfo.SourceCommit) {

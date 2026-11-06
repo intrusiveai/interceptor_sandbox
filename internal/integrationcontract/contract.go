@@ -12,7 +12,7 @@ import (
 var document string
 
 // Version is derived from the embedded document, never a product release flag.
-func Version() string { return identity.InterceptorContractVersion }
+func Version() string { return identity.Info.Version }
 
 // JSON returns the complete reference document without runtime dependencies.
 func JSON() json.RawMessage { return json.RawMessage(document) }
@@ -25,13 +25,17 @@ func SHA256() string {
 }
 
 var identity = func() struct {
-	InterceptorContractVersion string `json:"interceptor_contract_version"`
+	Info struct {
+		Version string `json:"version"`
+	} `json:"info"`
 } {
 	var value struct {
-		InterceptorContractVersion string `json:"interceptor_contract_version"`
+		Info struct {
+			Version string `json:"version"`
+		} `json:"info"`
 	}
-	if err := json.Unmarshal([]byte(document), &value); err != nil || value.InterceptorContractVersion == "" {
-		panic("invalid embedded Interceptor contract")
+	if err := json.Unmarshal([]byte(document), &value); err != nil || value.Info.Version == "" {
+		panic("invalid embedded Interceptor OpenAPI contract")
 	}
 	return value
 }()

@@ -20,4 +20,5 @@ semantics distinct: document-only edits change the digest without necessarily
 changing the API agreement, but still require a reviewed consumer hash-pin update
 before campaign execution. Compatibility requires both version and document hash
 to match; never pin an Interceptor source commit.
+Describe any OpenAPI schema changes and validation against actual API exchanges.
 See internal/integrationcontract/README.md. -->
