@@ -9,10 +9,12 @@ import (
 	"regexp"
 )
 
-// This independent consumer pin models Operator without depending on its code.
-const supportedContractVersion = "0.1.0"
+// These independent consumer pins model Operator without depending on its code.
+// Update deliberately after reviewing the contract; never derive them at runtime.
+const supportedContractVersion = "0.2.0"
+const supportedContractSHA256 = "8a073e2d88fcad4152eb53abfa512a20e8733d2baaacff3b77daec5e10280f30"
 
-func checkContract(httpClient *http.Client, baseURL, expected string) error {
+func checkContract(httpClient *http.Client, baseURL, expected, expectedHash string) error {
 	r, err := httpClient.Post(baseURL+"/v1/contract-version", "application/json", bytes.NewBufferString(`{}`))
 	if err != nil {
 		return fmt.Errorf("Interceptor compatibility check failed: %w", err)
@@ -22,6 +24,7 @@ func checkContract(httpClient *http.Client, baseURL, expected string) error {
 		Status int `json:"status"`
 		Body   struct {
 			Version string `json:"interceptor_contract_version"`
+			SHA256  string `json:"interceptor_contract_sha256"`
 		} `json:"body"`
 	}
 	if r.StatusCode != 200 {
@@ -39,8 +42,11 @@ func checkContract(httpClient *http.Client, baseURL, expected string) error {
 	if result.Status != 200 || len(actual) > 128 || !regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`).MatchString(actual) {
 		return fmt.Errorf("missing or malformed Interceptor contract version; install a compatible release")
 	}
-	if actual != expected {
-		return fmt.Errorf("Interceptor contract mismatch: expected %s, actual %s; use matching integration and Interceptor contracts", expected, actual)
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(result.Body.SHA256) {
+		return fmt.Errorf("missing or malformed Interceptor contract SHA-256; install a compatible release")
+	}
+	if actual != expected || result.Body.SHA256 != expectedHash {
+		return fmt.Errorf("Interceptor contract mismatch: expected %s SHA-256 %s, actual %s SHA-256 %s; use matching integration and Interceptor contracts", expected, expectedHash, actual, result.Body.SHA256)
 	}
 	return nil
 }

@@ -2,12 +2,16 @@
 
 ## Interceptor/Operator contract scope
 
-The Interceptor/Operator contract describes behavior Operator must understand or
-rely on to integrate with Interceptor. It is not an inventory of every Interceptor
-feature.
+The Interceptor/Operator contract describes only the Interceptor API capabilities
+used by Operator's Interceptor integration: endpoints and operations, requests,
+responses, prerequisites, errors, and behavioral guarantees. It is neither a
+target application's capability manifest nor an inventory of Interceptor features.
+Administrative CLI commands, build/setup procedures, provider/service inventories,
+and Interceptor-only configuration MUST NOT be contract capabilities. The optional
+contract export command is a developer/release tool, not an Operator API operation.
 
 Before changing the contract, identify the specific Operator interaction affected:
-an API call, required input, consumed output, or behavior Operator depends on.
+an API call, required API input, consumed API output, or API behavior Operator depends on.
 Describe that impact in the implementation proposal and pull request. An
 Interceptor-only feature does not justify a contract change or version bump merely
 because it adds functionality or configuration.
@@ -26,3 +30,9 @@ it with the user before changing the contract. Do not infer an Operator dependen
 solely from the presence of a feature in a blueprint or the Interceptor CLI.
 
 See [contract scope and maintenance](internal/integrationcontract/README.md).
+
+Operator compatibility pins the contract version and complete document SHA-256,
+never Interceptor's source
+commit or the commit that introduced or published the contract. Preserve source
+revisions and artifact hashes for Interceptor release provenance and integrity,
+without turning them into Operator compatibility or release requirements.

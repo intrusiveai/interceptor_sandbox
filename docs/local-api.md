@@ -42,7 +42,7 @@ is the one binary response. Send `Content-Type: application/json`.
 
 | Route | Request | Purpose |
 |---|---|---|
-| `/v1/contract-version` | Empty JSON object (`{}`) | Read the running Interceptor's contract version before campaign attachment. |
+| `/v1/contract-version` | Empty JSON object (`{}`) | Read the running Interceptor's API contract version and complete-document SHA-256 before campaign attachment. |
 | `/v1/attach` | Lifecycle version, `campaign_id`, `worker_instance_id`, optional `allow_target_stop` | Bind the first campaign and return current session, native binding and capabilities. |
 | `/v1/operations` | Existing v1alpha2 `{request, body}` envelope | Native experiments, snapshot creation, status, observations and admission closure. |
 | `/v1/lifecycle` | Lifecycle request described below | Restore or confirmed target stop. |
@@ -61,27 +61,55 @@ Before attaching a campaign, an integration calls `POST /v1/contract-version`
 with `{}` on the same Interceptor API instance it will use for execution:
 
 ```json
-{"status":200,"body":{"interceptor_contract_version":"0.1.0"},"session_revision":0}
+{"status":200,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"<64 lowercase hexadecimal digits>"},"session_revision":0}
 ```
 
-This endpoint returns the service's embedded integration contract version. It
+This endpoint returns the service's embedded API contract version and SHA-256. It
 requires no campaign ID, calls no target and changes no state. It uses the existing
 trusted-local-host boundary and remains available before attachment. Its request
 and response shape stay stable across contract updates.
 
-The consumer pins the one contract version its integration implements. Exact
-equality permits attachment and normal environment capability and policy checks.
-A mismatch stops the campaign and reports expected and actual versions. A missing
-endpoint, failed request, or missing, malformed or unreadable version also stops
+The consumer pins the contract version its integration implements and the SHA-256
+of that contract's complete bytes. Both must match exactly before attachment and
+normal environment capability and policy checks.
+A mismatch stops the campaign and reports expected and actual versions and hashes. A missing
+endpoint, failed request, or missing, malformed or unreadable version or hash also stops
 execution with a compatibility error. There is no CLI fallback, version range,
 negotiation or Internet lookup. Product release versions need not match.
+Operator pins the contract version and document hash, not Interceptor's source commit or the commit
+that introduced or published the contract. Interceptor updates retaining that
+contract version and exact document bytes do not require an Operator update. Source commits recorded in
+release metadata identify the built artifacts; they are not compatibility checks.
+The expected hash is recorded with the integration after review, never adopted
+from the running service. No document download is required at campaign startup.
+
+`interceptor_contract_sha256` covers every byte of the embedded UTF-8 contract,
+including formatting and its final newline. It is not the hash of the API response,
+release archive, executable, target capability manifest or a canonicalized subset.
+The digest value is not embedded in the document itself. Contract `0.2.0` adds this
+API response field; an integration pinned to `0.1.0` will report a version mismatch.
 
 Users do not export or supply a contract to run campaigns. The optional
-`interceptor contract --json` command describes all implemented capabilities for
-developers and inspection; it is not a startup requirement. The environment
+`interceptor contract --json` command exports the exact document bytes for
+developers and release verification; it is not an Operator API operation or a
+startup requirement. The contract describes only Operator-facing API routes,
+operations, requests, responses, prerequisites, errors and guarantees. It excludes
+administrative CLI commands and general Interceptor feature inventories. The environment
 capability manifest still determines what the particular sandbox offers.
 `interceptor run` retains its existing startup behavior; the compatibility check
 precedes campaign attachment and operations, not initial sandbox creation.
+
+For optional manual verification, save the export without reformatting it and
+compare its SHA-256 with the API field:
+
+```sh
+interceptor contract --json > contract.json
+shasum -a 256 contract.json
+```
+
+On Linux, `sha256sum contract.json` is also suitable. Documentation-only changes
+can change the digest while keeping the same API contract version. Such edits
+block an integration retaining the previous hash until its pin is updated.
 
 ## Attach and native experiments
 

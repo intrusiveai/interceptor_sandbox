@@ -30,8 +30,12 @@ interceptor help
 aliases for `help`.
 
 `version --json` reports `version`, `source_commit` and
-`interceptor_contract_version`. `contract --json` exports the complete embedded
-integration contract and its independent version. Both commands work offline
+`interceptor_contract_version`. `contract --json` exports the exact bytes of the
+complete embedded Operator-facing API contract and its independent version. Its
+SHA-256, including whitespace and the final newline, matches
+`interceptor_contract_sha256` returned by `/v1/contract-version`. The document
+describes API operations rather than administrative CLI commands or a target's
+capability manifest. Both commands work offline
 without Docker, a target, or runtime state. They are inspection and release tools;
 campaign compatibility uses the [local API](local-api.md#automatic-contract-compatibility)
 automatically, with no manual command required from the user.

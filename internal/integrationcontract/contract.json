@@ -1,477 +1,491 @@
 {
-  "interceptor_contract_version": "0.1.0",
-  "description": "Interceptor integration capabilities. Availability in a particular sandbox is described by its environment capability manifest.",
+  "interceptor_contract_version": "0.2.0",
+  "description": "The Interceptor API agreement implemented by Operator integrations. This is neither a target capability manifest nor an inventory of administrative commands, providers, services or Interceptor-only configuration.",
+  "transport": {
+    "boundary": "Operator and Interceptor share a trusted host. The existing loopback HTTP listener is the integration boundary; campaign IDs scope access but do not authenticate hostile local callers.",
+    "requests": "POST with Content-Type: application/json and strict JSON objects. Unknown fields, duplicate keys, trailing values and invalid nesting are rejected.",
+    "responses": "JSON GatewayResponse {status, body, session_revision}; HTTP status follows native status except 204 is wrapped using HTTP 200. Successful evidence download is binary.",
+    "errors": "JSON body.code identifies errors. Parse/route errors include 400 invalid_request, 405 method_not_allowed, 413 frame_too_large and 404 not_found. Endpoint-specific errors below are representative; the referenced implementations define the complete codes. Never treat an unfamiliar error as success.",
+    "lifecycle_api_version": "interceptor.dev/local-lifecycle/v1alpha1",
+    "operation_api_version": "interceptor.dev/operation-request/v1alpha2",
+    "native_operation_route": "POST /v1/operations",
+    "native_operation_rules": "Non-HTTP operation names below select request.operation in the native envelope. session.stop is deliberately unavailable on this route; use lifecycle operation=session.stop. Public session.owner only closes execution; attach owns binding.",
+    "bounds": "Use existing wire parsing and transport bounds in the referenced codecs. Resource budgets, timeouts and runtime policy remain Interceptor-owned and are not fixed compatibility requirements.",
+    "references": [
+      "internal/localapi/service.go",
+      "internal/adaptive/contracts.go",
+      "internal/adaptive/gateway.go",
+      "docs/local-api.md",
+      "docs/cross-vm-gateway.md"
+    ]
+  },
   "capabilities": [
     {
-      "id": "contract.version",
-      "description": "Automatic integration compatibility check",
+      "id": "contract.identity",
+      "description": "Discover the supported Operator API agreement before attachment",
       "operations": [
         "POST /v1/contract-version"
       ],
       "inputs": [
-        "Empty JSON object"
+        "Empty JSON object {}"
       ],
       "outputs": [
-        "interceptor_contract_version"
+        "body.interceptor_contract_version: exact major.minor.patch string",
+        "body.interceptor_contract_sha256: 64 lowercase hexadecimal SHA-256 digits over the entire embedded UTF-8 contract document, including whitespace and its final newline"
       ],
       "prerequisites": [],
+      "errors": [
+        "400 invalid_request for invalid JSON or nonempty requests; 405 method_not_allowed; 413 frame_too_large"
+      ],
       "guarantees": [
-        "Read-only before attachment; exact version equality gates campaign execution; no CLI or Internet lookup"
+        "Read-only, no campaign or target access, no runtime reconciliation; Cache-Control: no-store",
+        "Operator compares both the returned version and document SHA-256 with its independently pinned supported version and hash before attachment; mismatch or unreadable identity stops campaign execution",
+        "The hash identifies the contract document, not an executable, release archive, capability manifest, API response or canonicalized subset; its value is not embedded in the document itself",
+        "Both version and exact document hash must match, including after formatting-only edits; pins are never learned from the running service; no source-commit pin, Internet lookup or user-supplied document is required"
       ],
       "references": [
-        "docs/local-api.md"
+        "docs/local-api.md",
+        "internal/localapi/service.go"
       ]
     },
     {
-      "id": "environment.build",
-      "description": "Validate and seal blueprints, build and verify isolated application wrappers",
+      "id": "campaign.attach",
+      "description": "Associate the instance with one campaign and obtain the active binding",
       "operations": [
-        "environment.validate",
-        "environment.seal",
-        "app.build",
-        "app.verify"
+        "POST /v1/attach"
       ],
       "inputs": [
-        "Environment Blueprint and referenced assets",
-        "Target container image"
+        "AttachRequest: api_version=interceptor.dev/local-lifecycle/v1alpha1, campaign_id, worker_instance_id; optional allow_target_stop (default false)"
       ],
       "outputs": [
-        "Sealed environment, build lock and wrapper image"
+        "body.api_version; campaign_id; binding {session_id, worker_instance_id, run_revision}; session metadata; capabilities containing the native environment CapabilityManifest; evidence_max_bytes"
       ],
       "prerequisites": [
-        "Docker for wrapper build"
+        "Successful compatibility check; running Interceptor instance with a ready target"
+      ],
+      "errors": [
+        "400 invalid_attach; 409 campaign_mismatch, campaign_policy_conflict or instance_not_ready; 503 instance_store_unavailable or session_unavailable; native bind/capability errors may propagate"
       ],
       "guarantees": [
-        "Digests bind environment and application inputs; read-only root filesystem and declared writable paths"
+        "Campaign and stop policy persist for this process lifetime; same-campaign reattachment preserves the current session and policy",
+        "Worker identity is caller attribution, not exclusive ownership; attachment does not reopen closed execution"
       ],
       "references": [
-        "docs/environment-blueprint.md",
-        "docs/application-integration.md",
-        "docs/security.md"
+        "docs/local-api.md",
+        "internal/localapi/service.go"
       ]
     },
     {
-      "id": "environment.capabilities",
-      "description": "Describe target-specific availability and delivery contracts",
+      "id": "operations.transport",
+      "description": "Submit native experiment requests through the integrated API",
       "operations": [
-        "capabilities.read",
-        "interceptor capabilities"
+        "POST /v1/operations"
       ],
       "inputs": [
-        "Verified environment and application identity"
+        "OperationEnvelope with exactly request and body; request uses interceptor.dev/operation-request/v1alpha2",
+        "request fields: request_id, operation_id, operation, session_id, campaign_id, worker_instance_id, positive run_revision, body_digest and deadline; expected_session_revision for mutations; attempt_id and attempt_context_digest where required",
+        "body is the operation-specific JSON object; body_digest hashes its exact embedded UTF-8 bytes"
       ],
       "outputs": [
-        "Native CapabilityManifest"
+        "GatewayResponse: status, body and session_revision; operation-specific success or body.code error; native 204 uses HTTP 200 framing"
       ],
       "prerequisites": [
-        "Sealed environment"
+        "Attached campaign; session belongs to that campaign; shared request rules apply"
+      ],
+      "errors": [
+        "400 invalid_request; 403 campaign_mismatch; 409 session_not_in_campaign, stale_session or execution_unavailable_or_closed",
+        "400 use_lifecycle_stop for native session.stop; 400 use_attach_to_bind for public owner binding",
+        "503 session_unavailable_outcome_unknown indicates uncertainty, not proof of non-execution"
       ],
       "guarantees": [
-        "Manifest integrity and declared capabilities remain separate from product compatibility and runtime policy"
+        "Only native operations listed below are supported; there is no shell, host-path selection, remote provisioning or arbitrary forwarding API",
+        "Mutations address the active session and compare its native revision; reads may address retained campaign sessions",
+        "Exact retries reuse command identity and return recorded outcomes; changed command fields conflict; worker/run-revision attribution changes alone do not create a new effect",
+        "Reconcile uncertain outcomes with operation.status rather than replaying with a fresh identity",
+        "Closure is terminal; bounded injection cleanup and reads remain subject to campaign and integrity checks"
       ],
       "references": [
-        "docs/operator-capabilities.md",
-        "docs/delivery-contracts.md",
-        "internal/adaptive/capability.go"
+        "docs/local-api.md",
+        "internal/localapi/service.go",
+        "docs/cross-vm-gateway.md",
+        "internal/adaptive/contracts.go",
+        "internal/sandboxd/operations.go"
       ]
     },
     {
       "id": "campaign.lifecycle",
-      "description": "Bind a campaign, track operations, stop targets and close execution",
+      "description": "Restore a checkpoint or confirm target termination",
       "operations": [
-        "POST /v1/attach",
-        "POST /v1/status",
-        "POST /v1/lifecycle",
-        "session.owner",
+        "POST /v1/lifecycle"
+      ],
+      "inputs": [
+        "LifecycleRequest: api_version=interceptor.dev/local-lifecycle/v1alpha1, campaign_id, worker_instance_id, positive run_revision, current session_id, operation_id and operation",
+        "operation=snapshot.restore requires checkpoint_id; optional source_session_id selects a retained campaign session",
+        "operation=session.stop omits checkpoint_id and source_session_id and requires attach-time allow_target_stop"
+      ],
+      "outputs": [
+        "Restore: replacement binding and session metadata; stop: session_id and phase=stopped; 202 operation_in_progress for an admitted duplicate"
+      ],
+      "prerequisites": [
+        "Attached campaign; session belongs to that campaign; shared request rules apply"
+      ],
+      "errors": [
+        "400 invalid_lifecycle_request; 403 campaign_mismatch or target_stop_not_permitted",
+        "409 operation_conflict, stale_session, source_session_not_in_campaign or execution_unavailable_or_closed; 429 lifecycle_capacity_exhausted",
+        "503 instance_store_unavailable, target_stop_unconfirmed, restore_failed or lifecycle_outcome_unknown; reconcile via status"
+      ],
+      "guarantees": [
+        "Admitted operations survive caller disconnects; retry the same operation identity or query status",
+        "Restore validates source state and checkpoint, closes and stops the old target, creates a fresh session, advances run_revision and rebinds the campaign",
+        "Explicit campaign closure cannot be reopened by restore; failed restoration never reports a successful replacement",
+        "Stop success requires host-confirmed termination; it is distinct from merely closing native execution admission"
+      ],
+      "references": [
+        "docs/local-api.md",
+        "internal/localapi/service.go"
+      ]
+    },
+    {
+      "id": "campaign.status",
+      "description": "Read instance lineage or reconcile lifecycle work",
+      "operations": [
+        "POST /v1/status"
+      ],
+      "inputs": [
+        "api_version=interceptor.dev/local-lifecycle/v1alpha1, campaign_id; optional operation_id"
+      ],
+      "outputs": [
+        "Without operation_id: instance_id, campaign_id, active binding, sessions, phase, closed, store_available, evidence_max_bytes and failure",
+        "With operation_id: lifecycle Record containing original request, fingerprint, state and response"
+      ],
+      "prerequisites": [
+        "Attached campaign; session belongs to that campaign; shared request rules apply"
+      ],
+      "errors": [
+        "403 campaign_mismatch; 404 operation_not_recorded for unknown lifecycle identity"
+      ],
+      "guarantees": [
+        "Reporting remains available after closure; unknown records do not prove that an operation had no effects",
+        "Native operations use operation.status; this route reconciles the separate lifecycle ledger"
+      ],
+      "references": [
+        "docs/local-api.md",
+        "internal/localapi/service.go"
+      ]
+    },
+    {
+      "id": "snapshots.inventory",
+      "description": "List or inspect retained campaign checkpoints",
+      "operations": [
+        "POST /v1/snapshots/list",
+        "POST /v1/snapshots/inspect"
+      ],
+      "inputs": [
+        "SnapshotListRequest: lifecycle api_version, campaign_id; optional source_session_id, offset and limit",
+        "SnapshotInspectRequest: lifecycle api_version, campaign_id, source_session_id and checkpoint_id"
+      ],
+      "outputs": [
+        "List: campaign_id, checkpoints, total and optional next_offset; inspect: the verified checkpoint metadata",
+        "Checkpoint metadata includes source session/campaign identity, checkpoint identity, label, description and integrity data"
+      ],
+      "prerequisites": [
+        "Attached campaign; session belongs to that campaign; shared request rules apply"
+      ],
+      "errors": [
+        "Malformed requests, invalid pagination, foreign sessions, missing checkpoints or corrupt checkpoint data return errors; see snapshot route definitions"
+      ],
+      "guarantees": [
+        "Reads use retained host records and never restart or contact the target; inventory remains separate from snapshot creation and restoration"
+      ],
+      "references": [
+        "docs/local-api.md",
+        "internal/localapi/service.go",
+        "internal/localapi/snapshots.go",
+        "internal/snapshot/checkpoint.go"
+      ]
+    },
+    {
+      "id": "evidence.export",
+      "description": "Download independently collected evidence for a stopped campaign session",
+      "operations": [
+        "POST /v1/evidence"
+      ],
+      "inputs": [
+        "api_version=interceptor.dev/local-lifecycle/v1alpha1, campaign_id, session_id"
+      ],
+      "outputs": [
+        "Successful binary application/x-tar response; X-Content-SHA256 identifies the evidence bytes; X-Evidence-Max-Bytes communicates the configured acceptance bound",
+        "Archive contains protected session evidence, integrity records, execution outcomes and completeness information"
+      ],
+      "prerequisites": [
+        "Attached campaign; session belongs to that campaign; shared request rules apply"
+      ],
+      "errors": [
+        "403 session_not_in_campaign; 409 evidence_unavailable_or_target_not_stopped; 413 evidence_limit_exceeded with evidence_retained=true; 503 evidence_read_failed"
+      ],
+      "guarantees": [
+        "No caller-chosen export path; export does not restart a stopped target",
+        "Consumers verify archive integrity and completeness rather than equating a successful download with a successful experiment",
+        "Required evidence failures cannot be reported as complete success; agent-authored claims are not independent outcome proof"
+      ],
+      "references": [
+        "docs/local-api.md",
+        "internal/localapi/service.go",
+        "docs/evidence-and-storage.md"
+      ]
+    },
+    {
+      "id": "environment.capabilities",
+      "description": "Read environment-specific availability without conflating it with API compatibility",
+      "operations": [
+        "capabilities.read"
+      ],
+      "inputs": [
+        "Empty body {} in the native operation envelope"
+      ],
+      "outputs": [
+        "Native CapabilityManifest for the addressed session, including its identity/digest and available interfaces, delivery contracts, injection surfaces and feedback profiles"
+      ],
+      "prerequisites": [
+        "Attached campaign; session belongs to that campaign; shared request rules apply"
+      ],
+      "errors": [
+        "Shared campaign/session and native integrity errors"
+      ],
+      "guarantees": [
+        "Operator reads this manifest before selecting campaign actions; matching contract versions does not imply every target supports every action",
+        "The manifest is a separate build-derived resource; target configuration and available values are not enumerated in this contract; runtime policy still governs admission"
+      ],
+      "references": [
+        "docs/cross-vm-gateway.md",
+        "internal/adaptive/contracts.go",
+        "internal/sandboxd/operations.go",
+        "docs/operator-capabilities.md",
+        "internal/adaptive/capability.go"
+      ]
+    },
+    {
+      "id": "session.reporting",
+      "description": "Read native session and operation outcomes",
+      "operations": [
         "session.status",
         "operation.status"
       ],
       "inputs": [
-        "Lifecycle requests and native operation envelopes"
+        "session.status: {}",
+        "operation.status: exactly one of receipt_id (application turn) or operation_id (durable native mutation)"
       ],
       "outputs": [
-        "Bindings, session lineage and operation outcomes"
+        "session.status: {session, owner, execution_available}; session.revision is the native mutation revision",
+        "operation.status: native turn for receipt_id, or recorded request/fingerprint/state/response for operation_id"
       ],
       "prerequisites": [
-        "Existing local Interceptor instance",
-        "Successful compatibility check by consumer"
+        "Attached campaign; session belongs to that campaign; shared request rules apply"
+      ],
+      "errors": [
+        "400 invalid_operation_lookup; 404 operation_not_recorded_outcome_unknown; receipt/session availability errors"
       ],
       "guarantees": [
-        "Trusted-local-host boundary; campaign and revision checks; explicit stop opt-in; terminal closure"
+        "A missing record or failed lookup never establishes non-execution; running includes queued work",
+        "Retained reporting uses preserved campaign association without restarting the target"
+      ],
+      "references": [
+        "docs/cross-vm-gateway.md",
+        "internal/adaptive/contracts.go",
+        "internal/sandboxd/operations.go"
+      ]
+    },
+    {
+      "id": "session.close",
+      "description": "Close campaign execution admission without implicitly stopping the target",
+      "operations": [
+        "session.owner"
+      ],
+      "inputs": [
+        "OwnerRequest: action=close_execution, session_id and campaign_id matching the envelope; omit allow_target_stop; optional legacy worker_instance_id is attribution only"
+      ],
+      "outputs": [
+        "ExecutionOwner directly in body, including campaign attribution, closed_at and closure_reason when present"
+      ],
+      "prerequisites": [
+        "Attached campaign; session belongs to that campaign; shared request rules apply"
+      ],
+      "errors": [
+        "400 use_attach_to_bind for binding/stop-policy changes; 409 closure_unconfirmed for retained records that cannot prove closure"
+      ],
+      "guarantees": [
+        "Terminal campaign closure bypasses the mutation queue and revision race; already-dispatched work can finish and remains reportable",
+        "No implicit target-stop permission, ownership transfer or reopening; healthy planned restore uses lifecycle instead of prior terminal closure"
       ],
       "references": [
         "docs/local-api.md",
-        "docs/host-lifetime.md",
-        "docs/cross-vm-gateway.md"
-      ]
-    },
-    {
-      "id": "application.invoke",
-      "description": "Invoke HTTP, command, REPL, Python, Node and custom application interfaces",
-      "operations": [
-        "application.invoke"
-      ],
-      "inputs": [
-        "Declared operation and input; attempt attribution"
-      ],
-      "outputs": [
-        "Turn status, output and observations"
-      ],
-      "prerequisites": [
-        "Configured application interface"
-      ],
-      "guarantees": [
-        "Supervisor-owned observed-turn attribution; supported adapters packaged during wrapper build"
-      ],
-      "references": [
-        "docs/application-interfaces.md",
-        "docs/application-integration.md",
-        "docs/feedback.md"
-      ]
-    },
-    {
-      "id": "model.generation",
-      "description": "Forward native model interactions through host provider adapters",
-      "operations": [
-        "interceptor run",
-        "application.invoke"
-      ],
-      "inputs": [
-        "Configured generation provider, credentials and application requests"
-      ],
-      "outputs": [
-        "Model replies and independently observed exchanges"
-      ],
-      "prerequisites": [
-        "Declared model endpoint and host provider configuration"
-      ],
-      "guarantees": [
-        "Only host adapters contact real providers; credentials remain host-only"
-      ],
-      "references": [
-        "docs/model-providers.md",
-        "docs/credential-stores.md"
-      ]
-    },
-    {
-      "id": "model.embeddings",
-      "description": "Forward remote OpenAI-compatible and Amazon Titan Text Embeddings V2 requests",
-      "operations": [
-        "application.invoke"
-      ],
-      "inputs": [
-        "Configured embeddings routes and model requests"
-      ],
-      "outputs": [
-        "Embeddings and recorded exchanges"
-      ],
-      "prerequisites": [
-        "Configured host embeddings provider"
-      ],
-      "guarantees": [
-        "Generation and embeddings routes are distinct; no runtime model download"
-      ],
-      "references": [
-        "docs/model-providers.md"
-      ]
-    },
-    {
-      "id": "services.http",
-      "description": "Serve declared HTTP/HTTPS fixtures with stateful synthetic service behavior",
-      "operations": [
-        "application.invoke",
-        "capabilities.read"
-      ],
-      "inputs": [
-        "Declared service requests and fixtures"
-      ],
-      "outputs": [
-        "Service responses, state transitions and observations"
-      ],
-      "prerequisites": [
-        "Configured service endpoints"
-      ],
-      "guarantees": [
-        "No general Internet access; service observations independent of application-authored records"
-      ],
-      "references": [
-        "docs/environment-blueprint.md",
-        "docs/adaptive-simulation.md"
-      ]
-    },
-    {
-      "id": "services.mcp",
-      "description": "Serve generic and dedicated MCP-over-HTTP services",
-      "operations": [
-        "application.invoke",
-        "capabilities.read"
-      ],
-      "inputs": [
-        "MCP requests, declared tools, resources and assets"
-      ],
-      "outputs": [
-        "MCP results and service observations"
-      ],
-      "prerequisites": [
-        "Configured MCP service"
-      ],
-      "guarantees": [
-        "Declared endpoints and delivery contracts bound to verified environment"
-      ],
-      "references": [
-        "docs/mcp-services.md",
-        "docs/delivery-contracts.md"
-      ]
-    },
-    {
-      "id": "services.postgresql",
-      "description": "Managed PostgreSQL with pgvector, schema and seed data, TLS and passthrough observation",
-      "operations": [
-        "application.invoke",
-        "capabilities.read"
-      ],
-      "inputs": [
-        "Declared database schema, seeds, tables and connection requests"
-      ],
-      "outputs": [
-        "Query results, errors and observed transaction outcomes"
-      ],
-      "prerequisites": [
-        "PostgreSQL configured in Blueprint and packaged wrapper"
-      ],
-      "guarantees": [
-        "Isolated database state; driver TLS validation; committed outcomes checked independently"
-      ],
-      "references": [
-        "docs/postgresql.md"
-      ]
-    },
-    {
-      "id": "network.dns-tls",
-      "description": "Closed DNS and sandbox HTTPS trust, including declared Python Certifi environments",
-      "operations": [
-        "app.build",
-        "application.invoke"
-      ],
-      "inputs": [
-        "Declared DNS names and TLS/Python environment configuration"
-      ],
-      "outputs": [
-        "Local name resolution and verified sandbox TLS"
-      ],
-      "prerequisites": [
-        "Configured DNS/TLS endpoints"
-      ],
-      "guarantees": [
-        "No upstream DNS forwarding or general egress; private CA keys remain protected; certificate verification stays enabled"
-      ],
-      "references": [
-        "docs/environment-blueprint.md",
-        "docs/application-integration.md",
-        "docs/security.md"
-      ]
-    },
-    {
-      "id": "identity.delegation",
-      "description": "Synthetic workload credentials, principals and delegated identity",
-      "operations": [
-        "interceptor identity",
-        "application.invoke"
-      ],
-      "inputs": [
-        "Declared identities, grants and delegation requests"
-      ],
-      "outputs": [
-        "Synthetic identity decisions and observations"
-      ],
-      "prerequisites": [
-        "Configured identity providers and grants"
-      ],
-      "guarantees": [
-        "No real identity-provider proxying; authorization remains enforced by sandbox policy"
-      ],
-      "references": [
-        "docs/identity.md",
-        "docs/cloud-authentication.md"
+        "internal/localapi/service.go",
+        "docs/cross-vm-gateway.md",
+        "internal/adaptive/contracts.go",
+        "internal/sandboxd/operations.go"
       ]
     },
     {
       "id": "artifacts.attempts",
-      "description": "Register payload artifacts and attributed campaign attempts",
+      "description": "Register payload bytes and bind attempt context",
       "operations": [
         "artifact.register",
         "artifact.read",
         "attempt.register"
       ],
       "inputs": [
-        "Artifact descriptors, content and attempt context"
+        "artifact.register: descriptor and base64 content; descriptor declares digest, size_bytes, media_type and canonicalization",
+        "artifact.read: digest",
+        "attempt.register: native AttemptContext with campaign, attempt lineage, payload descriptor, generator, feedback profile and timestamp; envelope attempt_id and attempt_context_digest must match"
       ],
       "outputs": [
-        "Digest-bound artifacts and attempt registrations"
+        "Registered artifact descriptor or attempt context; artifact.read returns digest and base64 content"
       ],
       "prerequisites": [
-        "Attached campaign and valid operation envelope"
+        "Attached campaign; session belongs to that campaign; shared request rules apply"
+      ],
+      "errors": [
+        "Invalid descriptors/digests, content-integrity failures, attempt_binding_mismatch, conflicting identities or exhausted native capacity are rejected"
       ],
       "guarantees": [
-        "Campaign scoping, content integrity and configured limits"
+        "Artifacts and attempts are scoped to the campaign and integrity-checked before dependent actions; registration does not authorize arbitrary target operations"
       ],
       "references": [
         "docs/cross-vm-gateway.md",
-        "docs/adaptive-simulation.md"
+        "internal/adaptive/contracts.go",
+        "internal/sandboxd/operations.go",
+        "internal/adaptive/artifacts.go",
+        "internal/adaptive/attempts.go"
       ]
     },
     {
-      "id": "injection.responses",
-      "description": "Inject into model tool results, HTTP/MCP service results and PostgreSQL responses",
+      "id": "injection.control",
+      "description": "Arm declared injection surfaces or delete a campaign injection",
       "operations": [
         "injection.arm",
         "injection.delete"
       ],
       "inputs": [
-        "Declared surface, selector, payload and attempt context"
+        "injection.arm: native definition and optional eligible_turn; registered attempt identity/digest in the envelope; fresh injection ID",
+        "definition uses a surface, selector, payload and constraints available in the environment capability manifest",
+        "injection.delete: injection_id; no original arm record or attempt context required"
       ],
       "outputs": [
-        "Injection receipts and observed delivery"
+        "Arm: injection receipt/definition; delete: native completion; delivery and committed outcomes are established separately through observations/evidence"
       ],
       "prerequisites": [
-        "Available surface in environment manifest"
+        "Attached campaign; session belongs to that campaign; shared request rules apply"
+      ],
+      "errors": [
+        "invalid_injection, injection_id_already_exists, attempt_binding_mismatch, unsupported surfaces or policy constraints",
+        "Delete: confirmed missing injection is 404 not_found; persistence failure is 500 injection_delete_failed"
       ],
       "guarantees": [
-        "Response injection does not establish committed database changes; observed delivery is independently recorded"
+        "Deleting an injection does not undo previous effects; restored injections remain eligible for campaign-scoped cleanup",
+        "Response alteration is distinct from persisted state alteration and does not prove committed target changes",
+        "No service implementation inventory is implied; Operator selects actions using the environment manifest"
       ],
       "references": [
-        "docs/injections-and-evaluation.md",
-        "docs/postgresql.md",
-        "docs/delivery-contracts.md"
+        "docs/cross-vm-gateway.md",
+        "internal/adaptive/contracts.go",
+        "internal/sandboxd/operations.go",
+        "docs/delivery-contracts.md",
+        "docs/injections-and-evaluation.md"
       ]
     },
     {
-      "id": "injection.state",
-      "description": "Persist injected payloads into declared environment resources, files and database records",
+      "id": "application.invoke",
+      "description": "Invoke a declared target operation under registered attempt attribution",
       "operations": [
-        "injection.arm",
-        "injection.delete"
+        "application.invoke"
       ],
       "inputs": [
-        "Declared state target, payload and attempt context"
+        "TurnRequest: operation and input bytes (base64 JSON), media_type, attempt_id, payload_digest; supported legacy HTTP fields and artifact_digest follow the native TurnRequest definition",
+        "Registered attempt matching envelope attempt_id and attempt_context_digest; operation/input contract selected from the environment manifest"
       ],
       "outputs": [
-        "State mutation evidence and receipts"
+        "Native turn receipt and status; operation.status retrieves completion and output; observations are read separately"
       ],
       "prerequisites": [
-        "State injection surface and allowlisted writable target"
+        "Attached campaign; session belongs to that campaign; shared request rules apply"
+      ],
+      "errors": [
+        "invalid_application_invocation, attempt_binding_mismatch, unsupported operation/input contract, closed execution, native limit errors or evidence_storage_error"
       ],
       "guarantees": [
-        "Mutations follow declared constraints; committed database effects verified independently"
+        "Supervisor-observed activity is attributed to the active invocation window, never trusted from target-supplied attribution headers",
+        "Runtime/provider configuration stays with Interceptor; this API does not select a model provider or alter application launch configuration"
       ],
       "references": [
-        "docs/injections-and-evaluation.md",
-        "docs/postgresql.md",
-        "docs/file-management.md"
+        "docs/cross-vm-gateway.md",
+        "internal/adaptive/contracts.go",
+        "internal/sandboxd/operations.go",
+        "internal/sandboxd/server.go",
+        "docs/application-interfaces.md"
       ]
     },
     {
       "id": "feedback.observations",
-      "description": "Provide live, filtered turn feedback and content retrieval",
+      "description": "Read permitted observations and bounded content for an attempt",
       "operations": [
         "observation.read",
         "observation.content.read"
       ],
       "inputs": [
-        "Turn/attempt selection and feedback profile"
+        "observation.read: turn_id or receipt_id, mutually exclusive; empty lookup only when unambiguous",
+        "observation.content.read: receipt_id, entry_id, offset and max_bytes",
+        "Both requests bind the registered attempt using envelope attempt_id and attempt_context_digest"
       ],
       "outputs": [
-        "Observation views, receipts and bounded content"
+        "Observation view with receipts, permitted entries and feedback; content read returns the selected bounded chunk, entry identity and position"
       ],
       "prerequisites": [
-        "Attached campaign and permitted feedback profile"
+        "Attached campaign; session belongs to that campaign; shared request rules apply"
+      ],
+      "errors": [
+        "invalid_observation_request, invalid_observation_read, attempt_binding_mismatch; unknown, ambiguous or unauthorized receipt/content access is rejected"
       ],
       "guarantees": [
-        "Profile filtering and scope checks; live database oracle verdicts; observed attribution never trusted from target headers"
+        "Feedback profiles filter disclosure; fixed receipts prevent widening the view with later reads",
+        "Observed attribution describes the invocation window; outcome verdicts come from independent observations/oracles, not agent-authored claims"
       ],
       "references": [
-        "docs/feedback.md",
-        "docs/postgresql.md"
+        "docs/cross-vm-gateway.md",
+        "internal/adaptive/contracts.go",
+        "internal/sandboxd/operations.go",
+        "internal/adaptive/feedback.go",
+        "docs/feedback.md"
       ]
     },
     {
-      "id": "evidence.oracles",
-      "description": "Collect independent evidence and deterministic outcome assessments",
+      "id": "snapshot.create",
+      "description": "Capture supported logical sandbox and application state",
       "operations": [
-        "POST /v1/evidence",
-        "interceptor evaluate",
-        "interceptor coverage"
+        "snapshot.create"
       ],
       "inputs": [
-        "Session/turn evidence and declared oracle configuration"
+        "Optional label, description and maximum_committed_bytes; campaign identity comes from the envelope, not a body override"
       ],
       "outputs": [
-        "Evidence bundle, oracle verdicts and coverage"
+        "Verified checkpoint identity and metadata, including campaign ID and description covered by the checkpoint hash"
       ],
       "prerequisites": [
-        "Permitted session access and configured oracles"
+        "Attached campaign; session belongs to that campaign; shared request rules apply"
+      ],
+      "errors": [
+        "invalid_snapshot_request, snapshot capability/quiesce failures, snapshot_bytes_exhausted or evidence_storage_error"
       ],
       "guarantees": [
-        "Required evidence-storage failures prevent false success; database verdicts use committed state, not agent claims"
+        "Availability comes from the environment manifest; application memory is restorable only through the declared state contract, not process-memory capture",
+        "Caller byte allowance can only tighten native limits; zero is exhausted; failed or oversized snapshots are not committed",
+        "Creation, retained metadata lookup and lifecycle restoration are separate API operations"
       ],
       "references": [
-        "docs/evidence-and-storage.md",
-        "docs/injections-and-evaluation.md",
-        "docs/postgresql.md"
-      ]
-    },
-    {
-      "id": "snapshot.restore",
-      "description": "Coordinate sandbox state and optional application state checkpoints",
-      "operations": [
-        "snapshot.create",
-        "POST /v1/snapshots/list",
-        "POST /v1/snapshots/inspect",
-        "POST /v1/lifecycle"
-      ],
-      "inputs": [
-        "Checkpoint and session identity"
-      ],
-      "outputs": [
-        "Verified checkpoint metadata and restored session lineage"
-      ],
-      "prerequisites": [
-        "Snapshot-capable environment; state adapter for internal application state"
-      ],
-      "guarantees": [
-        "No process-memory snapshot; coordinated database/service/application state; failed restore cannot claim success"
-      ],
-      "references": [
+        "docs/cross-vm-gateway.md",
+        "internal/adaptive/contracts.go",
+        "internal/sandboxd/operations.go",
         "docs/snapshots-and-restore.md",
-        "docs/application-integration.md",
-        "docs/postgresql.md"
-      ]
-    },
-    {
-      "id": "storage.management",
-      "description": "Manage declared writable paths, retained evidence and host cleanup",
-      "operations": [
-        "interceptor list",
-        "interceptor logs",
-        "interceptor purge",
-        "interceptor delete"
-      ],
-      "inputs": [
-        "Session identifiers and explicit cleanup scope"
-      ],
-      "outputs": [
-        "Retained records or cleanup outcomes"
-      ],
-      "prerequisites": [
-        "Host administrative access"
-      ],
-      "guarantees": [
-        "Target filesystem containment and evidence retention rules remain enforced"
-      ],
-      "references": [
-        "docs/file-management.md",
-        "docs/evidence-and-storage.md",
-        "docs/cli-reference.md"
+        "internal/snapshot/checkpoint.go"
       ]
     }
   ]

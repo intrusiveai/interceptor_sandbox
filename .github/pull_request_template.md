@@ -8,10 +8,16 @@
 
 ## Operator integration
 
-Does this change affect Operator's integration? If so, how?
+Does this change affect the API used by Operator's Interceptor integration? If so, how?
 
-<!-- Identify the affected API call, required input, consumed output, or behavior
+<!-- Identify the affected endpoint/operation, request, response, error, or guarantee
 Operator relies on, and explain any contract/version change. Otherwise state that
 the integration agreement is unchanged. Interceptor-only features do not require
 a contract change merely because they add functionality or configuration.
+Administrative CLI commands, build/setup procedures and target-specific capability
+inventories do not belong in this API contract. Keep contract version and digest
+semantics distinct: document-only edits change the digest without necessarily
+changing the API agreement, but still require a reviewed consumer hash-pin update
+before campaign execution. Compatibility requires both version and document hash
+to match; never pin an Interceptor source commit.
 See internal/integrationcontract/README.md. -->

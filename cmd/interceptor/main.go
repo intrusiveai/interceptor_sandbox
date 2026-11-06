@@ -85,7 +85,9 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		if len(arguments) != 2 || arguments[1] != "--json" {
 			return errors.New("usage: interceptor contract --json")
 		}
-		return writeJSON(stdout, integrationcontract.JSON())
+		// Export the exact bytes identified by the contract API digest.
+		_, err := stdout.Write(integrationcontract.JSON())
+		return err
 	case "environment":
 		return environmentCommand(arguments[1:], stdout)
 	case "credentials":

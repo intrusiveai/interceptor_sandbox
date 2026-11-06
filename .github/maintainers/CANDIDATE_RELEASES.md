@@ -36,15 +36,39 @@ to that commit. Direct pushes to `main` verify code but never promote a release.
 
 ## Interceptor integration contract
 
-The initial Interceptor-owned contract version is `0.1.0`, independent of the
-product release version. `internal/integrationcontract/contract.json` is the
-single source for the written capability contract, the local API's
+The Interceptor-owned API contract version is independent of the product release
+version. `internal/integrationcontract/contract.json` is the
+single source for the Operator-facing API agreement, the local API's
 `POST /v1/contract-version`, and CLI reporting. Update the document and version
 together whenever supported integration capabilities, interfaces or guarantees
 change, including optional additions. Retain the version for changes that leave
 the agreement unchanged, such as documentation corrections. Update the independent
 pin in the repository-local consumer fixture deliberately when the contract changes.
 Operator's implementation and release workflow are maintained separately.
+
+Operator's Interceptor compatibility pins are the contract version and complete
+document SHA-256. Do not
+require it to pin Interceptor's source commit or the commit that introduced or
+published the contract. Publishing another Interceptor release with the same
+contract version and exact document bytes does not require an Operator update or
+release. Contract edits, even formatting-only changes, require a reviewed hash-pin
+update in the consumer before it can execute. Never derive the expected pin from
+the service being checked. The source
+revisions and artifact checksums retained below establish Interceptor's build
+provenance and integrity; they are not additional Operator compatibility pins.
+
+Only Operator-facing API endpoints, operations, inputs, outputs, errors and
+guarantees belong in this document. Administrative CLI commands, target-specific
+capability values and general Interceptor feature inventories do not. See
+[contract scope](../../internal/integrationcontract/README.md).
+
+Contract `0.2.0` adds `interceptor_contract_sha256` to the identity API. The hash
+covers the complete embedded UTF-8 document, including formatting and the final
+newline, and matches the exact `contract --json` output. It is distinct from
+archive/executable checksums. Documentation-only edits change the document hash
+without necessarily changing the API version; both version and hash must match
+the consumer's pins before campaign execution. Catalog fields and publication
+mechanisms remain unchanged.
 
 The build embeds that contract and records `interceptor_contract_version` in
 `release.json`. CI runs `contract --json`, `version --json` and plain `version`
@@ -54,7 +78,8 @@ empty executable search path and no Docker or target. Each report records the
 archive checksum, executable checksum, source revision and observed version.
 Publication requires all six reports to agree with the archived metadata; the
 reports are retained in `candidate.json`. The existing packaged runtime tests
-also check the contract over HTTP before attaching and exercising a campaign.
+also check the contract over HTTP and compare its document hash with the installed
+CLI's full export before attaching and exercising a campaign.
 
 Catalog entries contain `interceptor_contract_version` and omit
 `contract_package_version`. Promotion preserves the qualified archive bytes and

@@ -1,7 +1,8 @@
 # Interceptor–Operator compatibility contract
 
 Campaign compatibility MUST be established automatically through Interceptor's
-API by comparing its contract version with the version pinned by Operator's
+API by comparing its contract version and complete-document SHA-256 with the
+version and hash pinned by Operator's
 Interceptor integration. Users MUST NOT need to export, inspect or supply a
 contract to run a campaign. A written contract and its export command remain available for
 integration development, inspection and release verification.
@@ -12,11 +13,15 @@ configuration and GitHub Actions workflows are outside this specification's scop
 ## Written contract
 
 Interceptor MUST own and embed one versioned, machine-readable contract describing
-the implemented capabilities and guarantees Operator must understand or rely on
-to integrate with Interceptor. It MUST NOT serve as an inventory of all
-Interceptor features. Each capability MUST have a stable
+only the Interceptor API capabilities used by Operator's integration. It MUST
+exclude administrative CLI commands, build/setup procedures, general provider or
+service inventories, Interceptor-only configuration, and target-specific
+capability values. It MUST describe how the API retrieves the separate environment
+capability manifest without duplicating that manifest. Each capability MUST have a stable
 identifier, a short description and references to its operations, required inputs,
-outputs, prerequisites and essential behavioral guarantees. Reuse existing
+outputs, prerequisites, errors and essential behavioral guarantees. Public routes,
+native operation routing, shared framing, campaign binding and retry semantics
+MUST be explicit. Reuse existing
 interface definitions and documentation instead of duplicating their schemas.
 Planned enhancements and settings for a particular environment MUST NOT appear as
 supported product capabilities.
@@ -26,7 +31,7 @@ supported product capabilities.
 contract, API and CLI version reporting, and release metadata MUST use the same
 authoritative contract version. The exported contract MUST describe the installed executable.
 
-The initial contract version MUST be `0.1.0`. The contract version MUST be
+The contract version MUST be
 independent of product release versions. Changes to
 supported integration capabilities, interfaces or guarantees MUST update the
 contract and its version together. Product changes that leave that agreement
@@ -47,8 +52,17 @@ clarified with the user before changing the contract. Follow the
 Interceptor MUST add `POST /v1/contract-version` to its existing local HTTP API
 in `internal/localapi`. The request MUST be an empty JSON object (`{}`), using
 the existing strict JSON parsing and response framing. A successful response MUST
-return `body.interceptor_contract_version` as a string from the running
-Interceptor service's embedded contract. This read-only endpoint MUST be available
+return `body.interceptor_contract_version` and `body.interceptor_contract_sha256`
+as strings identifying the running service's embedded contract. The SHA-256 MUST
+be 64 lowercase hexadecimal digits over the complete embedded UTF-8 document
+bytes, including whitespace and its final newline. It MUST NOT hash a subset,
+canonicalized JSON, API response, capability manifest, binary, or release archive.
+The digest value MUST NOT be embedded in the document itself. The export command
+MUST emit those same bytes unchanged so an independent hash matches the API.
+
+This response extension MUST advance the API contract version to `0.2.0`.
+Scope-only documentation corrections do not independently require a version bump.
+This read-only endpoint MUST be available
 before campaign attachment, require no campaign or session identifier, and perform
 no attachment, target calls or state changes. Reuse the existing listener and
 trusted-local-host access boundary; no separate service or listener is needed.
@@ -56,23 +70,32 @@ trusted-local-host access boundary; no separate service or listener is needed.
 The request MUST NOT require the caller to already know the contract version.
 The endpoint and its minimal response shape MUST remain stable across contract
 updates so an incompatible consumer can still obtain and report the version.
+Returning the digest MUST support exact hash matching without runtime document
+retrieval or a user-managed compatibility step.
 
 The documented consumer agreement MUST be simple: Operator's integration pins
-one supported contract version and automatically calls this endpoint on the
+one supported contract version and the SHA-256 of its reviewed complete document
+bytes, and automatically calls this endpoint on the
 Interceptor API instance it will use at the start of each campaign, before
-attachment or campaign target operations. Exact equality
+attachment or campaign target operations. Exact equality of both values
 permits the campaign to proceed to its normal environment and policy checks.
 A mismatch MUST produce a clear error showing the expected and actual contract
-versions and stop execution before any campaign target operations. A missing,
-malformed or unreadable version, unavailable endpoint or failed API request MUST
+versions and hashes and stop execution before any campaign target operations. A missing,
+malformed or unreadable version or hash, unavailable endpoint or failed API request MUST
 also stop execution, with an actionable compatibility error. There MUST be no
 CLI fallback, silent fallback, version-range matching or negotiation among
-historical contracts.
+historical contracts. Expected pins MUST be recorded with the integration after
+review, never derived from the service being checked or refreshed automatically.
+Any change to contract bytes, including whitespace-only edits with an unchanged
+version, MUST fail compatibility until the consumer's hash pin is updated.
 
 Campaign compatibility checking MUST NOT invoke a CLI command, read the full
 contract, compare capability lists from it or consult an Internet catalog.
 Matching product release versions
-MUST NOT be required. This consumer agreement defines the handoff for the separate
+MUST NOT be required. Operator compatibility and release metadata MUST NOT require
+pinning Interceptor's source commit or the commit that introduced or published the
+contract. Different Interceptor commits and releases with the same contract version
+and exact contract bytes MUST remain compatible without an Operator update. This consumer agreement defines the handoff for the separate
 Operator implementation; this task MUST implement Interceptor's endpoint and
 repository-local verification of that handoff. Existing `interceptor run` startup
 behavior MUST remain unchanged: this check gates campaign attachment and operations,
@@ -94,6 +117,10 @@ reuse existing wire requirements and justify any new fixed bound.
 
 ## Release packaging and publication
 
+- Source revisions and artifact checksums MUST remain Interceptor release
+  provenance and integrity records, not additional Operator compatibility pins.
+  Recording them during Interceptor qualification MUST NOT require Operator to
+  track each Interceptor release or republish its integration.
 - Interceptor MUST provide `interceptor version --json` for inspection and release
   validation, exposing `interceptor_contract_version` alongside the product version
   and source revision. Both this command and `interceptor contract --json` MUST
@@ -148,14 +175,25 @@ response framing, strict request parsing, availability before attachment, absenc
 of state changes or target calls, and agreement with the embedded contract and CLI
 reporting.
 
-A repository-local consumer fixture MUST pin a supported version, call the HTTP
+Tests MUST compare the documented routes/native operations to the implemented
+public API inventory and reject non-API operations such as administrative CLI
+commands. They MUST exercise the real identity endpoint and independent consumer
+check, verify the digest against exact exported bytes, and check malformed or
+missing identity fields. Packaged runtime qualification MUST compare the running
+API's document hash with the same installed executable's complete contract export
+before campaign attachment. Evidence/archive hashes MUST remain distinct.
+
+A repository-local consumer fixture MUST independently pin a supported version
+and complete-document hash, call the HTTP
 endpoint served by an actual release executable, and demonstrate equality followed
 by attachment and a normal operation against a built application. It MUST
 demonstrate rejection before attachment or campaign target operations for
-mismatched, missing, malformed and unreadable versions, an unavailable endpoint,
+mismatched, missing, malformed and unreadable versions or hashes, an unavailable endpoint,
 and failed API requests. The compatibility check MUST invoke neither CLI command
 nor a full-contract export. Include different product versions with the same
-contract version and confirm environment capability checks still apply. This MUST
+contract version and bytes and confirm environment capability checks still apply.
+Tests MUST reject altered contract bytes (including formatting-only edits) with
+an unchanged version and show that hash mismatch prevents attachment. This MUST
 NOT require Operator changes or be reported as full Operator integration validation.
 
 Release tests MUST reject missing or invalid contract versions, platform
@@ -168,7 +206,7 @@ contract version and, after promotion, the site's **Interceptor / Operator
 contract** indicator without redeployment. Candidates MUST remain hidden on the
 site. Report local, CI and live-publication results separately, including gaps.
 
-Documentation MUST explain the API endpoint, automatic exact-version check, mismatch error,
+Documentation MUST explain the API endpoint, automatic exact-version-and-hash check, mismatch error,
 optional full-contract export and separate environment manifest in the existing
 integration guide. Release-maintainer guidance MUST describe when to update the
 contract version, the metadata checks and the publisher upgrade in
