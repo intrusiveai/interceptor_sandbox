@@ -35,6 +35,15 @@ HTTP operations rather than nested dispatch values. Standard OpenAPI response
 schemas MUST also expose the union of those responses. Do not invent HTTP paths
 for native operations. Lifecycle variants MUST similarly distinguish stop/restore.
 
+The native operation-record schema MUST allow the exact nested response
+`{"status":0,"session_revision":0}` (with no body or additional fields) only when
+`state` is `running`. Finished or unknown records MUST retain normal response
+requirements. Ordinary response schemas and lifecycle records MUST NOT admit this
+placeholder. Regression coverage MUST query an actual blocked operation and its
+completed record, and reject placeholders outside the running-record context.
+This corrects the schema to existing behavior; contract version `0.2.0` MUST stay
+unchanged, with the reviewed consumer hash pin updated for the changed bytes.
+
 Use descriptions for ordering, exact-byte digests, retries, ownership, uncertainty,
 and evidence guarantees that schemas cannot establish. Existing wire types and
 handlers MUST guide the schemas; tests MUST detect divergence. This replaces the

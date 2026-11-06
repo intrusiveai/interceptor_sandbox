@@ -225,6 +225,15 @@ expected native revision. A new worker can also query `operation.status` without
 copying the original request. Lifecycle duplicate comparison likewise excludes
 caller attribution while preserving the admitted request in its ledger.
 
+A native `operation.status` lookup by operation ID returns HTTP 200 when the
+record is found, independently of whether the operation has finished. While
+`state` is `running`, its nested `response` can be exactly
+`{"status":0,"session_revision":0}` with no `body`: no response has been assigned
+yet. This is a stored placeholder, not an HTTP status. `completed` and `unknown`
+records contain normal response data. Retrying a still-running command itself
+returns status 202 with `operation_in_progress`; lifecycle records also use that
+explicit pending response, not the native placeholder.
+
 ## Snapshot and restore
 
 Create a checkpoint with native `snapshot.create`, body

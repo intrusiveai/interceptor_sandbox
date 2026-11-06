@@ -33,9 +33,9 @@ func TestConsumerContractCheck(t *testing.T) {
 		status     int
 		pass       bool
 	}{
-		{"match", `{"status":200,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"b6353d6dfb3d8fe13b68ff5242b1b42bec890e9f77630d4779e255f41f640310"}}`, 200, true},
-		{"different product release", `{"status":200,"body":{"version":"42.0.0","interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"b6353d6dfb3d8fe13b68ff5242b1b42bec890e9f77630d4779e255f41f640310"}}`, 200, true},
-		{"mismatch", `{"status":200,"body":{"interceptor_contract_version":"0.3.0","interceptor_contract_sha256":"b6353d6dfb3d8fe13b68ff5242b1b42bec890e9f77630d4779e255f41f640310"}}`, 200, false},
+		{"match", `{"status":200,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"0f95876e3e005a50489a9afcc6287ca14e979e1fc25f70d1731bc743f5217014"}}`, 200, true},
+		{"different product release", `{"status":200,"body":{"version":"42.0.0","interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"0f95876e3e005a50489a9afcc6287ca14e979e1fc25f70d1731bc743f5217014"}}`, 200, true},
+		{"mismatch", `{"status":200,"body":{"interceptor_contract_version":"0.3.0","interceptor_contract_sha256":"0f95876e3e005a50489a9afcc6287ca14e979e1fc25f70d1731bc743f5217014"}}`, 200, false},
 		{"hash mismatch", `{"status":200,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`, 200, false},
 		{"missing hash", `{"status":200,"body":{"interceptor_contract_version":"0.2.0"}}`, 200, false},
 		{"malformed hash", `{"status":200,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"sha256:abcd"}}`, 200, false},
@@ -44,10 +44,10 @@ func TestConsumerContractCheck(t *testing.T) {
 		{"malformed", `{"status":200,"body":{"interceptor_contract_version":"v0.2.0"}}`, 200, false},
 		{"wrong type", `{"status":200,"body":{"interceptor_contract_version":1}}`, 200, false},
 		{"unreadable", `{`, 200, false},
-		{"trailing", `{"status":200,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"b6353d6dfb3d8fe13b68ff5242b1b42bec890e9f77630d4779e255f41f640310"}} {}`, 200, false},
+		{"trailing", `{"status":200,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"0f95876e3e005a50489a9afcc6287ca14e979e1fc25f70d1731bc743f5217014"}} {}`, 200, false},
 		{"unavailable", `{}`, 404, false},
 		{"failed", `{}`, 503, false},
-		{"native error", `{"status":503,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"b6353d6dfb3d8fe13b68ff5242b1b42bec890e9f77630d4779e255f41f640310"}}`, 200, false},
+		{"native error", `{"status":503,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"0f95876e3e005a50489a9afcc6287ca14e979e1fc25f70d1731bc743f5217014"}}`, 200, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0

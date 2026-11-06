@@ -83,3 +83,10 @@ Review the final document and update the consumer fixture's version/hash pins
 explicitly. Do not generate the expected hash during tests or learn it from the
 running service. Operator maintainers can use this specification to validate their
 integration during development; startup still requires only the identity API.
+
+A native operation record can contain the exact unassigned response
+`{"status":0,"session_revision":0}` only while `state` is `running`. Keep this
+exception scoped to the record; do not add it to general HTTP response schemas
+or lifecycle records. Test status polling during an actual blocked invocation
+and after completion. Correcting the schema to describe this existing behavior
+retains version `0.2.0` but changes the document hash and reviewed consumer pin.

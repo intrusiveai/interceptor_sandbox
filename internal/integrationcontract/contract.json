@@ -1368,7 +1368,14 @@
             "$ref": "#/components/schemas/adaptive.OperationRequest"
           },
           "response": {
-            "$ref": "#/components/schemas/adaptive.GatewayResponse"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/adaptive.GatewayResponse"
+              },
+              {
+                "$ref": "#/components/schemas/PendingOperationResponse"
+              }
+            ]
           },
           "state": {
             "type": "string"
@@ -1381,7 +1388,29 @@
           "response",
           "admitted_at"
         ],
-        "type": "object"
+        "type": "object",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "running"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            "else": {
+              "properties": {
+                "response": {
+                  "$ref": "#/components/schemas/adaptive.GatewayResponse"
+                }
+              }
+            }
+          }
+        ],
+        "description": "A successful operation.status lookup returns HTTP 200 even while the recorded operation is running. Only running records may contain the exact unassigned response {status: 0, session_revision: 0}; completed and unknown records require a normal recorded response. This does not make 0 an HTTP status."
       },
       "adaptive.OperationRequest": {
         "additionalProperties": false,
@@ -4117,6 +4146,25 @@
             "$ref": "#/components/schemas/SnapshotCreateResponse"
           }
         ]
+      },
+      "PendingOperationResponse": {
+        "type": "object",
+        "description": "Unassigned response stored in a running native operation record. It is not an HTTP response and is invalid outside that context. No body is present.",
+        "properties": {
+          "status": {
+            "type": "integer",
+            "const": 0
+          },
+          "session_revision": {
+            "type": "integer",
+            "const": 0
+          }
+        },
+        "required": [
+          "status",
+          "session_revision"
+        ],
+        "additionalProperties": false
       }
     }
   }
