@@ -5,6 +5,7 @@ package main
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"flag"
@@ -12,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -22,6 +24,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/digest"
 	evidencepolicy "github.com/intrusive-ai/interceptor-sandbox/internal/evidence"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/localapi"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/ociruntime"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/session"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/snapshot"
 )
@@ -119,13 +122,36 @@ func counter(root, id string, want int) {
 	if root == "" {
 		return
 	}
-	data, err := os.ReadFile(filepath.Join(root, "sessions", id, "generations", "1", "runtime", "state", "app", "turns.json"))
-	must(err)
+	data := readMutableFile(root, id, "/state/app/turns.json")
 	var count struct {
 		Count int `json:"count"`
 	}
 	must(json.Unmarshal(data, &count))
 	require(count.Count == want, fmt.Sprintf("%s counter=%d want=%d", id, count.Count, want))
+}
+
+// Host runtime folders are staging only. Qualification reads the actual target
+// through its verified Docker binding, using the existing application identity.
+func readMutableFile(root, id, path string) []byte {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	docker, container, err := (ociruntime.Docker{}).ForSession(ctx, root, id)
+	must(err)
+	running, err := docker.Running(ctx, container)
+	must(err)
+	require(running, "mutable-file qualification requires a running target")
+	command := exec.CommandContext(ctx, "docker", "--host", docker.Endpoint, "exec", "--user", "20000:"+strconv.Itoa(os.Getgid()), container, "cat", path)
+	for _, value := range os.Environ() {
+		key, _, _ := strings.Cut(value, "=")
+		switch key {
+		case "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_TLS", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH":
+			continue
+		}
+		command.Env = append(command.Env, value)
+	}
+	data, err := command.CombinedOutput()
+	require(err == nil, fmt.Sprintf("read live mutable state: %v: %s", err, data))
+	return data
 }
 func evidence(output, id string, maximum int64, partial ...bool) {
 	raw, _ := json.Marshal(map[string]string{"api_version": localapi.Version, "campaign_id": campaign, "session_id": id})
@@ -182,6 +208,8 @@ func evidence(output, id string, maximum int64, partial ...bool) {
 func main() {
 	output := flag.String("output", "", "directory for evidence and result JSON")
 	evidenceFailure := flag.Bool("evidence-failure", false, "test required evidence failure after state qualification; requires isolated --data-root")
+	privateFiles := flag.Bool("private-files", false, "qualify private mutable-file capture and restore")
+	privateOracles := flag.Bool("private-file-oracles", false, "qualify private-file oracles without snapshot support")
 	stateSnapshots := flag.Bool("state-snapshots", false, "qualify packaged application state snapshot and restore")
 	commandOnly := flag.Bool("command-only", false, "qualify a minimal command target's echo operation without snapshots or model calls")
 	httpsSeams := flag.Bool("https-seams", false, "qualify declared HTTPS egress")
@@ -210,6 +238,14 @@ func main() {
 	must(limitErr)
 	limit := min(*maximumEvidence, attached.EvidenceMaxBytes)
 	first := attached.Binding
+	if *privateOracles {
+		qualifyPrivateOracles(first, *output, limit)
+		return
+	}
+	if *privateFiles {
+		qualifyPrivateFiles(first, *output, limit, *root)
+		return
+	}
 	if *httpsSeams {
 		qualifyHTTPSSeams(first, *output, limit)
 		return

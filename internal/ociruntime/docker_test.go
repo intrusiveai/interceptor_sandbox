@@ -34,3 +34,20 @@ func containsSequence(values, sequence []string) bool {
 	}
 	return false
 }
+
+func TestMutableBootstrapCapabilitiesAreExplicit(t *testing.T) {
+	config := RunConfig{Name: "interceptor-test", Image: "wrapper:test", User: "0:0", DropAllCaps: true, NoNewPrivileges: true, AddCaps: []string{"CHOWN", "FOWNER", "DAC_OVERRIDE"}}
+	args, err := RunArguments(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, capability := range config.AddCaps {
+		if !containsSequence(args, []string{"--cap-add", capability}) {
+			t.Fatalf("missing bootstrap capability %s", capability)
+		}
+	}
+	config.AddCaps = []string{"SYS_ADMIN"}
+	if _, err := RunArguments(config); err == nil {
+		t.Fatal("unrelated capability accepted")
+	}
+}

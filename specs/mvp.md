@@ -1938,6 +1938,13 @@ The MVP state journal supports:
 | `idempotency_commit` | Record a completed state-changing control request. |
 
 Paths are absolute container paths but MUST reside within sealed mutable roots.
+
+Ownership-aware filesystem operations additionally carry an
+`owner` role (`application` or `supervisor`), covered by the journal hash. File
+manifest schema 2 includes logical ownership, permission bits and the root entries
+in its digest. The capture/restore and legacy compatibility requirements in
+[private mutable-file snapshots](private-mutable-snapshots.md) refine this section,
+including macOS Docker-managed storage and pre-launch ownership restoration.
 Replay rejects unknown operation kinds, unknown fields, path escapes, missing
 blobs, and duplicate sequence numbers.
 

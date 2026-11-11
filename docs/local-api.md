@@ -510,7 +510,8 @@ go run ./examples/local-api-smoke --output /tmp/local-api-evidence \
 ```
 
 It creates its own test campaign, invokes the reference application before and
-after restore, verifies filesystem rollback when `--data-root` is supplied,
+after restore, verifies filesystem rollback in the bound Docker container when
+`--data-root` is supplied (host runtime folders contain staging data),
 rejects a stale mutation, stops the target and verifies complete protected exports
 for both sessions. It is a qualification client, not Operator implementation.
 

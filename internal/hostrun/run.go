@@ -240,6 +240,9 @@ func Restore(ctx context.Context, config Config, sourceSessionID, checkpointID s
 			return session.Metadata{}, fmt.Errorf("checkpoint lacks database %s", service.ID)
 		}
 	}
+	if err := snapshot.RequireOwnership(transactions[:checkpoint.JournalSeq]); err != nil {
+		return session.Metadata{}, err
+	}
 	blobs, err := blobstore.Open(sourcePaths.Blobs, report.Blueprint.Limits.MaxBlobBytes)
 	if err != nil {
 		return session.Metadata{}, err
@@ -327,23 +330,24 @@ func Restore(ctx context.Context, config Config, sourceSessionID, checkpointID s
 			}
 		}
 	}
+	restoredManifest := snapshot.EmptyManifest()
 	if len(roots) > 0 {
-		if err := snapshot.ReplayFilesystem(ctx, roots, blobs, transactions, checkpoint.JournalSeq); err != nil {
+		restoredManifest, err = snapshot.RestoreManifest(baseline, roots, transactions, checkpoint.JournalSeq)
+		if err != nil {
+			return metadata, err
+		}
+	}
+
+	if restoredManifest.Digest != checkpoint.FileManifestDigest {
+		return metadata, fmt.Errorf("restored file manifest mismatch: expected %s, got %s", checkpoint.FileManifestDigest, restoredManifest.Digest)
+	}
+	if len(roots) > 0 {
+		if err := snapshot.StageFilesystem(ctx, roots, blobs, restoredManifest); err != nil {
 			return metadata, err
 		}
 	}
 	if err := adaptive.RestoreRegistries(paths.Root, transactions[:checkpoint.JournalSeq]); err != nil {
 		return metadata, err
-	}
-	restoredManifest := snapshot.EmptyManifest()
-	if len(roots) > 0 {
-		restoredManifest, err = snapshot.Scan(ctx, roots, blobs, report.Blueprint.Limits.MaxBlobBytes)
-		if err != nil {
-			return metadata, err
-		}
-	}
-	if restoredManifest.Digest != checkpoint.FileManifestDigest {
-		return metadata, fmt.Errorf("restored file manifest mismatch: expected %s, got %s", checkpoint.FileManifestDigest, restoredManifest.Digest)
 	}
 	if err := snapshot.WriteManifest(paths.FileManifest, restoredManifest); err != nil {
 		return metadata, err
@@ -649,8 +653,12 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 	if blueprint.Network.TLS.Enabled {
 		mounts = append(mounts, ociruntime.Mount{Source: appimage.TLSMaterialDirectory(dataRoot, blueprint), Target: "/run/interceptor-tls", ReadOnly: true})
 	}
-	for _, root := range roots {
-		mounts = append(mounts, ociruntime.Mount{Source: root.HostPath, Target: root.ContainerPath})
+	for index, root := range roots {
+		name, err := config.Docker.CreateMutableVolume(ctx, index)
+		if err != nil {
+			return metadata, err
+		}
+		mounts = append(mounts, ociruntime.Mount{Source: name, Target: root.ContainerPath, Volume: true})
 	}
 	for _, seed := range blueprint.Filesystem.Seed {
 		if seed.ReadOnly {
@@ -679,16 +687,22 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 	if blueprint.Network.DNS.Enabled || blueprint.Network.HTTP.Enabled || blueprint.Network.TLS.Enabled {
 		sysctls["net.ipv4.ip_unprivileged_port_start"] = "53"
 	}
+	containerEnvironment := map[string]string{
+		"INTERCEPTOR_HOST_UID": strconv.Itoa(os.Getuid()), "INTERCEPTOR_HOST_GID": strconv.Itoa(os.Getgid()),
+		"INTERCEPTOR_APP_UID": "20000", "INTERCEPTOR_APP_GID": strconv.Itoa(os.Getgid()),
+		"INTERCEPTOR_BRIDGE_TRANSPORT": config.BridgeTransport,
+	}
+	caps := []string{"SETUID", "SETGID", "KILL"}
+	if len(roots) > 0 {
+		containerEnvironment["INTERCEPTOR_INITIALIZE_FILES"] = "1"
+		containerEnvironment["INTERCEPTOR_NATIVE_MUTABLE"] = "1"
+		caps = append(caps, "CHOWN", "FOWNER", "DAC_OVERRIDE")
+	}
 	containerID, err := config.Docker.Create(ctx, ociruntime.RunConfig{
-		Name: containerName, Image: applicationLock.WrapperImage, User: "0:0",
-		Environment: map[string]string{
-			"INTERCEPTOR_HOST_UID": strconv.Itoa(os.Getuid()), "INTERCEPTOR_HOST_GID": strconv.Itoa(os.Getgid()),
-			"INTERCEPTOR_APP_UID": "20000", "INTERCEPTOR_APP_GID": strconv.Itoa(os.Getgid()),
-			"INTERCEPTOR_BRIDGE_TRANSPORT": config.BridgeTransport,
-		},
+		Name: containerName, Image: applicationLock.WrapperImage, User: "0:0", Environment: containerEnvironment,
 		Mounts: mounts, Hostnames: hostnames, DNS: dns, Sysctls: sysctls, PIDs: metadata.Limits.MaxPIDs, MemoryBytes: metadata.Limits.MemoryBytes,
 		CPUs: metadata.Limits.CPUs, ReadOnly: true, NetworkNone: true, NoNewPrivileges: true, DropAllCaps: true,
-		AddCaps: []string{"SETUID", "SETGID", "KILL"}, TmpfsBytes: 64 << 20,
+		AddCaps: caps, TmpfsBytes: 64 << 20,
 	})
 	if containerID != "" {
 		launchedID.Store(&containerID)

@@ -66,3 +66,18 @@ credentials, installed images, sealed environments and build/TLS material. Sessi
 and campaign purge preserve the separate host credential-resolution audit; `--all`
 also removes that audit after preflight confirms its writers are inactive.
 Interceptor purge does not purge Operator's retained copies. Operator has its own `operatorctl purge --campaign <id>` and `--all` commands.
+
+### Mutable-root volumes
+
+Linux and macOS sessions use Docker local volumes for live application mutable roots so
+Linux ownership and private file modes remain meaningful. Interceptor records
+these volumes in the host-private binding to the selected Docker daemon.
+`purge` removes only the selected stopped sessions' volumes, checking their
+session labels and driver before deletion. Docker must remain reachable; a
+failed cleanup keeps the binding for a later retry. Host `generations/.../runtime`
+folders are staging data. Use a native snapshot to retain portable
+application state before purging a session.
+
+New sessions use managed volumes automatically; no Blueprint permission settings
+are needed. Existing sessions that used host bind mounts are not migrated, and
+purging their private files can still require ownership repair.

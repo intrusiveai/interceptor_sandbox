@@ -43,6 +43,7 @@ type RunConfig struct {
 }
 
 type Mount struct {
+	Volume   bool
 	Source   string
 	Target   string
 	ReadOnly bool
@@ -139,7 +140,7 @@ func RunArguments(config RunConfig) ([]string, error) {
 	}
 	for _, capability := range config.AddCaps {
 		switch capability {
-		case "SETUID", "SETGID", "KILL":
+		case "SETUID", "SETGID", "KILL", "CHOWN", "FOWNER", "DAC_OVERRIDE":
 			arguments = append(arguments, "--cap-add", capability)
 		default:
 			return nil, fmt.Errorf("unsupported container capability %q", capability)
@@ -193,6 +194,12 @@ func RunArguments(config RunConfig) ([]string, error) {
 			return nil, fmt.Errorf("invalid container mount %#v", mount)
 		}
 		value := "type=bind,src=" + mount.Source + ",dst=" + mount.Target
+		if mount.Volume {
+			if !validMutableVolumeName(mount.Source) {
+				return nil, errors.New("invalid managed mutable volume")
+			}
+			value = "type=volume,volume-nocopy,src=" + mount.Source + ",dst=" + mount.Target
+		}
 		if mount.ReadOnly {
 			value += ",readonly"
 		}

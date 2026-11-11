@@ -324,6 +324,16 @@ jobs:
                 --output "dist/qualification/https-seams-$transport-$debug"
             done
           done
+      - name: Qualify private mutable-file snapshots from the downloaded archive
+        run: |
+          python3 scripts/qualify_private_snapshots.py \
+            --cli dist/linux/interceptor_sandbox/interceptor \
+            --client "$RUNNER_TEMP/local-api-smoke" --transport unix \
+            --output "$RUNNER_TEMP/private-file-snapshots"
+          python3 scripts/qualify_private_snapshots.py \
+            --cli dist/linux/interceptor_sandbox/interceptor \
+            --client "$RUNNER_TEMP/local-api-smoke" --transport unix --oracles-only \
+            --output "$RUNNER_TEMP/private-file-oracles"
       - name: Qualify application state snapshots from the downloaded archive
         env:
           ARCH: ${{ matrix.arch }}
@@ -388,7 +398,10 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-qualification-linux-${{ matrix.arch }}
-          path: dist/qualification/
+          path: |
+            dist/qualification/
+            ${{ runner.temp }}/private-file-snapshots/
+            ${{ runner.temp }}/private-file-oracles/
           if-no-files-found: warn
           retention-days: 14
 

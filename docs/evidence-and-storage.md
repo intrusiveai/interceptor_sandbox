@@ -38,12 +38,17 @@ The layout is conceptually:
     artifacts.json              verified payload descriptors
     attempts.json               immutable attempt contexts and ancestry
     checkpoints/*.json          logical restore points
-    generations/                session-specific writable roots
+    generations/                mutable-root staging (live files in Docker volumes)
     logs/
       application.stdout.log
       application.stderr.log
     sockets/                    protected spool or Unix bridge artifacts
 ```
+
+On Linux and macOS, live mutable roots reside in session-owned Docker volumes to preserve
+Linux ownership and permissions; the host runtime folders are staging data.
+Checkpoints and evidence still live under this data root. Session purge verifies
+and removes the associated volumes. See [snapshots and restore](snapshots-and-restore.md#private-application-files).
 
 Treat the entire root as sensitive test data. Configure it on a local filesystem
 owned by the operator; do not place it in a broadly shared or synchronized
