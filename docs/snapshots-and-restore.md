@@ -48,6 +48,39 @@ Changed file contents are stored once within the owning session, even if more
 than one snapshot in that session uses the same content. The journal records
 where each file belongs and refers to its content by digital fingerprint.
 
+## Private application files
+
+Declared mutable roots include application-owned private files and directories.
+Interceptor preserves their contents, logical owner (application or supervisor),
+and permission bits, including nested 0700 directories and 0600 files. You do not
+need to make these files readable by other users or change application code.
+Mixed roots can contain supervisor-owned seed files and application-owned state.
+
+On Linux and macOS, Interceptor keeps each live mutable root in a session-owned Docker
+volume so Linux ownership and private permissions survive restore. Host runtime
+directories contain staging files, not the live application state. Session purge
+removes the associated volumes after confirming the target has stopped, including
+private directories the host user cannot traverse. Checkpoints are
+retained as host-owned manifests and file blobs; restore does not depend on the
+source volume or source container.
+
+During capture, an isolated helper reads files using the application identity;
+the supervisor validates and stores the snapshot. During restore, Interceptor
+stages files privately on the host, verifies them, and applies ownership and modes
+inside the new container before starting the application. Temporary ownership
+restoration privileges are removed before normal execution. Restored files bypass
+the permission widening used when initializing fresh writable seeds.
+
+Ownership is portable between Interceptor's existing supervisor and application
+identities, not arbitrary system users. ACLs are not preserved. Unsupported
+ownership, hard links, escaping symlinks or inaccessible entries fail the snapshot;
+Interceptor never silently omits them.
+
+Ownership-aware snapshots use file manifest schema 2. Older checkpoints without
+ownership metadata remain available for evidence inspection, but restore rejects
+them before stopping the current target. Start a new session and create a new
+checkpoint using the updated Interceptor; older ownership is not guessed.
+
 ## What is not captured
 
 A snapshot does not contain temporary details of the currently running process:
@@ -176,7 +209,7 @@ The native startup path additionally checks application/image compatibility and
 reconstruction. Failure after source closure is terminal, not a fallback to the
 old target. Operator's cumulative accounting does not roll back with native state.
 
-Before starting anything, restore verifies:Before starting anything, restore verifies:
+Before starting anything, restore verifies:
 
 - the checkpoint hash and source-session identity;
 - the saved data format is supported by this Interceptor version;
@@ -195,10 +228,11 @@ More precisely, it:
 3. creates a new event log and state journal;
 4. reapplies successfully recorded service, identity, artifact, attempt,
    injection, budget, oracle, and clock changes through the checkpoint;
-5. applies file operations to the new mutable roots;
+5. stages the reconstructed file contents privately in the new mutable roots;
 6. checks that the rebuilt files have the fingerprint recorded by the snapshot;
 7. records `restored_from` ancestry; and
-8. starts a fresh container and application process, then waits for health.
+8. starts a fresh container, restores recorded ownership and permissions before
+   launching the application, then waits for health.
 
 The source is closed, stopped and removed before the new container starts.
 Restored sessions retain checkpoint ancestry and own copies of the verified

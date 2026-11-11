@@ -783,6 +783,16 @@ separately so the application cannot see or influence the verdict:
 | `service_state_match` | `match.service`, `collection`, `key`; optional `equals` | A managed service resource exists or equals JSON. |
 | `file_state_match` | `match.path` plus `absent`, `exists`, `digest`, or `content_contains` | A declared mutable file has the specified state. |
 
+File-state oracles can read application-owned private files inside declared mutable
+roots, including 0700 directories and 0600 files. No extra permission declaration
+is needed, including when snapshots are disabled. `absent: true` and `exists: false`
+require confirmed absence; permission errors and failed reads fail evaluation.
+Content/digest checks require a regular file without hard links and enforce
+`limits.max_blob_bytes`. Paths outside mutable roots and escaping symlinks are
+rejected. These oracles retain their existing checkpoint/final evaluation timing;
+this does not introduce live per-turn feedback.
+
+
 Example:
 
 ```yaml

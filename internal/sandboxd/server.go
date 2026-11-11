@@ -52,6 +52,7 @@ const (
 )
 
 type Server struct {
+	snapshotHelper     *snapshotHelper
 	seamLog            *os.File
 	httpsSeams         *httpsseam.Client
 	applicationExited  chan struct{}
@@ -146,6 +147,12 @@ type Turn struct {
 }
 
 func Run(ctx context.Context) error {
+	if os.Getenv("INTERCEPTOR_INITIALIZE_FILES") == "1" {
+		if err := initializeMutablePermissions(ctx); err != nil {
+			return fmt.Errorf("initialize mutable ownership: %w", err)
+		}
+	}
+
 	if err := adoptSupervisorIdentity(envInt("INTERCEPTOR_HOST_UID", 0), envInt("INTERCEPTOR_HOST_GID", 0)); err != nil {
 		return fmt.Errorf("establish supervisor identity: %w", err)
 	}
@@ -287,6 +294,10 @@ func New() (*Server, error) {
 }
 
 func (s *Server) Start(ctx context.Context) error {
+	if err := s.startSnapshotHelper(); err != nil {
+		return fmt.Errorf("start snapshot reader: %w", err)
+	}
+
 	if err := s.prepareMutableRoots(); err != nil {
 		return err
 	}
@@ -1227,7 +1238,7 @@ func (s *Server) fidelityMutation(ctx context.Context, definition injection.Defi
 		if err != nil {
 			return nil, nil, err
 		}
-		operation := statejournal.Operation{Kind: "file_upsert", Path: containerPath, Mode: 0o640, Blob: object.Digest, Size: object.Size}
+		operation := statejournal.Operation{Kind: "file_upsert", Owner: snapshot.SupervisorOwner, Path: containerPath, Mode: 0o640, Blob: object.Digest, Size: object.Size}
 		return []statejournal.Operation{operation}, func() error { return fsutil.WriteFile(hostPath, encoded, 0o640) }, nil
 	}
 	if err != nil || !info.Mode().IsRegular() {
@@ -1261,7 +1272,7 @@ func (s *Server) fidelityMutation(ctx context.Context, definition injection.Defi
 	if err != nil {
 		return nil, nil, err
 	}
-	operation := statejournal.Operation{Kind: "file_upsert", Path: containerPath, Mode: uint32(info.Mode().Perm()), Blob: object.Digest, Size: object.Size}
+	operation := statejournal.Operation{Kind: "file_upsert", Owner: snapshot.SupervisorOwner, Path: containerPath, Mode: uint32(info.Mode().Perm()), Blob: object.Digest, Size: object.Size}
 	return []statejournal.Operation{operation}, func() error {
 		if err := fsutil.WriteFile(hostPath, encoded, info.Mode().Perm()); err != nil {
 			return err
@@ -1560,12 +1571,12 @@ func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommit
 	}
 	defer releaseDatabases()
 	roots := s.containerRoots()
-	first, err := s.scanMutable(ctx, roots)
+	first, err := s.scanMutable(ctx, roots, allowance)
 	if err != nil {
 		return snapshot.Checkpoint{}, err
 	}
 	time.Sleep(100 * time.Millisecond)
-	second, err := s.scanMutable(ctx, roots)
+	second, err := s.scanMutable(ctx, roots, allowance)
 	if err != nil || second.Digest != first.Digest {
 		return snapshot.Checkpoint{}, errors.New("mutable filesystem did not reach a stable boundary")
 	}
@@ -1573,7 +1584,7 @@ func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommit
 		return snapshot.Checkpoint{}, fmt.Errorf("pause application: %w", err)
 	}
 	defer syscall.Kill(-s.app.Process.Pid, syscall.SIGCONT)
-	current, err := s.scanMutable(ctx, roots)
+	current, err := s.scanMutable(ctx, roots, allowance)
 	if err != nil {
 		return snapshot.Checkpoint{}, err
 	}
@@ -1614,7 +1625,7 @@ func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommit
 	s.metadata.Consumed.SnapshotBytes += canonicalSize
 	budget, _ := json.Marshal(s.metadata.Consumed)
 	s.metadataMu.Unlock()
-	report, err := s.evaluate()
+	report, err := s.evaluate(ctx)
 	if err != nil {
 		return snapshot.Checkpoint{}, err
 	}
@@ -1701,8 +1712,8 @@ func (s *Server) eventsHandler(writer http.ResponseWriter, request *http.Request
 	writeJSON(writer, 200, map[string]any{"events": filtered})
 }
 
-func (s *Server) evaluationHandler(writer http.ResponseWriter, _ *http.Request) {
-	report, err := s.evaluate()
+func (s *Server) evaluationHandler(writer http.ResponseWriter, request *http.Request) {
+	report, err := s.evaluate(request.Context())
 	if err != nil {
 		writeError(writer, 500, "evaluation_failed", err.Error())
 		return
@@ -1812,6 +1823,9 @@ func (s *Server) quiesce(ctx context.Context) error {
 func (s *Server) Close(ctx context.Context) error {
 	var result error
 	s.closeOnce.Do(func() {
+		if s.snapshotHelper != nil {
+			defer s.snapshotHelper.close()
+		}
 		if s.execution != nil {
 			result = errors.Join(result, s.execution.Close("session_stopped"))
 		}
@@ -1864,7 +1878,7 @@ func (s *Server) Close(ctx context.Context) error {
 		if len(s.identityFiles) > 0 {
 			_ = os.Remove(filepath.Dir(s.identityFiles[0]))
 		}
-		if report, err := s.evaluate(); err != nil {
+		if report, err := s.evaluate(ctx); err != nil {
 			result = errors.Join(result, fmt.Errorf("persist final evaluation: %w", err))
 		} else if err := fsutil.WriteJSON(s.paths.Evaluation, report, 0o640); err != nil {
 			result = errors.Join(result, fmt.Errorf("persist final evaluation: %w", err))
@@ -2033,7 +2047,7 @@ func (s *Server) replayManagedState() error {
 	return nil
 }
 
-func (s *Server) evaluate() (evaluation.Report, error) {
+func (s *Server) evaluate(ctx context.Context) (evaluation.Report, error) {
 	if err := s.evidenceError(); err != nil {
 		return evaluation.Report{}, err
 	}
@@ -2045,9 +2059,18 @@ func (s *Server) evaluate() (evaluation.Report, error) {
 	for id, handler := range s.services {
 		serviceState[id] = handler.Snapshot()
 	}
+	roots := s.containerRoots()
+	if timeout := s.blueprint.Application.Interface.TurnTimeoutMS; timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(timeout)*time.Millisecond)
+		defer cancel()
+	}
 	report, err := evaluation.Evaluate(evaluation.Input{
+		Context: ctx, ReadMutable: func(ctx context.Context, q snapshot.ReadRequest) (snapshot.ReadResponse, error) {
+			return s.readMutable(ctx, roots, q)
+		},
 		Blueprint: s.blueprint, Events: events, Injections: s.injections.OperatorEvaluation(),
-		Blobs: s.blobs, Services: serviceState, MutableRoot: s.containerRoots(),
+		Blobs: s.blobs, Services: serviceState, MutableRoot: roots,
 	})
 	if err != nil {
 		return evaluation.Report{}, err
@@ -2104,6 +2127,11 @@ func (s *Server) serveUnix(path string, handler http.Handler) error {
 }
 
 func (s *Server) prepareMutableRoots() error {
+	// Restore bootstrap already applied the recorded modes and logical owners.
+	if s.metadata.ParentSessionID != "" {
+		return nil
+	}
+
 	for _, root := range s.blueprint.Application.Persistence.MutableRoots {
 		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
@@ -2274,11 +2302,13 @@ func (s *Server) containerRoots() []snapshot.Root {
 	return result
 }
 
-func (s *Server) scanMutable(ctx context.Context, roots []snapshot.Root) (snapshot.Manifest, error) {
+func (s *Server) scanMutable(ctx context.Context, roots []snapshot.Root, allowance int64) (snapshot.Manifest, error) {
 	if len(roots) == 0 {
 		return snapshot.EmptyManifest(), nil
 	}
-	return snapshot.Scan(ctx, roots, s.blobs, s.blueprint.Limits.MaxBlobBytes)
+	return snapshot.ScanWithReader(ctx, roots, s.blobs, allowance, snapshot.Identities{SupervisorUID: os.Getuid(), SupervisorGID: os.Getgid(), ApplicationUID: int(s.appUID), ApplicationGID: int(s.appGID)}, func(ctx context.Context, q snapshot.ReadRequest) (snapshot.ReadResponse, error) {
+		return s.readMutable(ctx, roots, q)
+	})
 }
 
 func (s *Server) servedRoute(method, path string) bool {

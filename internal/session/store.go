@@ -86,6 +86,7 @@ func Initialize(dataRoot string, metadata Metadata, baselineManifestDigest strin
 		"environment_digest":            metadata.EnvironmentDigest,
 		"application_digest":            metadata.AppDigest,
 		"baseline_file_manifest_digest": baselineManifestDigest,
+		"file_manifest_schema":          2,
 		"bridge_transport":              metadata.BridgeTransport,
 	})
 	if _, err := journal.Append("environment_materialized", []statejournal.Operation{{Kind: "environment_materialized", Value: value}}); err != nil {

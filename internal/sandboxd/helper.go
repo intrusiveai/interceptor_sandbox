@@ -13,26 +13,43 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/intrusive-ai/interceptor-sandbox/internal/snapshot"
 )
 
 type HelperRequest struct {
-	ID        string   `json:"id"`
-	Type      string   `json:"type,omitempty"`
-	Command   []string `json:"command"`
-	Stdin     []byte   `json:"stdin,omitempty"`
-	TimeoutMS int64    `json:"timeout_ms"`
+	Snapshot  *snapshot.ReadRequest `json:"snapshot,omitempty"`
+	ID        string                `json:"id"`
+	Type      string                `json:"type,omitempty"`
+	Command   []string              `json:"command"`
+	Stdin     []byte                `json:"stdin,omitempty"`
+	TimeoutMS int64                 `json:"timeout_ms"`
 }
 
 type HelperResponse struct {
-	ID       string `json:"id"`
-	OK       bool   `json:"ok"`
-	Error    string `json:"error,omitempty"`
-	Stdout   []byte `json:"stdout,omitempty"`
-	Stderr   []byte `json:"stderr,omitempty"`
-	ExitCode int    `json:"exit_code,omitempty"`
+	FileError string                 `json:"file_error,omitempty"`
+	Snapshot  *snapshot.ReadResponse `json:"snapshot,omitempty"`
+	ID        string                 `json:"id"`
+	OK        bool                   `json:"ok"`
+	Error     string                 `json:"error,omitempty"`
+	Stdout    []byte                 `json:"stdout,omitempty"`
+	Stderr    []byte                 `json:"stderr,omitempty"`
+	ExitCode  int                    `json:"exit_code,omitempty"`
 }
 
 func RunHelper() error {
+	var rootPaths []string
+	if value := os.Getenv("INTERCEPTOR_SNAPSHOT_ROOTS"); value != "" {
+		if err := json.Unmarshal([]byte(value), &rootPaths); err != nil {
+			return err
+		}
+	}
+	roots := make([]snapshot.Root, 0, len(rootPaths))
+	for _, path := range rootPaths {
+		roots = append(roots, snapshot.Root{ContainerPath: path, HostPath: path})
+	}
+	readSnapshot := snapshot.RootReader(roots)
+
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64<<10), 16<<20)
 	encoder := json.NewEncoder(os.Stdout)
@@ -50,6 +67,24 @@ func RunHelper() error {
 		var request HelperRequest
 		if err := decoder.Decode(&request); err != nil || request.ID == "" {
 			write(HelperResponse{ID: request.ID, Error: "invalid helper request"})
+			continue
+		}
+		if request.Type == "snapshot" {
+			if request.Snapshot == nil {
+				write(HelperResponse{ID: request.ID, Error: "missing snapshot read"})
+				continue
+			}
+			result, err := readSnapshot(context.Background(), *request.Snapshot)
+			response := HelperResponse{ID: request.ID, OK: err == nil, Snapshot: &result}
+			if err != nil {
+				response.Error = err.Error()
+				if errors.Is(err, os.ErrNotExist) {
+					response.FileError = "not_found"
+				} else if errors.Is(err, os.ErrPermission) {
+					response.FileError = "permission_denied"
+				}
+			}
+			write(response)
 			continue
 		}
 		if request.Type == "cancel" {

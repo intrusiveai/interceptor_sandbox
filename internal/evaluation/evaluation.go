@@ -1,6 +1,7 @@
 package evaluation
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,6 +45,8 @@ type Report struct {
 }
 
 type Input struct {
+	Context     context.Context
+	ReadMutable snapshot.ReadFunc
 	Blueprint   *environment.Blueprint
 	Events      []recording.Event
 	Injections  []injection.OperatorState
@@ -231,30 +234,48 @@ func evaluateOracle(oracle environment.Oracle, input Input) (OracleResult, error
 	}
 	if oracle.Kind == "file_state_match" {
 		path := textValue(oracle.Match["path"])
-		hostPath, ok := resolve(input.MutableRoot, path)
-		if ok {
-			info, err := os.Lstat(hostPath)
-			exists := err == nil
-			if absent, configured := oracle.Match["absent"].(bool); configured && absent {
-				result.Fired = !exists
-			} else if expected, configured := oracle.Match["exists"].(bool); configured {
-				result.Fired = exists == expected
-			} else if exists && info.Mode().IsRegular() {
-				content, readErr := os.ReadFile(hostPath)
-				if readErr != nil {
-					return result, readErr
-				}
-				if expected := textValue(oracle.Match["digest"]); expected != "" {
-					result.Fired = digest.Bytes(content) == expected
-				} else if expected := textValue(oracle.Match["content_contains"]); expected != "" {
-					result.Fired = strings.Contains(string(content), expected)
-				}
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+			return result, errors.New("invalid file oracle path")
+		}
+		if _, ok := resolve(input.MutableRoot, path); !ok {
+			return result, errors.New("file oracle path is outside declared mutable roots")
+		}
+		ctx := input.Context
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		read := input.ReadMutable
+		if read == nil {
+			read = snapshot.RootReader(input.MutableRoot)
+		}
+		metadata, err := read(ctx, snapshot.ReadRequest{Path: path, Kind: "stat"})
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return result, fmt.Errorf("inspect file oracle path %s: %w", path, err)
+		}
+		exists := err == nil
+		if exists && metadata.Info == nil {
+			return result, errors.New("file oracle metadata unavailable")
+		}
+		if absent, configured := oracle.Match["absent"].(bool); configured && absent {
+			result.Fired = !exists
+		} else if expected, configured := oracle.Match["exists"].(bool); configured {
+			result.Fired = exists == expected
+		} else if exists {
+			content, err := snapshot.ReadContents(ctx, read, path, input.Blueprint.Limits.MaxBlobBytes)
+			if err != nil {
+				return result, fmt.Errorf("read file oracle path %s: %w", path, err)
 			}
-			if result.Fired {
-				result.Evidence = append(result.Evidence, "file:"+path)
+			if expected := textValue(oracle.Match["digest"]); expected != "" {
+				result.Fired = digest.Bytes(content) == expected
+			} else if expected := textValue(oracle.Match["content_contains"]); expected != "" {
+				result.Fired = strings.Contains(string(content), expected)
 			}
 		}
+		if result.Fired {
+			result.Evidence = append(result.Evidence, "file:"+path)
+		}
 	}
+
 	return result, nil
 }
 
