@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	pathpkg "path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -415,7 +416,10 @@ func (s *Server) startSyntheticServices() error {
 		return err
 	}
 	for _, definition := range s.blueprint.AttackerServices {
-		methods, paths := optionStrings(definition.Options["methods"]), optionStrings(definition.Options["paths"])
+		methods, paths, err := services.SinkAllowlists(definition.Options)
+		if err != nil {
+			return fmt.Errorf("attacker service %s: %w", definition.ID, err)
+		}
 		limit := definition.MaxCaptureBytes
 		if limit == 0 {
 			limit = 1 << 20
@@ -1306,6 +1310,19 @@ func (s *Server) validateInjectionTarget(definition injection.Definition) error 
 			if service.ID == definition.Selector.Service {
 				if service.Response.Mode != "dynamic" {
 					return errors.New("attacker service response is static")
+				}
+				methods, paths, err := services.SinkAllowlists(service.Options)
+				if err != nil {
+					return err
+				}
+				if definition.Selector.Method == http.MethodHead || len(methods) == 1 && methods[0] == http.MethodHead {
+					return errors.New("attacker response injection requires a method with a response body")
+				}
+				if definition.Selector.Method != "" && len(methods) > 0 && !slices.Contains(methods, definition.Selector.Method) {
+					return errors.New("attacker response method is outside the declared allowlist")
+				}
+				if len(paths) > 0 && !slices.Contains(paths, definition.Selector.Path) {
+					return errors.New("attacker response path is outside the declared allowlist")
 				}
 				return nil
 			}
@@ -2316,22 +2333,6 @@ func (s *Server) servedRoute(method, path string) bool {
 	return ok
 }
 
-func optionStrings(value any) []string {
-	raw, ok := value.([]any)
-	if !ok {
-		if typed, ok := value.([]string); ok {
-			return typed
-		}
-		return nil
-	}
-	result := []string{}
-	for _, item := range raw {
-		if text, ok := item.(string); ok {
-			result = append(result, text)
-		}
-	}
-	return result
-}
 func isLoopback(host string) bool {
 	if host == "localhost" {
 		return true

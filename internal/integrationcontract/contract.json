@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Interceptor API for Operator",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "description": "Operator-facing API only. Administrative CLI commands and Interceptor-only configuration are excluded. Before attachment consumers require exact agreement with their independently reviewed contract version and complete-document SHA-256 pins. Source commits and product versions are not compatibility pins. All schema references are included in this document."
   },
   "servers": [
@@ -2006,10 +2006,17 @@
             "type": "string"
           },
           "injection_root": {
-            "type": "string"
+            "type": "string",
+            "description": "response-body for HTTP responses; mcp-tool-result for MCP results; service-record for existing identity state. Discovery does not grant creation or bypass runtime authorization."
           },
           "kind": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "http-route",
+              "mcp-tool",
+              "http-route-set",
+              "state-collection"
+            ]
           },
           "maximum_request_bytes": {
             "type": "integer"
@@ -2022,6 +2029,34 @@
           },
           "path": {
             "type": "string"
+          },
+          "methods": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "For http-route-set only: exact normalized HTTP method allowlist. Omitted/empty means unrestricted. No wildcard token; consumers choose a concrete method. HEAD is never injectable and is excluded from nonempty exported lists."
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "For http-route-set only: exact URL path allowlist, not templates. Omitted/empty means unrestricted. No wildcard token; consumers choose a concrete absolute path without query."
+          },
+          "keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "For state-collection only: sorted existing record keys scoped to this issuer. An empty or missing list never authorizes arbitrary keys or creation."
+          },
+          "mutable_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "For state-collection only: top-level record fields that may be changed using existing environment_state placement/JSON Pointer rules. Other fields are immutable. Delivery input/output describe the whole record, not an injection request."
           }
         },
         "required": [
@@ -2030,7 +2065,110 @@
           "injection_root",
           "maximum_request_bytes"
         ],
-        "type": "object"
+        "type": "object",
+        "description": "Selectable interactions. http-route and mcp-tool retain existing semantics. http-route-set represents a dynamic attacker response using independent method/path allowlists; selectors still use concrete exact values. state-collection represents existing managed identity records, not an HTTP route. Only its advertised keys and mutable fields are selectable. No credential, record value or sink response value is disclosed. Static sinks have no injectable endpoints. Unrestricted method sets exclude HEAD; HEAD-only sinks expose no response-injection endpoint.",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "http-route-set"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "delivery"
+              ],
+              "properties": {
+                "injection_root": {
+                  "const": "response-body"
+                }
+              },
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "method"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "path"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "keys"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "mutable_fields"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "collection"
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "state-collection"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "collection",
+                "keys",
+                "mutable_fields",
+                "delivery"
+              ],
+              "properties": {
+                "keys": {
+                  "minItems": 1
+                },
+                "mutable_fields": {
+                  "minItems": 1
+                },
+                "injection_root": {
+                  "const": "service-record"
+                }
+              },
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "method"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "path"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "methods"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "paths"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ]
       },
       "delivery.Example": {
         "additionalProperties": false,

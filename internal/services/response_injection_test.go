@@ -87,3 +87,22 @@ func TestDynamicAttackerSinkCapturesRequestAndInjectsResponse(t *testing.T) {
 		t.Fatalf("dynamic sink did not capture its request: %#v", observations)
 	}
 }
+
+func TestAttackerHeadCaptureDoesNotConsumeResponseInjection(t *testing.T) {
+	manager := injectionManager(t, injection.Definition{ID: "response", Surface: "service_response", Mode: "simulation", Scope: "once", Enabled: true, Selector: injection.Selector{Service: "sink", Path: "/poll", CallOrdinal: "first"}, Placement: injection.Placement{Operation: "replace"}, Payload: json.RawMessage(`"injected"`)})
+	sink, err := NewSinkHandler("sink", nil, nil, SinkResponse{Status: 200, Body: "idle"}, 1024, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := WithResponseInjection("sink", "http_sink", sink, manager, nil)
+	for _, method := range []string{"HEAD", "GET"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(method, "/poll", nil))
+		if method == "GET" && !strings.Contains(response.Body.String(), "injected") {
+			t.Fatal("HEAD consumed injection", response.Body)
+		}
+	}
+	if len(sink.Observations()) != 2 {
+		t.Fatal("HEAD capture missing")
+	}
+}

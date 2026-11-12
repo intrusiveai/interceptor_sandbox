@@ -366,6 +366,9 @@ func Validate(directory string) (*ValidationReport, error) {
 		if service.Kind != "http_sink" {
 			add(fmt.Errorf("%s.kind %q is unsupported", prefix, service.Kind))
 		}
+		if _, _, err := services.SinkAllowlists(service.Options); err != nil {
+			add(fmt.Errorf("%s.options: %w", prefix, err))
+		}
 		add(validateListen(prefix+".listen", service.Listen, listens, service.ID))
 		add(validateHostnames(prefix, service.Hostnames, hostnames, service.ID))
 		if service.Response.Status < 100 || service.Response.Status > 599 {

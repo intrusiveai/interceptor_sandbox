@@ -81,6 +81,11 @@ checks downloaded archive contents and native hashes as well as transfer integri
 Operator must support the declared formats in its independent verifier before
 adopting the new version/hash pins; updating the pins alone is insufficient.
 
+Contract `0.4.0` adds selectable attacker-response and identity-state endpoint
+metadata. Validate native discovery-to-injection tests and rebuild wrappers so
+stored manifest digests include the new definitions. Operator must separately
+support `http-route-set` and `state-collection` before updating its pins.
+
 The build reads `info.version` from and embeds that OpenAPI contract, and records `interceptor_contract_version` in
 `release.json`. CI runs `contract --json`, `version --json` and plain `version`
 from every actual archived Linux/macOS CLI on a compatible native runner. Linux
