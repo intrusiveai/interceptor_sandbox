@@ -427,3 +427,35 @@ completeness of capture. Repair storage and start a new session to resume work.
 See [PostgreSQL and pgvector](postgresql.md) for the managed database Blueprint,
 wrapper packaging, verified driver TLS, database injection surfaces, independent
 committed-state oracles, evidence and coordinated restore contract.
+
+## Discovering attacker and identity targets
+
+The capability manifest includes built-in descriptions for dynamic attacker
+sinks and identity issuers. No extra blueprint flag is required; both supported
+blueprint versions export these descriptions. Rebuild existing wrappers to bind
+an updated manifest. Authored HTTP/MCP descriptions retain their existing
+`export_contracts` opt-in.
+
+For a dynamic attacker sink, select its `http-route-set` endpoint. `methods` and
+`paths` are independent exact allowlists: an omitted or empty list is unrestricted.
+They contain neither templates nor wildcard strings. Choose a concrete method
+and path, then use `service_response` with `selector.service`, `selector.method`
+and `selector.path`. For example, `methods: [POST]` and `paths: [/collect]`
+permit `POST /collect`; an unrestricted path list lets the consumer choose a
+concrete path used by the application. HEAD cannot deliver an injected body and
+is excluded. Static and HEAD-only sinks advertise no response injection.
+The existing ordinal and request predicates still narrow which response changes.
+Out-of-allowlist arming returns `invalid_injection`.
+
+For an identity issuer, select a `state-collection` endpoint and one of its
+`keys`. Use `environment_state`, `selector.service`, `selector.collection` and
+`selector.key`, with a placement pointer into a listed `mutable_fields` entry.
+For example, replace `/active` with `false` on a grant, or `/unavailable` with
+`true` on `faults/issuer`. The delivery input/output schemas describe complete
+records; they are not injection request schemas and do not expose current values.
+Scopes must pass the existing identity validator. Identifying fields remain
+immutable; these descriptions do not authorize creating or deleting records.
+
+Contract `0.4.0` describes these endpoint forms. Operator must support them before
+adopting that contract's version and document-hash pins; no new injection API is
+needed.

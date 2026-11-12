@@ -125,3 +125,13 @@ customer archives outside the repository. These producer-side checks complement
 Operator's independent provenance verifier; validating that consumer remains a
 separate integration qualification requirement. Updating its pins alone cannot
 repair a parser that does not support the declared formats.
+
+## Injection target discovery
+
+Contract `0.4.0` adds endpoint metadata consumed through `capabilities.read`:
+`http-route-set` uses exact method/path allowlists (empty means unrestricted,
+except HEAD); `state-collection` uses issuer-scoped record keys and mutable field
+names. These are selectable targets for the existing `injection.arm` operation,
+not new API routes. Keep generated manifests, runtime validation, OpenAPI types
+and native discovery-to-injection tests aligned. Operator must separately handle
+these forms before adopting the new version/hash pins.

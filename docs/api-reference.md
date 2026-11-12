@@ -67,7 +67,9 @@ Returns the deterministic, secret-free CapabilityManifest bound to the sealed
 Environment and Application. A ScenarioBundle or ExecutionLease must bind its
 exact `digest`. Service entries report role, supported injection surfaces,
 static/dynamic attacker response mode, available HTTP/HTTPS transports, and
-bounded creatable collections.
+bounded creatable collections. Dynamic sinks also export exact method/path sets;
+identity issuers export existing record keys and mutable fields. See
+[discovering injection targets](injections-and-evaluation.md#discovering-attacker-and-identity-targets).
 `file_namespaces` reports logical IDs and ceilings without revealing container
 paths. `cross_vm_operations` is the exact gateway operation vocabulary and
 `injection_profiles` declares each available surface's scopes, placements,

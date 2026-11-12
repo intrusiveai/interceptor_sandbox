@@ -89,7 +89,8 @@ The digest value MUST NOT be embedded in the document itself. The export command
 MUST emit those same bytes unchanged so an independent hash matches the API.
 
 This response extension originally advanced the contract to `0.2.0`; the
-exported evidence agreement below advances the current contract to `0.3.0`.
+exported evidence agreement introduced `0.3.0`; target discovery below advances
+the current contract to `0.4.0`.
 Scope-only documentation corrections do not independently require a version bump.
 This read-only endpoint MUST be available
 before campaign attachment, require no campaign or session identifier, and perform
@@ -258,7 +259,8 @@ is needed.
 
 - The agreement MUST cover structured archive members consumed or verified by
   Operator through `POST /v1/evidence`, even when its HTTP shape is unchanged.
-  This ownership-aware evidence agreement MUST advance `info.version` to `0.3.0`.
+  This ownership-aware evidence agreement introduced `info.version` `0.3.0`
+  and MUST remain supported by subsequent contracts.
 - The existing response MUST map required, optional and conditional member paths
   to typed schemas inside the same document, including JSONL records and opaque
   referenced blobs. It MUST document archive safety, identity bindings, chain
@@ -282,3 +284,13 @@ is needed.
   as integration changes. No new API route, negotiation system, user-supplied
   contract, source-commit compatibility pin or Operator repository modification
   is required by this implementation.
+
+## Selectable built-in injection targets
+
+The contract MUST describe the `http-route-set` and `state-collection` endpoint
+forms returned by `capabilities.read`, including exact/empty allowlist semantics,
+HEAD exclusion, issuer-scoped keys, mutable fields and existing injection selector
+mapping. This consumed-output extension MUST advance the contract to `0.4.0`.
+The evidence formats introduced in `0.3.0` MUST remain unchanged. See
+[discovery requirements](discoverable-injection-targets.md). A new route or
+injection API MUST NOT be introduced for discovery alone.

@@ -9,6 +9,8 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/delivery"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/digest"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/environment"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/identity"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/services"
 )
 
 type FeedbackCapability struct {
@@ -214,7 +216,8 @@ func BuildCapabilityManifest(blueprint *environment.Blueprint, environmentDigest
 		m.Services = append(m.Services, capability)
 	}
 	for _, issuer := range blueprint.Identity.Issuers {
-		m.Services = append(m.Services, ServiceCapability{ID: issuer.ID, Kind: issuer.Kind, Role: "identity", Transports: serviceTransports(blueprint), InjectionSurfaces: []string{"environment_state"}})
+		m.DeliverySchemaProfile = delivery.SchemaProfile
+		m.Services = append(m.Services, ServiceCapability{ID: issuer.ID, Kind: issuer.Kind, Role: "identity", Transports: serviceTransports(blueprint), InjectionSurfaces: []string{"environment_state"}, Endpoints: identity.StateEndpoints(blueprint.Identity, issuer.ID)})
 		m.InjectionSurfaces = append(m.InjectionSurfaces, "environment_state")
 	}
 	for _, service := range blueprint.AttackerServices {
@@ -224,8 +227,16 @@ func BuildCapabilityManifest(blueprint *environment.Blueprint, environmentDigest
 		}
 		capability := ServiceCapability{ID: service.ID, Kind: service.Kind, Role: "attacker", ResponseMode: responseMode, Transports: serviceTransports(blueprint)}
 		if responseMode == "dynamic" {
-			capability.InjectionSurfaces = []string{"service_response"}
-			m.InjectionSurfaces = append(m.InjectionSurfaces, "service_response")
+			methods, paths, err := services.SinkAllowlists(service.Options)
+			if err != nil {
+				return CapabilityManifest{}, err
+			}
+			if endpoint := services.SinkEndpoint(methods, paths, services.SinkResponse{JSON: service.Response.JSON}, service.MaxCaptureBytes); endpoint != nil {
+				m.DeliverySchemaProfile = delivery.SchemaProfile
+				capability.Endpoints = []delivery.Endpoint{*endpoint}
+				capability.InjectionSurfaces = []string{"service_response"}
+				m.InjectionSurfaces = append(m.InjectionSurfaces, "service_response")
+			}
 		}
 		m.Services = append(m.Services, capability)
 	}

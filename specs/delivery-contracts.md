@@ -227,3 +227,13 @@ Capabilities MUST expose only public table policy and supported surfaces, never
 credentials or oracle SQL. Native backups MUST use integrity-covered
 `database_checkpoint` journal operations; observation windows and required
 capture-failure policy MUST apply to native database evidence.
+
+## Built-in injection target discovery
+
+Dynamic attacker responses and identity managed state MUST also be discoverable
+using the existing endpoint and delivery definitions. These built-in descriptions
+MUST work with both blueprint versions without `export_contracts`, contain no
+record/response values or credentials, and preserve the explicit export opt-in
+for authored HTTP/MCP descriptions. See
+[discoverable injection targets](discoverable-injection-targets.md) for
+`http-route-set`, `state-collection`, allowlist semantics and required tests.
