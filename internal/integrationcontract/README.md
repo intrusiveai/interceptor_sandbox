@@ -55,7 +55,7 @@ formatting alone, blocks consumers retaining the old hash even if the version is
 unchanged. Update pins deliberately after review; never learn the expected hash
 from the running service. Users need not export a document.
 
-Contract `0.2.0` adds the document digest to the identity API response. That API
+Contract `0.2.0` introduced the document digest to the identity API response. That API
 addition justifies this version change; narrowing the previous feature inventory
 alone would not. Release metadata continues to derive the version from this file.
 
@@ -89,4 +89,39 @@ A native operation record can contain the exact unassigned response
 exception scoped to the record; do not add it to general HTTP response schemas
 or lifecycle records. Test status polling during an actual blocked invocation
 and after completion. Correcting the schema to describe this existing behavior
-retains version `0.2.0` but changes the document hash and reviewed consumer pin.
+was a correction within `0.2.0`; subsequent agreement changes advance the version.
+
+## Evidence archive compatibility
+
+Contract `0.3.0` includes the structured contents returned by `POST /v1/evidence`.
+Operator verifies these records, so their fields, supported schema versions,
+serialization and digest rules are part of the API agreement. HTTP 200 and an
+unchanged tar media type do not establish format compatibility.
+
+The response's `x-evidence-members` maps archive paths to typed local schemas and
+records JSON, JSONL or raw-byte encoding plus required/conditional membership.
+This extension describes the binary payload; it is not a second manifest or a
+runtime negotiation mechanism. `x-evidence-integrity` specifies chain, binding,
+blob and completeness checks which JSON Schema alone cannot establish.
+
+File manifests support schema 2 with required logical `application`/`supervisor`
+ownership, and historical schema 1 without ownership. Journal transactions still
+use schema 1; filesystem operation ownership is distinct from that version.
+Historical records may omit owner; never guess ownership or infer that historical
+evidence can be restored. New ownership-aware file operations include owner.
+
+Native hashes use Go `encoding/json.Marshal`, not JCS or the pretty-printed member
+bytes. Model annotations retain field order and `omitempty` behavior. Ownership
+participates in the digest. Preserve integer precision, raw JSON ordering and
+escaping; do not ignore unknown fields to bypass verification failures.
+
+Before changing an exported record, update its schema, relevant encoding rules,
+contract version and reviewed qualification pins together. Run field/order drift
+checks, negative ownership/hash tests, and actual exporter tests. The packaged
+smoke client validates downloaded archive members and native record hashes.
+Retained QA exports can be checked with the opt-in `TestRetainedEvidenceArchives`
+test using newline-separated `INTERCEPTOR_CONTRACT_EVIDENCE_ARCHIVES` paths; keep
+customer archives outside the repository. These producer-side checks complement
+Operator's independent provenance verifier; validating that consumer remains a
+separate integration qualification requirement. Updating its pins alone cannot
+repair a parser that does not support the declared formats.

@@ -11,7 +11,9 @@
 Does this change affect the API used by Operator's Interceptor integration? If so, how?
 
 <!-- Identify the affected endpoint/operation, request, response, error, or guarantee
-Operator relies on, and explain any contract/version change. Otherwise state that
+Operator relies on, and explain any contract/version change. Include structured
+archive contents and native hash encoding consumed by Operator, even when the
+HTTP route and binary response type stay unchanged. Otherwise state that
 the integration agreement is unchanged. Interceptor-only features do not require
 a contract change merely because they add functionality or configuration.
 Administrative CLI commands, build/setup procedures and target-specific capability

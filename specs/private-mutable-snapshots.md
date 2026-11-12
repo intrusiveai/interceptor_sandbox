@@ -101,5 +101,6 @@ snapshot API/workflow MUST remain unchanged.
   privileged file-permission workaround.
 - Add the regression to the existing downloaded-archive CI qualification and
   document ownership scope, startup behavior and legacy-checkpoint handling in
-  snapshot documentation. No integration-contract change is required: this
-  corrects native persistence without changing Operator's API interaction.
+  snapshot documentation. The exported ownership metadata is consumed by
+  Operator through the evidence API and MUST be covered by the integration
+  contract, including its formats and native digest rules.

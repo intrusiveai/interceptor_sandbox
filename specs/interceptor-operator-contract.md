@@ -41,8 +41,8 @@ The native operation-record schema MUST allow the exact nested response
 requirements. Ordinary response schemas and lifecycle records MUST NOT admit this
 placeholder. Regression coverage MUST query an actual blocked operation and its
 completed record, and reject placeholders outside the running-record context.
-This corrects the schema to existing behavior; contract version `0.2.0` MUST stay
-unchanged, with the reviewed consumer hash pin updated for the changed bytes.
+This placeholder correction described existing behavior within contract `0.2.0`.
+It MUST remain scoped to running operations when later contract versions change.
 
 Use descriptions for ordering, exact-byte digests, retries, ownership, uncertainty,
 and evidence guarantees that schemas cannot establish. Existing wire types and
@@ -88,7 +88,8 @@ canonicalized JSON, API response, capability manifest, binary, or release archiv
 The digest value MUST NOT be embedded in the document itself. The export command
 MUST emit those same bytes unchanged so an independent hash matches the API.
 
-This response extension MUST advance the API contract version to `0.2.0`.
+This response extension originally advanced the contract to `0.2.0`; the
+exported evidence agreement below advances the current contract to `0.3.0`.
 Scope-only documentation corrections do not independently require a version bump.
 This read-only endpoint MUST be available
 before campaign attachment, require no campaign or session identifier, and perform
@@ -252,3 +253,32 @@ contract version, the metadata checks and the publisher upgrade in
 `.github/maintainers/CANDIDATE_RELEASES.md`. Campaign instructions MUST NOT add a
 manual contract-export or comparison step. No new service or configuration system
 is needed.
+
+## Exported evidence formats
+
+- The agreement MUST cover structured archive members consumed or verified by
+  Operator through `POST /v1/evidence`, even when its HTTP shape is unchanged.
+  This ownership-aware evidence agreement MUST advance `info.version` to `0.3.0`.
+- The existing response MUST map required, optional and conditional member paths
+  to typed schemas inside the same document, including JSONL records and opaque
+  referenced blobs. It MUST document archive safety, identity bindings, chain
+  verification, partial-evidence semantics and restore-source provenance.
+- File manifest schema 2 MUST require logical application/supervisor ownership
+  on every entry. Historical schema 1 MUST omit ownership and remain readable
+  for evidence inspection; consumers MUST NOT invent ownership. Transaction schema
+  1 MUST remain distinct from file-manifest schema 2. Filesystem operation schemas
+  MUST allow owner only on file_upsert, directory_ensure and symlink_set, and
+  describe historical omission versus current ownership-aware writes.
+- The contract MUST specify the existing native digest encoding, including field
+  ordering, omission rules and clearing the hash field before encoding. Ownership
+  MUST be covered by native hashes. The document hash remains the SHA-256 of the
+  complete contract bytes, independently of archive/native record digests.
+- Tests MUST detect exported model field/order/omission drift, validate actual
+  producer archives, accept historical and ownership-aware records, and reject
+  invalid ownership, unsupported formats, unknown fields and hash tampering.
+  Downloaded-archive qualification MUST validate archive contents as well as
+  transfer checksums. Private QA archives MUST remain outside the repository.
+- Repository and review guidance MUST identify changes to consumed archive records
+  as integration changes. No new API route, negotiation system, user-supplied
+  contract, source-commit compatibility pin or Operator repository modification
+  is required by this implementation.
