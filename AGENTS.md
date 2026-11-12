@@ -21,7 +21,10 @@ runtime configuration and policy within Interceptor. Adding a feature does not
 automatically require changing either the contract or the capability manifest.
 
 - Contract-relevant: changing an API response Operator consumes or adding an
-  operation Operator must support.
+  operation Operator must support. Exported archive members are API outputs too:
+  their field sets, schema versions, omission/encoding rules, hashes and provenance
+  guarantees are contract-relevant when Operator parses or verifies them. An
+  unchanged HTTP endpoint or binary media type does not make those changes internal.
 - Interceptor-only: an HTTPS seam configured and operated entirely by Interceptor,
   with no required Operator interaction.
 

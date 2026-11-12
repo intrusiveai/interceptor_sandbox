@@ -22,7 +22,7 @@ func TestConsumerAgainstInterceptorContractAPI(t *testing.T) {
 	if err := checkContract(s.Client(), s.URL, supportedContractVersion, supportedContractSHA256); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkContract(s.Client(), s.URL, "0.3.0", supportedContractSHA256); err == nil {
+	if err := checkContract(s.Client(), s.URL, "0.2.0", supportedContractSHA256); err == nil {
 		t.Fatal("accepted an unsupported contract version")
 	}
 }
@@ -33,21 +33,21 @@ func TestConsumerContractCheck(t *testing.T) {
 		status     int
 		pass       bool
 	}{
-		{"match", `{"status":200,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"0f95876e3e005a50489a9afcc6287ca14e979e1fc25f70d1731bc743f5217014"}}`, 200, true},
-		{"different product release", `{"status":200,"body":{"version":"42.0.0","interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"0f95876e3e005a50489a9afcc6287ca14e979e1fc25f70d1731bc743f5217014"}}`, 200, true},
-		{"mismatch", `{"status":200,"body":{"interceptor_contract_version":"0.3.0","interceptor_contract_sha256":"0f95876e3e005a50489a9afcc6287ca14e979e1fc25f70d1731bc743f5217014"}}`, 200, false},
-		{"hash mismatch", `{"status":200,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`, 200, false},
-		{"missing hash", `{"status":200,"body":{"interceptor_contract_version":"0.2.0"}}`, 200, false},
-		{"malformed hash", `{"status":200,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"sha256:abcd"}}`, 200, false},
-		{"wrong hash type", `{"status":200,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":42}}`, 200, false},
+		{"match", `{"status":200,"body":{"interceptor_contract_version":"0.3.0","interceptor_contract_sha256":"abbf0ec87aeffe96cdb5413e626c6e3a03b5bedab62c9cda2a24169ae8b3f1a1"}}`, 200, true},
+		{"different product release", `{"status":200,"body":{"version":"42.0.0","interceptor_contract_version":"0.3.0","interceptor_contract_sha256":"abbf0ec87aeffe96cdb5413e626c6e3a03b5bedab62c9cda2a24169ae8b3f1a1"}}`, 200, true},
+		{"mismatch", `{"status":200,"body":{"interceptor_contract_version":"0.9.0","interceptor_contract_sha256":"abbf0ec87aeffe96cdb5413e626c6e3a03b5bedab62c9cda2a24169ae8b3f1a1"}}`, 200, false},
+		{"hash mismatch", `{"status":200,"body":{"interceptor_contract_version":"0.3.0","interceptor_contract_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`, 200, false},
+		{"missing hash", `{"status":200,"body":{"interceptor_contract_version":"0.3.0"}}`, 200, false},
+		{"malformed hash", `{"status":200,"body":{"interceptor_contract_version":"0.3.0","interceptor_contract_sha256":"sha256:abcd"}}`, 200, false},
+		{"wrong hash type", `{"status":200,"body":{"interceptor_contract_version":"0.3.0","interceptor_contract_sha256":42}}`, 200, false},
 		{"missing", `{"status":200,"body":{}}`, 200, false},
-		{"malformed", `{"status":200,"body":{"interceptor_contract_version":"v0.2.0"}}`, 200, false},
+		{"malformed", `{"status":200,"body":{"interceptor_contract_version":"v0.3.0"}}`, 200, false},
 		{"wrong type", `{"status":200,"body":{"interceptor_contract_version":1}}`, 200, false},
 		{"unreadable", `{`, 200, false},
-		{"trailing", `{"status":200,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"0f95876e3e005a50489a9afcc6287ca14e979e1fc25f70d1731bc743f5217014"}} {}`, 200, false},
+		{"trailing", `{"status":200,"body":{"interceptor_contract_version":"0.3.0","interceptor_contract_sha256":"abbf0ec87aeffe96cdb5413e626c6e3a03b5bedab62c9cda2a24169ae8b3f1a1"}} {}`, 200, false},
 		{"unavailable", `{}`, 404, false},
 		{"failed", `{}`, 503, false},
-		{"native error", `{"status":503,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"0f95876e3e005a50489a9afcc6287ca14e979e1fc25f70d1731bc743f5217014"}}`, 200, false},
+		{"native error", `{"status":503,"body":{"interceptor_contract_version":"0.3.0","interceptor_contract_sha256":"abbf0ec87aeffe96cdb5413e626c6e3a03b5bedab62c9cda2a24169ae8b3f1a1"}}`, 200, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
@@ -67,7 +67,7 @@ func TestConsumerContractCheck(t *testing.T) {
 			if tc.name == "hash mismatch" && (!strings.Contains(err.Error(), supportedContractSHA256) || !strings.Contains(err.Error(), strings.Repeat("a", 64))) {
 				t.Fatal(err)
 			}
-			if tc.name == "mismatch" && (!strings.Contains(err.Error(), "expected 0.2.0") || !strings.Contains(err.Error(), "actual 0.3.0")) {
+			if tc.name == "mismatch" && (!strings.Contains(err.Error(), "expected 0.3.0") || !strings.Contains(err.Error(), "actual 0.9.0")) {
 				t.Fatal(err)
 			}
 		})

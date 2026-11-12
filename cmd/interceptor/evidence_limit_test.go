@@ -14,6 +14,7 @@ import (
 
 	"github.com/intrusive-ai/interceptor-sandbox/internal/adaptive"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/blobstore"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/contracttest"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/digest"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/environment"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/evidence"
@@ -112,6 +113,16 @@ func TestExportCapacityCleanupAndAdministrativeRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close()
+	validator, err := contracttest.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validator.EvidenceArchive(file); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
 	archive := tar.NewReader(file)
 	expectedBlobs := map[string][]byte{descriptor.Digest: content}
 	for _, raw := range initialFiles {

@@ -65,13 +65,21 @@ guarantees belong in this document. Administrative CLI commands, target-specific
 capability values and general Interceptor feature inventories do not. See
 [contract scope](../../internal/integrationcontract/README.md).
 
-Contract `0.2.0` adds `interceptor_contract_sha256` to the identity API. The hash
+Contract `0.2.0` introduced `interceptor_contract_sha256` to the identity API. The hash
 covers the complete embedded UTF-8 document, including formatting and the final
 newline, and matches the exact `contract --json` output. It is distinct from
 archive/executable checksums. Documentation-only edits change the document hash
 without necessarily changing the API version; both version and hash must match
 the consumer's pins before campaign execution. Catalog fields and publication
 mechanisms remain unchanged.
+
+Contract `0.3.0` includes the structured evidence archive members Operator parses
+and verifies, including file-manifest schema 2 and logical ownership in filesystem
+journal operations. Treat changes to these records and their native hash encoding
+as API agreement changes even when the HTTP route is unchanged. Qualification
+checks downloaded archive contents and native hashes as well as transfer integrity.
+Operator must support the declared formats in its independent verifier before
+adopting the new version/hash pins; updating the pins alone is insufficient.
 
 The build reads `info.version` from and embeds that OpenAPI contract, and records `interceptor_contract_version` in
 `release.json`. CI runs `contract --json`, `version --json` and plain `version`

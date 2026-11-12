@@ -193,6 +193,13 @@ state change references them; exporting only changed files would leave the archi
 incomplete. The same behavior applies to CLI and local API exports, within their
 configured archive-size limits.
 
+The archive's structured records are part of the Interceptor/Operator API
+contract. File manifests use schema 2 with logical ownership; historical schema 1
+has no ownership. Journal transactions retain schema 1, and their filesystem
+operations can carry ownership. Consumers must understand these formats and
+verify the native hashes, including ownership, before accepting evidence. A
+successful download with a valid archive checksum is only the transfer check.
+
 Application stdout/stderr and transient bridge artifacts are not included.
 Export first verifies the core chains and bindings. The archive is not encrypted
 or signed; protect it with normal evidence-handling controls and add an external

@@ -61,7 +61,7 @@ Before attaching a campaign, an integration calls `POST /v1/contract-version`
 with `{}` on the same Interceptor API instance it will use for execution:
 
 ```json
-{"status":200,"body":{"interceptor_contract_version":"0.2.0","interceptor_contract_sha256":"<64 lowercase hexadecimal digits>"},"session_revision":0}
+{"status":200,"body":{"interceptor_contract_version":"0.3.0","interceptor_contract_sha256":"<64 lowercase hexadecimal digits>"},"session_revision":0}
 ```
 
 This endpoint returns the service's embedded API contract version and SHA-256. It
@@ -86,7 +86,7 @@ from the running service. No document download is required at campaign startup.
 `interceptor_contract_sha256` covers every byte of the embedded UTF-8 contract,
 including formatting and its final newline. It is not the hash of the API response,
 release archive, executable, target capability manifest or a canonicalized subset.
-The digest value is not embedded in the document itself. Contract `0.2.0` adds this
+The digest value is not embedded in the document itself. Contract `0.2.0` introduced this
 API response field; an integration pinned to `0.1.0` will report a version mismatch.
 
 Users do not export or supply a contract to run campaigns. The optional
@@ -375,6 +375,13 @@ temporary archive, verifies the existing native journals/blob/checkpoint inputs,
 and streams the completed archive with its full `Content-Length`,
 `X-Content-SHA256: sha256:...` and `X-Evidence-Max-Bytes` headers. No caller chooses
 a host output path. Native evidence completeness/partial markers are retained.
+
+Contract `0.3.0` also describes the structured archive contents, including
+ownership-aware file manifests and journal operations. Consumers must implement
+those formats and native digest rules before adopting the new version/hash pins.
+A matching transport checksum does not replace native provenance verification.
+Historical schema-1 file manifests remain readable evidence; schema-2 manifests
+require logical ownership. Neither implies permission to restore legacy state.
 
 The per-session archive ceiling defaults to **4 GiB (4294967296 bytes)**.
 `interceptor run --evidence-max-bytes <bytes>` overrides

@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Interceptor API for Operator",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "description": "Operator-facing API only. Administrative CLI commands and Interceptor-only configuration are excluded. Before attachment consumers require exact agreement with their independently reviewed contract version and complete-document SHA-256 pins. Source commits and product versions are not compatibility pins. All schema references are included in this document."
   },
   "servers": [
@@ -360,7 +360,7 @@
         },
         "responses": {
           "200": {
-            "description": "Complete evidence tar archive. Verify the digest and contents before accepting evidence.",
+            "description": "Evidence tar archive, potentially containing explicitly partial evidence. Verify transfer integrity, member schemas, native hashes, identity bindings and completeness before accepting any outcome.",
             "headers": {
               "X-Content-SHA256": {
                 "schema": {
@@ -381,6 +381,139 @@
                   "format": "binary"
                 }
               }
+            },
+            "x-evidence-members": [
+              {
+                "pattern": "^manifest\\.json$",
+                "encoding": "json",
+                "required": true,
+                "schema": {
+                  "$ref": "#/components/schemas/EvidenceExportManifest"
+                }
+              },
+              {
+                "pattern": "^session\\.json$",
+                "encoding": "json",
+                "required": true,
+                "schema": {
+                  "$ref": "#/components/schemas/session.Metadata"
+                }
+              },
+              {
+                "pattern": "^evidence-bundle\\.json$",
+                "encoding": "json",
+                "required": true,
+                "schema": {
+                  "$ref": "#/components/schemas/adaptive.EvidenceBundle"
+                }
+              },
+              {
+                "pattern": "^file-manifest\\.json$",
+                "encoding": "json",
+                "required": true,
+                "schema": {
+                  "$ref": "#/components/schemas/snapshot.Manifest"
+                }
+              },
+              {
+                "pattern": "^events\\.jsonl$",
+                "encoding": "jsonl",
+                "required": true,
+                "schema": {
+                  "$ref": "#/components/schemas/recording.Event"
+                }
+              },
+              {
+                "pattern": "^state\\.jsonl$",
+                "encoding": "jsonl",
+                "required": true,
+                "schema": {
+                  "$ref": "#/components/schemas/statejournal.Transaction"
+                }
+              },
+              {
+                "pattern": "^final-evaluation\\.json$",
+                "encoding": "json",
+                "required": false,
+                "schema": {
+                  "$ref": "#/components/schemas/evaluation.Report"
+                },
+                "condition": "Required for complete final evaluation; absence makes the bundle partial."
+              },
+              {
+                "pattern": "^execution\\.json$",
+                "encoding": "json",
+                "required": false,
+                "schema": {
+                  "$ref": "#/components/schemas/adaptive.ExecutionState"
+                },
+                "condition": "Required when session.operation_api_version is set."
+              },
+              {
+                "pattern": "^artifacts\\.json$",
+                "encoding": "json",
+                "required": false,
+                "schema": {
+                  "$ref": "#/components/schemas/EvidenceArtifacts"
+                }
+              },
+              {
+                "pattern": "^attempts\\.json$",
+                "encoding": "json",
+                "required": false,
+                "schema": {
+                  "$ref": "#/components/schemas/EvidenceAttempts"
+                }
+              },
+              {
+                "pattern": "^checkpoints/[^/]+\\.json$",
+                "encoding": "json",
+                "required": false,
+                "schema": {
+                  "$ref": "#/components/schemas/snapshot.Checkpoint"
+                },
+                "condition": "All retained checkpoint files."
+              },
+              {
+                "pattern": "^restore-source/checkpoint\\.json$",
+                "encoding": "json",
+                "required": false,
+                "schema": {
+                  "$ref": "#/components/schemas/snapshot.Checkpoint"
+                },
+                "condition": "Required when session.parent_session_id is set."
+              },
+              {
+                "pattern": "^restore-source/state\\.jsonl$",
+                "encoding": "jsonl",
+                "required": false,
+                "schema": {
+                  "$ref": "#/components/schemas/statejournal.Transaction"
+                },
+                "condition": "Required when session.parent_session_id is set; verify the source chain and checkpoint prefix independently."
+              },
+              {
+                "pattern": "^(host-interruption|transport-failure|cleanup-pending)\\.json$",
+                "encoding": "json",
+                "required": false,
+                "schema": {
+                  "$ref": "#/components/schemas/EvidenceFailureMarker"
+                }
+              },
+              {
+                "pattern": "^blobs/sha256/[0-9a-f]{64}$",
+                "encoding": "bytes",
+                "required": false,
+                "condition": "Every referenced blob from events, both journals, the file manifest and artifact registries, including unchanged and empty seed files."
+              }
+            ],
+            "x-evidence-integrity": {
+              "archive": "Only regular tar members with unique clean relative paths; no traversal, links or extraction needed. Check Content-Length and X-Content-SHA256 against received bytes and enforce negotiated/local capacity. A valid tar checksum or HTTP 200 alone is not provenance verification.",
+              "native_json": "Hash UTF-8 encoding/json.Marshal output with the designated hash/digest field set to the empty string (not removed), no indentation or final newline. x-native-json-order gives struct member order; x-native-json-omitempty gives Go empty-value omission rules. Struct values (including zero attribution) are not empty; nil slices/maps encode null unless omitted; empty nonnil slices/maps encode []/{}. Map keys sort lexically; raw JSON retains member order while whitespace is compacted. Preserve Go HTML escaping (<, >, &, U+2028/U+2029), timestamp encoding, and exact integer values. These are not JCS or hashes of pretty-printed archive members. Unknown fields or unsupported schemas fail verification.",
+              "chains": "Verify event and transaction SHA-256 chains from sha256: plus 64 zeroes, contiguous sequences starting at 1, and matching session identities. Include every operation and owner field. Check checkpoint hash, source session, journal sequence/hash, file manifest digest and restore lineage. Source journal prefixes must remain independently verifiable.",
+              "files": "Require supported manifest schema, sorted unique clean absolute paths, valid types and permission bits. Schema 2 requires owner=application or supervisor on every entry; schema 1 forbids ownership and remains historical evidence only. Do not infer portable numeric UID/GID. Ownership-aware filesystem writes carry owner; absence in historical records is not authorization to restore them. Validate each file/database/artifact blob digest and recorded size.",
+              "bindings": "Cross-check campaign, session, environment, application and capability identities across metadata, bundle, checkpoints, registries and execution records. Verify the execution-state digest committed in the journal and the EvidenceBundle digest. Product/source provenance is not an Operator compatibility pin.",
+              "completeness": "Respect partial/truncated and failure markers, evaluation availability, coverage gaps and unknown operations. Oracle verdicts and application-authored assertions do not override failed provenance. Complete evidence means a complete record, not a successful attack."
             }
           },
           "default": {
@@ -420,7 +553,16 @@
           "size_bytes",
           "media_type"
         ],
-        "type": "object"
+        "type": "object",
+        "x-native-json-order": [
+          "digest",
+          "size_bytes",
+          "media_type",
+          "canonicalization"
+        ],
+        "x-native-json-omitempty": [
+          "canonicalization"
+        ]
       },
       "adaptive.AttemptContext": {
         "additionalProperties": false,
@@ -491,7 +633,29 @@
           "feedback_profile",
           "created_at"
         ],
-        "type": "object"
+        "type": "object",
+        "x-native-json-order": [
+          "observation_selection",
+          "api_version",
+          "campaign_id",
+          "thread_id",
+          "attempt_id",
+          "parent_attempt_id",
+          "generation",
+          "attempt_index",
+          "payload",
+          "generator",
+          "strategy_provenance_ref",
+          "feedback_profile",
+          "created_at",
+          "digest"
+        ],
+        "x-native-json-omitempty": [
+          "observation_selection",
+          "parent_attempt_id",
+          "strategy_provenance_ref",
+          "digest"
+        ]
       },
       "adaptive.CapabilityLimits": {
         "additionalProperties": false,
@@ -774,7 +938,21 @@
           "allow_target_stop",
           "bound_at"
         ],
-        "type": "object"
+        "type": "object",
+        "x-native-json-order": [
+          "principal",
+          "campaign_id",
+          "worker_instance_id",
+          "run_revision",
+          "allow_target_stop",
+          "bound_at",
+          "closed_at",
+          "closure_reason"
+        ],
+        "x-native-json-omitempty": [
+          "closed_at",
+          "closure_reason"
+        ]
       },
       "adaptive.FeedbackCapability": {
         "additionalProperties": false,
@@ -999,6 +1177,14 @@
           {
             "$ref": "#/components/schemas/InProgressResponse"
           }
+        ],
+        "x-native-json-order": [
+          "status",
+          "body",
+          "session_revision"
+        ],
+        "x-native-json-omitempty": [
+          "body"
         ]
       },
       "adaptive.Generator": {
@@ -1014,7 +1200,14 @@
         "required": [
           "kind"
         ],
-        "type": "object"
+        "type": "object",
+        "x-native-json-order": [
+          "kind",
+          "release_digest"
+        ],
+        "x-native-json-omitempty": [
+          "release_digest"
+        ]
       },
       "adaptive.InjectionProfile": {
         "additionalProperties": false,
@@ -1195,6 +1388,13 @@
               }
             }
           }
+        ],
+        "x-native-json-order": [
+          "mode",
+          "kinds"
+        ],
+        "x-native-json-omitempty": [
+          "kinds"
         ]
       },
       "adaptive.ObservationView": {
@@ -1410,7 +1610,20 @@
             }
           }
         ],
-        "description": "A successful operation.status lookup returns HTTP 200 even while the recorded operation is running. Only running records may contain the exact unassigned response {status: 0, session_revision: 0}; completed and unknown records require a normal recorded response. This does not make 0 an HTTP status."
+        "description": "A successful operation.status lookup returns HTTP 200 even while the recorded operation is running. Only running records may contain the exact unassigned response {status: 0, session_revision: 0}; completed and unknown records require a normal recorded response. This does not make 0 an HTTP status.",
+        "x-native-json-order": [
+          "command_fingerprint",
+          "request",
+          "fingerprint",
+          "state",
+          "response",
+          "admitted_at",
+          "finished_at"
+        ],
+        "x-native-json-omitempty": [
+          "command_fingerprint",
+          "finished_at"
+        ]
       },
       "adaptive.OperationRequest": {
         "additionalProperties": false,
@@ -1487,7 +1700,27 @@
           "body_digest",
           "deadline"
         ],
-        "type": "object"
+        "type": "object",
+        "x-native-json-order": [
+          "api_version",
+          "request_id",
+          "operation_id",
+          "operation",
+          "session_id",
+          "campaign_id",
+          "worker_instance_id",
+          "run_revision",
+          "expected_session_revision",
+          "attempt_id",
+          "attempt_context_digest",
+          "body_digest",
+          "deadline"
+        ],
+        "x-native-json-omitempty": [
+          "expected_session_revision",
+          "attempt_id",
+          "attempt_context_digest"
+        ]
       },
       "adaptive.OperationView": {
         "additionalProperties": false,
@@ -1879,7 +2112,23 @@
           "placement",
           "payload"
         ],
-        "type": "object"
+        "type": "object",
+        "x-native-json-order": [
+          "id",
+          "surface",
+          "mode",
+          "scope",
+          "enabled",
+          "selector",
+          "placement",
+          "payload",
+          "attempt_id",
+          "payload_digest"
+        ],
+        "x-native-json-omitempty": [
+          "attempt_id",
+          "payload_digest"
+        ]
       },
       "injection.Placement": {
         "additionalProperties": false,
@@ -1907,7 +2156,17 @@
           "operation",
           "pointer"
         ],
-        "type": "object"
+        "type": "object",
+        "x-native-json-order": [
+          "operation",
+          "pointer",
+          "index",
+          "allowed_fields"
+        ],
+        "x-native-json-omitempty": [
+          "index",
+          "allowed_fields"
+        ]
       },
       "injection.PublicState": {
         "additionalProperties": false,
@@ -1995,7 +2254,45 @@
           "tool_name",
           "call_ordinal"
         ],
-        "type": "object"
+        "type": "object",
+        "x-native-json-order": [
+          "tool_name",
+          "call_ordinal",
+          "arguments_pointer",
+          "arguments_equal",
+          "arguments_contain",
+          "turn_id",
+          "service",
+          "collection",
+          "key",
+          "path",
+          "method",
+          "query_equal",
+          "headers_equal",
+          "request_body_pointer",
+          "request_body_equal",
+          "request_body_contain",
+          "file_namespace",
+          "relative_path"
+        ],
+        "x-native-json-omitempty": [
+          "arguments_pointer",
+          "arguments_equal",
+          "arguments_contain",
+          "turn_id",
+          "service",
+          "collection",
+          "key",
+          "path",
+          "method",
+          "query_equal",
+          "headers_equal",
+          "request_body_pointer",
+          "request_body_equal",
+          "request_body_contain",
+          "file_namespace",
+          "relative_path"
+        ]
       },
       "localapi.AttachRequest": {
         "additionalProperties": false,
@@ -2342,7 +2639,14 @@
           "snapshot_attempts",
           "snapshot_bytes"
         ],
-        "type": "object"
+        "type": "object",
+        "x-native-json-order": [
+          "turns",
+          "tokens",
+          "snapshot_attempts",
+          "snapshot_bytes"
+        ],
+        "x-native-json-omitempty": []
       },
       "session.Limits": {
         "additionalProperties": false,
@@ -2382,7 +2686,18 @@
           "memory_bytes",
           "cpus"
         ],
-        "type": "object"
+        "type": "object",
+        "x-native-json-order": [
+          "max_turns",
+          "max_tokens",
+          "max_wall_seconds",
+          "max_snapshots",
+          "max_blob_bytes",
+          "max_pids",
+          "memory_bytes",
+          "cpus"
+        ],
+        "x-native-json-omitempty": []
       },
       "session.Metadata": {
         "additionalProperties": false,
@@ -2501,7 +2816,48 @@
           "bridge_transport",
           "taints"
         ],
-        "type": "object"
+        "type": "object",
+        "x-native-json-order": [
+          "campaign_id",
+          "spool_max_bytes",
+          "operation_api_version",
+          "schema_version",
+          "id",
+          "parent_session_id",
+          "parent_checkpoint",
+          "environment_path",
+          "environment_digest",
+          "app_image",
+          "app_digest",
+          "capability_manifest_digest",
+          "feedback_profile",
+          "revision",
+          "phase",
+          "generation",
+          "created_at",
+          "updated_at",
+          "limits",
+          "consumed",
+          "bridge_transport",
+          "container_id",
+          "application_url",
+          "control_url",
+          "termination_reason",
+          "taints"
+        ],
+        "x-native-json-omitempty": [
+          "campaign_id",
+          "spool_max_bytes",
+          "operation_api_version",
+          "parent_session_id",
+          "parent_checkpoint",
+          "capability_manifest_digest",
+          "feedback_profile",
+          "container_id",
+          "application_url",
+          "control_url",
+          "termination_reason"
+        ]
       },
       "snapshot.Checkpoint": {
         "additionalProperties": false,
@@ -2584,7 +2940,40 @@
           "status",
           "hash"
         ],
-        "type": "object"
+        "type": "object",
+        "x-native-json-order": [
+          "campaign_id",
+          "description",
+          "schema_version",
+          "id",
+          "label",
+          "source_session_id",
+          "parent_checkpoint",
+          "environment_digest",
+          "app_digest",
+          "journal_seq",
+          "journal_hash",
+          "file_manifest_digest",
+          "canonical_size_bytes",
+          "event_seq",
+          "created_at",
+          "interceptor_version",
+          "journal_schema_version",
+          "status",
+          "hash"
+        ],
+        "x-native-json-omitempty": [
+          "campaign_id",
+          "description",
+          "label",
+          "parent_checkpoint"
+        ],
+        "x-native-hash": {
+          "algorithm": "sha256",
+          "prefix": "sha256:",
+          "empty_field": "hash",
+          "encoding": "go-json-marshal"
+        }
       },
       "Empty": {
         "type": "object",
@@ -4165,6 +4554,1670 @@
           "session_revision"
         ],
         "additionalProperties": false
+      },
+      "adaptive.AttemptEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "context_digest": {
+            "type": "string"
+          },
+          "event_sequences": {
+            "items": {
+              "type": "integer"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "parent_attempt_id": {
+            "type": "string"
+          },
+          "payload_digest": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "attempt_id",
+          "payload_digest",
+          "context_digest",
+          "event_sequences"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [
+          "parent_attempt_id"
+        ],
+        "x-native-json-order": [
+          "attempt_id",
+          "parent_attempt_id",
+          "payload_digest",
+          "context_digest",
+          "event_sequences"
+        ]
+      },
+      "adaptive.EvidenceBundle": {
+        "additionalProperties": false,
+        "properties": {
+          "api_version": {
+            "const": "interceptor.dev/evidence-bundle/v1alpha1",
+            "type": "string"
+          },
+          "application_digest": {
+            "type": "string"
+          },
+          "artifact_refs": {
+            "items": {
+              "$ref": "#/components/schemas/adaptive.ArtifactDescriptor"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "attempts": {
+            "items": {
+              "$ref": "#/components/schemas/adaptive.AttemptEvidence"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "campaign_id": {
+            "type": "string"
+          },
+          "capability_manifest_digest": {
+            "type": "string"
+          },
+          "completeness": {
+            "$ref": "#/components/schemas/adaptive.EvidenceCompleteness"
+          },
+          "coverage_gaps": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "digest": {
+            "type": "string"
+          },
+          "environment_digest": {
+            "type": "string"
+          },
+          "feedback_profile": {
+            "type": "string"
+          },
+          "injections": {
+            "items": {
+              "$ref": "#/components/schemas/evaluation.InjectionResult"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "interceptor_release_digest": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "EvidenceBundle",
+            "type": "string"
+          },
+          "oracles": {
+            "items": {
+              "$ref": "#/components/schemas/evaluation.OracleResult"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "restores": {
+            "items": {
+              "$ref": "#/components/schemas/adaptive.RestoreEvidence"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "snapshots": {
+            "items": {
+              "$ref": "#/components/schemas/adaptive.SnapshotEvidence"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "api_version",
+          "kind",
+          "session_id",
+          "environment_digest",
+          "application_digest",
+          "capability_manifest_digest",
+          "interceptor_release_digest",
+          "feedback_profile",
+          "completeness",
+          "attempts",
+          "snapshots",
+          "restores",
+          "artifact_refs",
+          "oracles",
+          "injections",
+          "coverage_gaps",
+          "created_at",
+          "digest"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [
+          "campaign_id"
+        ],
+        "x-native-json-order": [
+          "api_version",
+          "kind",
+          "campaign_id",
+          "session_id",
+          "environment_digest",
+          "application_digest",
+          "capability_manifest_digest",
+          "interceptor_release_digest",
+          "feedback_profile",
+          "completeness",
+          "attempts",
+          "snapshots",
+          "restores",
+          "artifact_refs",
+          "oracles",
+          "injections",
+          "coverage_gaps",
+          "created_at",
+          "digest"
+        ],
+        "x-native-hash": {
+          "algorithm": "sha256",
+          "prefix": "sha256:",
+          "empty_field": "digest",
+          "encoding": "go-json-marshal"
+        }
+      },
+      "adaptive.EvidenceCompleteness": {
+        "additionalProperties": false,
+        "properties": {
+          "end_sequence": {
+            "type": "integer"
+          },
+          "start_sequence": {
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "complete",
+              "partial"
+            ],
+            "type": "string"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "state",
+          "start_sequence",
+          "end_sequence",
+          "truncated"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [],
+        "x-native-json-order": [
+          "state",
+          "start_sequence",
+          "end_sequence",
+          "truncated"
+        ]
+      },
+      "adaptive.ExecutionState": {
+        "additionalProperties": false,
+        "properties": {
+          "api_version": {
+            "type": "string"
+          },
+          "closed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "closure_reason": {
+            "type": "string"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/adaptive.ExecutionOwner"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "records": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/adaptive.OperationRecord"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "api_version",
+          "session_id",
+          "records"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [
+          "closed_at",
+          "closure_reason",
+          "owner"
+        ],
+        "x-native-json-order": [
+          "closed_at",
+          "closure_reason",
+          "api_version",
+          "session_id",
+          "owner",
+          "records"
+        ]
+      },
+      "adaptive.RestoreEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "resulting_session_id": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "type": "string"
+          },
+          "source_session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_session_id",
+          "snapshot_id",
+          "resulting_session_id"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [],
+        "x-native-json-order": [
+          "source_session_id",
+          "snapshot_id",
+          "resulting_session_id"
+        ]
+      },
+      "adaptive.SnapshotEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "canonical_size_bytes": {
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "digest": {
+            "type": "string"
+          },
+          "event_sequence": {
+            "type": "integer"
+          },
+          "parent_snapshot": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "digest",
+          "canonical_size_bytes",
+          "event_sequence",
+          "created_at",
+          "status"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [
+          "parent_snapshot"
+        ],
+        "x-native-json-order": [
+          "snapshot_id",
+          "digest",
+          "parent_snapshot",
+          "canonical_size_bytes",
+          "event_sequence",
+          "created_at",
+          "status"
+        ]
+      },
+      "evaluation.InjectionResult": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "mode",
+          "delivery",
+          "outcome"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [],
+        "x-native-json-order": [
+          "id",
+          "mode",
+          "delivery",
+          "outcome"
+        ]
+      },
+      "evaluation.OracleResult": {
+        "additionalProperties": false,
+        "properties": {
+          "causal_injection_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "causality": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "evidence": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "fired": {
+            "type": "boolean"
+          },
+          "first_event_digest": {
+            "type": "string"
+          },
+          "first_event_seq": {
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "visibility": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "fired",
+          "evidence"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [
+          "first_event_seq",
+          "causal_injection_ids",
+          "count",
+          "first_event_digest",
+          "visibility",
+          "causality"
+        ],
+        "x-native-json-order": [
+          "id",
+          "kind",
+          "fired",
+          "first_event_seq",
+          "evidence",
+          "causal_injection_ids",
+          "count",
+          "first_event_digest",
+          "visibility",
+          "causality"
+        ]
+      },
+      "evaluation.Report": {
+        "additionalProperties": false,
+        "properties": {
+          "coverage_gaps": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "injections": {
+            "items": {
+              "$ref": "#/components/schemas/evaluation.InjectionResult"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "oracles": {
+            "items": {
+              "$ref": "#/components/schemas/evaluation.OracleResult"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "oracles",
+          "injections",
+          "coverage_gaps"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [],
+        "x-native-json-order": [
+          "oracles",
+          "injections",
+          "coverage_gaps"
+        ]
+      },
+      "injection.EvaluationState": {
+        "additionalProperties": false,
+        "properties": {
+          "armed": {
+            "type": "boolean"
+          },
+          "consumed": {
+            "type": "boolean"
+          },
+          "delivery": {
+            "type": "string"
+          },
+          "delivery_observable": {
+            "type": "boolean"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "fired": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "matched": {
+            "type": "boolean"
+          },
+          "response_candidates": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "armed",
+          "matched",
+          "fired",
+          "consumed",
+          "delivery",
+          "delivery_observable",
+          "fingerprint"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [
+          "response_candidates"
+        ],
+        "x-native-json-order": [
+          "id",
+          "armed",
+          "matched",
+          "fired",
+          "consumed",
+          "delivery",
+          "delivery_observable",
+          "fingerprint",
+          "response_candidates"
+        ]
+      },
+      "injection.OperatorState": {
+        "additionalProperties": false,
+        "properties": {
+          "definition": {
+            "$ref": "#/components/schemas/injection.Definition"
+          },
+          "evaluation": {
+            "$ref": "#/components/schemas/injection.EvaluationState"
+          }
+        },
+        "required": [
+          "definition",
+          "evaluation"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [],
+        "x-native-json-order": [
+          "definition",
+          "evaluation"
+        ]
+      },
+      "recording.Attribution": {
+        "additionalProperties": false,
+        "properties": {
+          "confidence": {
+            "type": "string"
+          },
+          "observed_attempt_id": {
+            "type": "string"
+          },
+          "observed_payload_digest": {
+            "type": "string"
+          },
+          "pid": {
+            "type": "integer"
+          },
+          "tool_call_id": {
+            "type": "string"
+          },
+          "window": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object",
+        "x-native-json-omitempty": [
+          "window",
+          "observed_attempt_id",
+          "observed_payload_digest",
+          "tool_call_id",
+          "pid",
+          "confidence"
+        ],
+        "x-native-json-order": [
+          "window",
+          "observed_attempt_id",
+          "observed_payload_digest",
+          "tool_call_id",
+          "pid",
+          "confidence"
+        ]
+      },
+      "recording.Event": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "attribution": {
+            "$ref": "#/components/schemas/recording.Attribution"
+          },
+          "channel": {
+            "enum": [
+              "attack",
+              "control",
+              "evaluation"
+            ],
+            "type": "string"
+          },
+          "hash": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "injection_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "layer": {
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "payload_digest": {
+            "type": "string"
+          },
+          "previous_hash": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "provenance": {
+            "type": "string"
+          },
+          "raw_ref": {
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "semantic": {
+            "type": "object",
+            "description": "Event-kind-specific observation data, including application/service-defined content. Preserve it in hash verification; it is not a trusted application outcome by itself."
+          },
+          "seq": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "turn_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "session_id",
+          "seq",
+          "observed_at",
+          "channel",
+          "layer",
+          "kind",
+          "provenance",
+          "semantic",
+          "previous_hash",
+          "hash"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [
+          "turn_id",
+          "injection_id",
+          "attempt_id",
+          "payload_digest",
+          "attribution",
+          "raw_ref"
+        ],
+        "x-native-json-order": [
+          "schema_version",
+          "session_id",
+          "seq",
+          "observed_at",
+          "channel",
+          "layer",
+          "kind",
+          "provenance",
+          "turn_id",
+          "injection_id",
+          "attempt_id",
+          "payload_digest",
+          "attribution",
+          "semantic",
+          "raw_ref",
+          "previous_hash",
+          "hash"
+        ],
+        "x-native-hash": {
+          "algorithm": "sha256",
+          "prefix": "sha256:",
+          "empty_field": "hash",
+          "encoding": "go-json-marshal"
+        }
+      },
+      "snapshot.Entry": {
+        "additionalProperties": false,
+        "properties": {
+          "blob": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "mode": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 511
+          },
+          "owner": {
+            "type": "string",
+            "enum": [
+              "supervisor",
+              "application"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "pattern": "^/",
+            "description": "Clean absolute path; no dot segments. Entries are unique and sorted lexically by path."
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "target": {
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "file",
+              "directory",
+              "symlink"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "type",
+          "mode"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [
+          "owner",
+          "blob",
+          "size",
+          "target"
+        ],
+        "x-native-json-order": [
+          "path",
+          "owner",
+          "type",
+          "mode",
+          "blob",
+          "size",
+          "target"
+        ],
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "file"
+              }
+            },
+            "required": [
+              "blob"
+            ],
+            "not": {
+              "required": [
+                "target"
+              ]
+            }
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "directory"
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "blob"
+                  ]
+                },
+                {
+                  "required": [
+                    "target"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "symlink"
+              },
+              "target": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^/]"
+              }
+            },
+            "required": [
+              "target"
+            ],
+            "not": {
+              "required": [
+                "blob"
+              ]
+            }
+          }
+        ]
+      },
+      "snapshot.Manifest": {
+        "additionalProperties": false,
+        "properties": {
+          "digest": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/snapshot.Entry"
+            }
+          },
+          "schema_version": {
+            "enum": [
+              1,
+              2
+            ],
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema_version",
+          "entries",
+          "digest"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [],
+        "x-native-json-order": [
+          "schema_version",
+          "entries",
+          "digest"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "schema_version": {
+                  "const": 2
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "entries": {
+                  "items": {
+                    "required": [
+                      "owner"
+                    ]
+                  }
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "entries": {
+                  "items": {
+                    "not": {
+                      "required": [
+                        "owner"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "description": "New sessions emit schema 2 with logical application/supervisor ownership, including root directories. Schema 1 is readable historical evidence without ownership; never infer an owner. Legacy evidence readability does not imply native restore support. Digest covers ownership and permission bits. Missing/invalid ownership in schema 2 and unsupported versions are rejected.",
+        "x-native-hash": {
+          "algorithm": "sha256",
+          "prefix": "sha256:",
+          "empty_field": "digest",
+          "encoding": "go-json-marshal"
+        }
+      },
+      "statejournal.Operation": {
+        "additionalProperties": false,
+        "properties": {
+          "blob": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "collection": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "integer"
+          },
+          "owner": {
+            "type": "string",
+            "enum": [
+              "supervisor",
+              "application"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "target": {
+            "type": "string"
+          },
+          "value": {
+            "description": "JSON value; its kind-specific structure is defined by the containing record. Preserve member ordering when verifying native hashes."
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [
+          "path",
+          "owner",
+          "mode",
+          "blob",
+          "size",
+          "target",
+          "service",
+          "collection",
+          "key",
+          "value",
+          "id"
+        ],
+        "x-native-json-order": [
+          "kind",
+          "path",
+          "owner",
+          "mode",
+          "blob",
+          "size",
+          "target",
+          "service",
+          "collection",
+          "key",
+          "value",
+          "id"
+        ],
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "file_upsert"
+              },
+              "path": {
+                "type": "string"
+              },
+              "owner": {
+                "type": "string",
+                "enum": [
+                  "supervisor",
+                  "application"
+                ]
+              },
+              "mode": {
+                "type": "integer"
+              },
+              "blob": {
+                "$ref": "#/components/schemas/Digest"
+              },
+              "size": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "kind",
+              "path",
+              "blob"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "directory_ensure"
+              },
+              "path": {
+                "type": "string"
+              },
+              "owner": {
+                "type": "string",
+                "enum": [
+                  "supervisor",
+                  "application"
+                ]
+              },
+              "mode": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "path"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "symlink_set"
+              },
+              "path": {
+                "type": "string"
+              },
+              "owner": {
+                "type": "string",
+                "enum": [
+                  "supervisor",
+                  "application"
+                ]
+              },
+              "mode": {
+                "type": "integer"
+              },
+              "target": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "path",
+              "target"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "file_delete"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "path"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "directory_delete"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "path"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "database_checkpoint"
+              },
+              "service": {
+                "type": "string"
+              },
+              "blob": {
+                "$ref": "#/components/schemas/Digest"
+              },
+              "size": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "value": {
+                "$ref": "#/components/schemas/EvidenceDatabaseCheckpointValue"
+              }
+            },
+            "required": [
+              "kind",
+              "service",
+              "blob",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "service_put"
+              },
+              "service": {
+                "type": "string"
+              },
+              "collection": {
+                "type": "string"
+              },
+              "key": {
+                "type": "string"
+              },
+              "value": {
+                "description": "Application/service-defined JSON resource, retained without losing JSON member ordering for native hashes."
+              }
+            },
+            "required": [
+              "kind",
+              "service",
+              "collection",
+              "key",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "service_delete"
+              },
+              "service": {
+                "type": "string"
+              },
+              "collection": {
+                "type": "string"
+              },
+              "key": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "service",
+              "collection",
+              "key"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "injection_put"
+              },
+              "id": {
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/components/schemas/EvidenceInjectionValue"
+              }
+            },
+            "required": [
+              "kind",
+              "id",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "artifact_put"
+              },
+              "id": {
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/components/schemas/adaptive.ArtifactDescriptor"
+              }
+            },
+            "required": [
+              "kind",
+              "id",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "attempt_put"
+              },
+              "id": {
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/components/schemas/adaptive.AttemptContext"
+              }
+            },
+            "required": [
+              "kind",
+              "id",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "injection_delete"
+              },
+              "id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "id"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "clock_set"
+              },
+              "value": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "oracle_state_set"
+              },
+              "value": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/evaluation.OracleResult"
+                }
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "budget_set"
+              },
+              "value": {
+                "$ref": "#/components/schemas/session.Consumed"
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "idempotency_commit"
+              },
+              "value": {
+                "$ref": "#/components/schemas/EvidenceExecutionCommitValue"
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "restored_from"
+              },
+              "value": {
+                "$ref": "#/components/schemas/EvidenceRestoredValue"
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "environment_materialized"
+              },
+              "value": {
+                "$ref": "#/components/schemas/EvidenceMaterializedValue"
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "additionalProperties": false
+          }
+        ],
+        "description": "Discriminated journal operation. owner is permitted only for file_upsert, directory_ensure and symlink_set. Current ownership-aware writes include owner; historical writes may omit it. Omitted mode/size mean zero. Journal schema remains 1; file_manifest_schema in environment_materialized identifies ownership-aware state and is independent of transaction schema_version. Preserve owner in native hashing, never strip unknown fields to make verification succeed."
+      },
+      "statejournal.Transaction": {
+        "additionalProperties": false,
+        "properties": {
+          "committed_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "hash": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "operations": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/statejournal.Operation"
+            }
+          },
+          "previous_hash": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "seq": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "tx_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "session_id",
+          "seq",
+          "tx_id",
+          "committed_at",
+          "reason",
+          "operations",
+          "previous_hash",
+          "hash"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [],
+        "x-native-json-order": [
+          "schema_version",
+          "session_id",
+          "seq",
+          "tx_id",
+          "committed_at",
+          "reason",
+          "operations",
+          "previous_hash",
+          "hash"
+        ],
+        "x-native-hash": {
+          "algorithm": "sha256",
+          "prefix": "sha256:",
+          "empty_field": "hash",
+          "encoding": "go-json-marshal"
+        }
+      },
+      "EvidenceDatabaseCheckpointValue": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "oracle_baselines": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {}
+              }
+            }
+          }
+        },
+        "required": [
+          "version"
+        ],
+        "additionalProperties": false
+      },
+      "EvidenceMaterializedValue": {
+        "type": "object",
+        "properties": {
+          "environment_digest": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "application_digest": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "baseline_file_manifest_digest": {
+            "type": "string",
+            "description": "Empty for an unmaterialized baseline, otherwise a sha256 digest."
+          },
+          "bridge_transport": {
+            "type": "string"
+          },
+          "file_manifest_schema": {
+            "enum": [
+              1,
+              2
+            ]
+          }
+        },
+        "required": [
+          "environment_digest",
+          "application_digest",
+          "baseline_file_manifest_digest",
+          "bridge_transport"
+        ],
+        "additionalProperties": false
+      },
+      "EvidenceRestoredValue": {
+        "type": "object",
+        "properties": {
+          "checkpoint_id": {
+            "type": "string"
+          },
+          "source_session_id": {
+            "type": "string"
+          },
+          "journal_seq": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "journal_hash": {
+            "$ref": "#/components/schemas/Digest"
+          }
+        },
+        "required": [
+          "checkpoint_id",
+          "source_session_id",
+          "journal_seq",
+          "journal_hash"
+        ],
+        "additionalProperties": false
+      },
+      "EvidenceExecutionCommitValue": {
+        "type": "object",
+        "properties": {
+          "execution_state_digest": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "execution_state_digest",
+          "session_id"
+        ],
+        "additionalProperties": false
+      },
+      "EvidenceInjectionValue": {
+        "type": "object",
+        "properties": {
+          "definition": {
+            "$ref": "#/components/schemas/injection.Definition"
+          },
+          "eligible_turn": {
+            "type": "string"
+          },
+          "evaluation": {
+            "$ref": "#/components/schemas/injection.EvaluationState"
+          }
+        },
+        "required": [
+          "definition",
+          "evaluation"
+        ],
+        "additionalProperties": false
+      },
+      "EvidenceExportManifest": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "environment_digest": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "application_digest": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "interceptor_version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "session_id",
+          "environment_digest",
+          "application_digest",
+          "interceptor_version"
+        ],
+        "additionalProperties": false
+      },
+      "EvidenceArtifacts": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/adaptive.ArtifactDescriptor"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "artifacts"
+        ],
+        "additionalProperties": false
+      },
+      "EvidenceAttempts": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "attempts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/adaptive.AttemptContext"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "attempts"
+        ],
+        "additionalProperties": false
+      },
+      "EvidenceFailureMarker": {
+        "type": "object",
+        "description": "Host diagnostic record. Presence marks partial evidence; fields are diagnostic and are not an execution authorization or a successful outcome."
       }
     }
   }

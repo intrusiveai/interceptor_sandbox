@@ -10,11 +10,14 @@ import (
 
 	"github.com/intrusive-ai/interceptor-sandbox/internal/adaptive"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/contracttest"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/evaluation"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/injection"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/localapi"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/recording"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/sandboxd"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/session"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/snapshot"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/statejournal"
 )
 
 // Catch wire-field additions/removals even when an existing traffic fixture does
@@ -109,6 +112,31 @@ func TestOpenAPIModelFieldsMatchWireTypes(t *testing.T) {
 			t.Errorf("missing model %s", name)
 			return
 		}
+		if order, ok := model["x-native-json-order"].([]any); ok {
+			var wantOrder, wantOmit []string
+			for i := 0; i < typ.NumField(); i++ {
+				f := typ.Field(i)
+				tag := strings.Split(f.Tag.Get("json"), ",")
+				if f.PkgPath != "" || tag[0] == "-" {
+					continue
+				}
+				wantOrder = append(wantOrder, tag[0])
+				if len(tag) > 1 && tag[1] == "omitempty" {
+					wantOmit = append(wantOmit, tag[0])
+				}
+			}
+			gotOrder := []string{}
+			for _, v := range order {
+				gotOrder = append(gotOrder, v.(string))
+			}
+			gotOmit := []string{}
+			for _, v := range model["x-native-json-omitempty"].([]any) {
+				gotOmit = append(gotOmit, v.(string))
+			}
+			if strings.Join(gotOrder, ",") != strings.Join(wantOrder, ",") || strings.Join(gotOmit, ",") != strings.Join(wantOmit, ",") {
+				t.Errorf("%s native hash encoding order/omission drift", name)
+			}
+		}
 		variants := []map[string]any{model}
 		if name == "localapi.LifecycleRequest" {
 			variants = nil
@@ -147,7 +175,7 @@ func TestOpenAPIModelFieldsMatchWireTypes(t *testing.T) {
 			}
 		}
 	}
-	for _, value := range []any{adaptive.OperationRequest{}, adaptive.AttemptContext{}, adaptive.ObservationView{}, adaptive.ObservationRequest{}, adaptive.FeedbackReadRequest{}, adaptive.FeedbackChunk{}, adaptive.OwnerRequest{}, adaptive.ExecutionOwner{}, adaptive.OperationRecord{}, adaptive.CapabilityManifest{}, localapi.AttachRequest{}, localapi.LifecycleRequest{}, localapi.Binding{}, localapi.Record{}, localapi.ExecutionFailure{}, localapi.SnapshotListRequest{}, localapi.SnapshotInspectRequest{}, localapi.SnapshotListResponse{}, sandboxd.TurnRequest{}, sandboxd.Turn{}, injection.Definition{}, injection.PublicState{}, snapshot.Checkpoint{}, session.Metadata{}} {
+	for _, value := range []any{recording.Event{}, statejournal.Transaction{}, snapshot.Manifest{}, adaptive.EvidenceBundle{}, adaptive.ExecutionState{}, evaluation.Report{}, injection.OperatorState{}, adaptive.OperationRequest{}, adaptive.AttemptContext{}, adaptive.ObservationView{}, adaptive.ObservationRequest{}, adaptive.FeedbackReadRequest{}, adaptive.FeedbackChunk{}, adaptive.OwnerRequest{}, adaptive.ExecutionOwner{}, adaptive.OperationRecord{}, adaptive.CapabilityManifest{}, localapi.AttachRequest{}, localapi.LifecycleRequest{}, localapi.Binding{}, localapi.Record{}, localapi.ExecutionFailure{}, localapi.SnapshotListRequest{}, localapi.SnapshotInspectRequest{}, localapi.SnapshotListResponse{}, sandboxd.TurnRequest{}, sandboxd.Turn{}, injection.Definition{}, injection.PublicState{}, snapshot.Checkpoint{}, session.Metadata{}} {
 		visit(reflect.TypeOf(value))
 	}
 }

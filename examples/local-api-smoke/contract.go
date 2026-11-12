@@ -11,8 +11,8 @@ import (
 
 // These independent consumer pins model Operator without depending on its code.
 // Update deliberately after reviewing the contract; never derive them at runtime.
-const supportedContractVersion = "0.2.0"
-const supportedContractSHA256 = "0f95876e3e005a50489a9afcc6287ca14e979e1fc25f70d1731bc743f5217014"
+const supportedContractVersion = "0.3.0"
+const supportedContractSHA256 = "abbf0ec87aeffe96cdb5413e626c6e3a03b5bedab62c9cda2a24169ae8b3f1a1"
 
 func checkContract(httpClient *http.Client, baseURL, expected, expectedHash string) error {
 	r, err := httpClient.Post(baseURL+"/v1/contract-version", "application/json", bytes.NewBufferString(`{}`))

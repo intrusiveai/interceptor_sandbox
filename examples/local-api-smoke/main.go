@@ -193,6 +193,9 @@ func evidence(output, id string, maximum int64, partial ...bool) {
 			must(json.NewDecoder(reader).Decode(&bundle))
 		}
 	}
+	_, err = file.Seek(0, io.SeekStart)
+	must(err)
+	must(apiContract.EvidenceArchive(file))
 	require(seen["execution.json"] && seen["state.jsonl"] && seen["events.jsonl"] && seen["manifest.json"], "missing protected evidence members")
 	require(bundle.SessionID == id && bundle.CampaignID == campaign, "evidence scope mismatch")
 	expectedState := "complete"
