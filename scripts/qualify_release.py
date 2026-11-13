@@ -351,7 +351,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                 if fixture:
                     (diagnostics / 'provider-checks.json').write_text(json.dumps(
                         {'failures': fixture.failures, 'calls': fixture.calls}, indent=2)+'\n')
-                for path in (work / "data").rglob("*.log"):
+                for path in list((work / "data").rglob("*.log")) + list((work / "data").rglob("events.jsonl")):
                     relative = path.relative_to(work / "data")
                     destination = diagnostics / relative
                     destination.parent.mkdir(parents=True, exist_ok=True)
