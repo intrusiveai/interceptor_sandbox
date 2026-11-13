@@ -358,3 +358,16 @@ or every change made to the environment.
 See [PostgreSQL and pgvector](postgresql.md) for the managed database Blueprint,
 wrapper packaging, verified driver TLS, database injection surfaces, independent
 committed-state oracles, evidence and coordinated restore contract.
+
+## Native model-response injection
+
+`capabilities.read` advertises `model_response` with `model_codecs` and
+`placement_root: response-body`. `injection.arm` accepts its simulation
+definitions using `model_codec`, `call_ordinal`, optional observed `turn_id` and
+request-body predicates. Invalid codecs or unrelated selectors return the existing
+`invalid_injection` error. Attempt and artifact registration are unchanged.
+
+See [selectors, placement and response-write evidence](injections-and-evaluation.md#model-response-injection).
+`observation.read` / `observation.content.read` retain profile/selection restrictions;
+model-response delivery facts identify the surface and `model_to_application`
+direction. Exported exchanges retain both original and modified response blobs.

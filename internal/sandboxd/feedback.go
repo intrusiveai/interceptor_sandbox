@@ -239,6 +239,8 @@ func (s *Server) feedbackView(ctx context.Context, r adaptive.OperationRequest, 
 					if applied, ok := semantic["applied"].(bool); ok && !applied {
 						disposition = "failed"
 					}
+				case "model_response_write":
+					disposition, _ = semantic["write_state"].(string)
 				case "injection_placement_failed":
 					disposition = "failed"
 				}
@@ -247,7 +249,12 @@ func (s *Server) feedbackView(ctx context.Context, r adaptive.OperationRequest, 
 					if e.TurnID == turn.ID || semantic["turn_id"] == turn.ID {
 						scope = "turn"
 					}
-					deliveries[e.InjectionID] = append(deliveries[e.InjectionID], map[string]any{"injection_id": e.InjectionID, "state": disposition, "scope": scope, "event_seq": e.Seq})
+					fact := map[string]any{"injection_id": e.InjectionID, "state": disposition, "scope": scope, "event_seq": e.Seq}
+					if semantic["surface"] == "model_response" {
+						fact["surface"] = "model_response"
+						fact["direction"] = "model_to_application"
+					}
+					deliveries[e.InjectionID] = append(deliveries[e.InjectionID], fact)
 				}
 			}
 		}

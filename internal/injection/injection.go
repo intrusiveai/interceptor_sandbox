@@ -30,6 +30,7 @@ type Definition struct {
 }
 
 type Selector struct {
+	ModelCodec         string            `json:"model_codec,omitempty"`
 	ToolName           string            `json:"tool_name"`
 	CallOrdinal        string            `json:"call_ordinal"`
 	ArgumentsPointer   string            `json:"arguments_pointer,omitempty"`
@@ -115,7 +116,7 @@ func Validate(definition Definition) error {
 	if definition.ID == "" || strings.ContainsAny(definition.ID, "/\\") {
 		return errors.New("injection id is required and may not contain path separators")
 	}
-	if definition.Surface != "model_tool_result" && definition.Surface != "environment_state" && definition.Surface != "service_response" && definition.Surface != "mcp_tool_result" && definition.Surface != "database_response" {
+	if definition.Surface != "model_tool_result" && definition.Surface != "environment_state" && definition.Surface != "service_response" && definition.Surface != "mcp_tool_result" && definition.Surface != "database_response" && definition.Surface != "model_response" {
 		return fmt.Errorf("unsupported injection surface %q", definition.Surface)
 	}
 	if (definition.Surface == "model_tool_result" || definition.Surface == "service_response" || definition.Surface == "mcp_tool_result" || definition.Surface == "database_response") && definition.Mode != "simulation" || definition.Surface == "environment_state" && definition.Mode != "fidelity" {
@@ -130,14 +131,14 @@ func Validate(definition Definition) error {
 	if len(definition.Payload) == 0 || !json.Valid(definition.Payload) {
 		return errors.New("payload must be valid JSON")
 	}
-	if definition.Surface == "model_tool_result" || definition.Surface == "mcp_tool_result" || definition.Surface == "service_response" || definition.Surface == "database_response" {
-		if definition.Surface != "model_tool_result" && definition.Selector.TurnID != "" {
+	if definition.Surface == "model_tool_result" || definition.Surface == "mcp_tool_result" || definition.Surface == "service_response" || definition.Surface == "database_response" || definition.Surface == "model_response" {
+		if definition.Surface != "model_tool_result" && definition.Surface != "model_response" && definition.Selector.TurnID != "" {
 			return errors.New("response injection cannot select an untrusted turn ID")
 		}
-		if definition.Surface != "service_response" && definition.Surface != "database_response" && definition.Selector.ToolName == "" {
+		if definition.Surface != "service_response" && definition.Surface != "database_response" && definition.Surface != "model_response" && definition.Selector.ToolName == "" {
 			return errors.New("tool-result selector requires tool_name")
 		}
-		if definition.Surface != "model_tool_result" && definition.Selector.Service == "" {
+		if definition.Surface != "model_tool_result" && definition.Surface != "model_response" && definition.Selector.Service == "" {
 			return errors.New("response selector requires stable service ID")
 		}
 		if (definition.Surface == "service_response" || definition.Surface == "database_response") && definition.Selector.ToolName != "" {
@@ -151,6 +152,13 @@ func Validate(definition Definition) error {
 			}
 		}
 	}
+	if definition.Surface == "model_response" {
+		if err := validateModelResponse(definition); err != nil {
+			return err
+		}
+	} else if definition.Selector.ModelCodec != "" {
+		return errors.New("model_codec is valid only for model_response")
+	}
 	if definition.Surface == "database_response" {
 		if definition.Selector.Method != "" || definition.Selector.Path != "" || len(definition.Selector.HeadersEqual) > 0 || len(definition.Selector.QueryEqual) > 0 || definition.Selector.ArgumentsPointer != "" || len(definition.Selector.ArgumentsEqual) > 0 || definition.Selector.ArgumentsContain != "" {
 			return errors.New("database_response uses request_body predicates, not HTTP or tool selectors")
@@ -163,7 +171,7 @@ func Validate(definition Definition) error {
 		if err := validateHTTPSelector(definition.Selector); err != nil {
 			return err
 		}
-	} else if definition.Surface != "environment_state" && definition.Surface != "database_response" && (definition.Selector.Path != "" || definition.Selector.Method != "" || len(definition.Selector.QueryEqual) > 0 || len(definition.Selector.HeadersEqual) > 0 || definition.Selector.RequestBodyPointer != "" || len(definition.Selector.RequestBodyEqual) > 0 || definition.Selector.RequestBodyContain != "") {
+	} else if definition.Surface != "environment_state" && definition.Surface != "database_response" && definition.Surface != "model_response" && (definition.Selector.Path != "" || definition.Selector.Method != "" || len(definition.Selector.QueryEqual) > 0 || len(definition.Selector.HeadersEqual) > 0 || definition.Selector.RequestBodyPointer != "" || len(definition.Selector.RequestBodyEqual) > 0 || definition.Selector.RequestBodyContain != "") {
 		return errors.New("HTTP request predicates are valid only for service_response")
 	}
 	if definition.Surface != "environment_state" && (definition.Selector.Collection != "" || definition.Selector.Key != "") {
@@ -688,7 +696,7 @@ func (m *Manager) ConfirmDelivery(finalProviderRequest []byte, ids []string) ([]
 	operations := []statejournal.Operation{}
 	for _, id := range ids {
 		item := m.items[id]
-		if item == nil {
+		if item == nil || item.definition.Surface == "model_response" {
 			continue
 		}
 		var payload any

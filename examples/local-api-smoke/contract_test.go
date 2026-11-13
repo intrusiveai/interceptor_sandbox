@@ -33,21 +33,21 @@ func TestConsumerContractCheck(t *testing.T) {
 		status     int
 		pass       bool
 	}{
-		{"match", `{"status":200,"body":{"interceptor_contract_version":"0.4.0","interceptor_contract_sha256":"ca89d9b4e00c0bf94fd9056a2513953de5c60ef8cbc04e322b5eed36ac730888"}}`, 200, true},
-		{"different product release", `{"status":200,"body":{"version":"42.0.0","interceptor_contract_version":"0.4.0","interceptor_contract_sha256":"ca89d9b4e00c0bf94fd9056a2513953de5c60ef8cbc04e322b5eed36ac730888"}}`, 200, true},
-		{"mismatch", `{"status":200,"body":{"interceptor_contract_version":"0.9.0","interceptor_contract_sha256":"ca89d9b4e00c0bf94fd9056a2513953de5c60ef8cbc04e322b5eed36ac730888"}}`, 200, false},
-		{"hash mismatch", `{"status":200,"body":{"interceptor_contract_version":"0.4.0","interceptor_contract_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`, 200, false},
-		{"missing hash", `{"status":200,"body":{"interceptor_contract_version":"0.4.0"}}`, 200, false},
-		{"malformed hash", `{"status":200,"body":{"interceptor_contract_version":"0.4.0","interceptor_contract_sha256":"sha256:abcd"}}`, 200, false},
-		{"wrong hash type", `{"status":200,"body":{"interceptor_contract_version":"0.4.0","interceptor_contract_sha256":42}}`, 200, false},
+		{"match", `{"status":200,"body":{"interceptor_contract_version":"0.5.0","interceptor_contract_sha256":"2c2912fba72d7cf2dc53a3606633da9e046238eb0df02147c315df87109ba584"}}`, 200, true},
+		{"different product release", `{"status":200,"body":{"version":"42.0.0","interceptor_contract_version":"0.5.0","interceptor_contract_sha256":"2c2912fba72d7cf2dc53a3606633da9e046238eb0df02147c315df87109ba584"}}`, 200, true},
+		{"mismatch", `{"status":200,"body":{"interceptor_contract_version":"0.9.0","interceptor_contract_sha256":"2c2912fba72d7cf2dc53a3606633da9e046238eb0df02147c315df87109ba584"}}`, 200, false},
+		{"hash mismatch", `{"status":200,"body":{"interceptor_contract_version":"0.5.0","interceptor_contract_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`, 200, false},
+		{"missing hash", `{"status":200,"body":{"interceptor_contract_version":"0.5.0"}}`, 200, false},
+		{"malformed hash", `{"status":200,"body":{"interceptor_contract_version":"0.5.0","interceptor_contract_sha256":"sha256:abcd"}}`, 200, false},
+		{"wrong hash type", `{"status":200,"body":{"interceptor_contract_version":"0.5.0","interceptor_contract_sha256":42}}`, 200, false},
 		{"missing", `{"status":200,"body":{}}`, 200, false},
-		{"malformed", `{"status":200,"body":{"interceptor_contract_version":"v0.4.0"}}`, 200, false},
+		{"malformed", `{"status":200,"body":{"interceptor_contract_version":"v0.5.0"}}`, 200, false},
 		{"wrong type", `{"status":200,"body":{"interceptor_contract_version":1}}`, 200, false},
 		{"unreadable", `{`, 200, false},
-		{"trailing", `{"status":200,"body":{"interceptor_contract_version":"0.4.0","interceptor_contract_sha256":"ca89d9b4e00c0bf94fd9056a2513953de5c60ef8cbc04e322b5eed36ac730888"}} {}`, 200, false},
+		{"trailing", `{"status":200,"body":{"interceptor_contract_version":"0.5.0","interceptor_contract_sha256":"2c2912fba72d7cf2dc53a3606633da9e046238eb0df02147c315df87109ba584"}} {}`, 200, false},
 		{"unavailable", `{}`, 404, false},
 		{"failed", `{}`, 503, false},
-		{"native error", `{"status":503,"body":{"interceptor_contract_version":"0.4.0","interceptor_contract_sha256":"ca89d9b4e00c0bf94fd9056a2513953de5c60ef8cbc04e322b5eed36ac730888"}}`, 200, false},
+		{"native error", `{"status":503,"body":{"interceptor_contract_version":"0.5.0","interceptor_contract_sha256":"2c2912fba72d7cf2dc53a3606633da9e046238eb0df02147c315df87109ba584"}}`, 200, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
@@ -67,7 +67,7 @@ func TestConsumerContractCheck(t *testing.T) {
 			if tc.name == "hash mismatch" && (!strings.Contains(err.Error(), supportedContractSHA256) || !strings.Contains(err.Error(), strings.Repeat("a", 64))) {
 				t.Fatal(err)
 			}
-			if tc.name == "mismatch" && (!strings.Contains(err.Error(), "expected 0.4.0") || !strings.Contains(err.Error(), "actual 0.9.0")) {
+			if tc.name == "mismatch" && (!strings.Contains(err.Error(), "expected 0.5.0") || !strings.Contains(err.Error(), "actual 0.9.0")) {
 				t.Fatal(err)
 			}
 		})

@@ -10,6 +10,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/digest"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/environment"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/identity"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/injection"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/services"
 )
 
@@ -57,6 +58,8 @@ type OperationCapability struct {
 	Path              string             `json:"path,omitempty"`
 }
 type InjectionProfile struct {
+	ModelCodecs    []string `json:"model_codecs,omitempty"`
+	PlacementRoot  string   `json:"placement_root,omitempty"`
 	Surface        string   `json:"surface"`
 	Scopes         []string `json:"scopes"`
 	Placements     []string `json:"placements"`
@@ -119,7 +122,7 @@ type CapabilityLimits struct {
 }
 
 func BuildCapabilityManifest(blueprint *environment.Blueprint, environmentDigest, applicationDigest string) (CapabilityManifest, error) {
-	m := CapabilityManifest{Feedback: FeedbackCapability{ViewVersion: ObservationViewVersion, SelectionModes: []string{"all-permitted", "selected"}, Kinds: append([]string(nil), FeedbackKinds...), MaximumChunkBytes: MaxFeedbackChunk, MaximumEntries: MaxFeedbackEntries}, APIVersion: CapabilityManifestVersion, Kind: "CapabilityManifest", InterceptorRelease: buildinfo.Version, EnvironmentDigest: environmentDigest, ApplicationDigest: applicationDigest, Target: TargetCapability{Name: blueprint.Metadata.Name, Version: blueprint.Metadata.Version, Interface: blueprint.Application.Interface.Adapter}, FeedbackProfiles: append([]string(nil), blueprint.Adaptive.FeedbackProfiles...), InjectionSurfaces: []string{"model_tool_result"}, SnapshotCapable: blueprint.Application.Persistence.SnapshotCapable, Limits: CapabilityLimits{MaximumAttempts: blueprint.Adaptive.MaxAttempts, MaximumArtifacts: blueprint.Adaptive.MaxArtifacts, MaximumArtifactBytes: blueprint.Limits.MaxBlobBytes, MaximumInvocations: blueprint.Limits.MaxTurns, MaximumSnapshots: blueprint.Limits.MaxSnapshots}}
+	m := CapabilityManifest{Feedback: FeedbackCapability{ViewVersion: ObservationViewVersion, SelectionModes: []string{"all-permitted", "selected"}, Kinds: append([]string(nil), FeedbackKinds...), MaximumChunkBytes: MaxFeedbackChunk, MaximumEntries: MaxFeedbackEntries}, APIVersion: CapabilityManifestVersion, Kind: "CapabilityManifest", InterceptorRelease: buildinfo.Version, EnvironmentDigest: environmentDigest, ApplicationDigest: applicationDigest, Target: TargetCapability{Name: blueprint.Metadata.Name, Version: blueprint.Metadata.Version, Interface: blueprint.Application.Interface.Adapter}, FeedbackProfiles: append([]string(nil), blueprint.Adaptive.FeedbackProfiles...), InjectionSurfaces: []string{"model_tool_result", "model_response"}, SnapshotCapable: blueprint.Application.Persistence.SnapshotCapable, Limits: CapabilityLimits{MaximumAttempts: blueprint.Adaptive.MaxAttempts, MaximumArtifacts: blueprint.Adaptive.MaxArtifacts, MaximumArtifactBytes: blueprint.Limits.MaxBlobBytes, MaximumInvocations: blueprint.Limits.MaxTurns, MaximumSnapshots: blueprint.Limits.MaxSnapshots}}
 	if blueprint.APIVersion == environment.DeliveryAPIVersion {
 		m.DeliverySchemaProfile = delivery.SchemaProfile
 	}
@@ -274,6 +277,13 @@ func injectionProfiles(surfaces []string) []InjectionProfile {
 	for _, surface := range surfaces {
 		profile := InjectionProfile{Surface: surface}
 		switch surface {
+		case "model_response":
+			profile.Scopes = []string{"once", "standing"}
+			profile.Placements = []string{"replace", "prepend", "append", "insert", "merge"}
+			profile.SelectorFields = []string{"model_codec", "call_ordinal", "turn_id", "request_body_json_pointer", "request_body_equal", "request_body_contain"}
+			profile.Carriers = []string{"model_client_response"}
+			profile.ModelCodecs = injection.GenerationCodecs()
+			profile.PlacementRoot = "response-body"
 		case "model_tool_result":
 			profile.Scopes = []string{"once", "next_turn", "standing"}
 			profile.Placements = []string{"replace", "prepend", "append", "insert", "merge"}

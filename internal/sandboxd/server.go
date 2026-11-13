@@ -1290,7 +1290,7 @@ func (s *Server) validateInjectionTarget(definition injection.Definition) error 
 		return err
 	}
 	switch definition.Surface {
-	case "model_tool_result":
+	case "model_tool_result", "model_response":
 		return nil
 	case "database_response":
 		if s.databases[definition.Selector.Service] == nil {

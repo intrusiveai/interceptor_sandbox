@@ -215,6 +215,7 @@ func main() {
 	privateOracles := flag.Bool("private-file-oracles", false, "qualify private-file oracles without snapshot support")
 	stateSnapshots := flag.Bool("state-snapshots", false, "qualify packaged application state snapshot and restore")
 	commandOnly := flag.Bool("command-only", false, "qualify a minimal command target's echo operation without snapshots or model calls")
+	modelResponse := flag.Bool("model-response", false, "qualify model-response injection with a real target SDK")
 	httpsSeams := flag.Bool("https-seams", false, "qualify declared HTTPS egress")
 	adapterOnly := flag.Bool("adapter-only", false, "qualify the stateful invocation-adapter example without snapshots or model calls")
 	maximumEvidence := flag.Int64("evidence-max-bytes", evidencepolicy.DefaultMaxBytes, "local evidence archive acceptance ceiling")
@@ -247,6 +248,10 @@ func main() {
 	}
 	if *privateFiles {
 		qualifyPrivateFiles(first, *output, limit, *root)
+		return
+	}
+	if *modelResponse {
+		qualifyModelResponse(first, *output, limit)
 		return
 	}
 	if *httpsSeams {
