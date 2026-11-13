@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Interceptor API for Operator",
-    "version": "0.4.0",
+    "version": "0.5.0",
     "description": "Operator-facing API only. Administrative CLI commands and Interceptor-only configuration are excluded. Before attachment consumers require exact agreement with their independently reviewed contract version and complete-document SHA-256 pins. Source commits and product versions are not compatibility pins. All schema references are included in this document."
   },
   "servers": [
@@ -1029,7 +1029,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Base64 bytes. For model_response injection_delivery entries the decoded JSON follows ModelResponseDeliveryFact."
           },
           "entry": {
             "$ref": "#/components/schemas/adaptive.FeedbackEntry"
@@ -1250,6 +1251,26 @@
           },
           "surface": {
             "type": "string"
+          },
+          "model_codecs": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "enum": [
+                "anthropic_messages",
+                "aws_bedrock_converse",
+                "google_generate_content",
+                "openai_chat_completions",
+                "openai_responses"
+              ]
+            }
+          },
+          "placement_root": {
+            "type": "string",
+            "description": "For model_response, response-body means the complete application-facing response JSON value."
           }
         },
         "required": [
@@ -2236,7 +2257,8 @@
               "environment_state",
               "service_response",
               "mcp_tool_result",
-              "database_response"
+              "database_response",
+              "model_response"
             ]
           }
         },
@@ -2266,6 +2288,40 @@
         "x-native-json-omitempty": [
           "attempt_id",
           "payload_digest"
+        ],
+        "description": "model_response mutates successful non-streaming application-facing generation JSON after provider translation. It requires simulation mode, once or standing scope, model_codec and call_ordinal. Optional observed turn and request-body predicates inspect the original application request. Other surface selectors are rejected with invalid_injection. Placements operate on the complete native response, deliberately permitting schema-invalid but valid JSON, including malformed tool calls. Missing/type-incompatible placements are recorded unapplied and consume once; bounds or required storage failures fail closed. Eligible definitions freeze at request admission; deletion remains effective. Ordinals count matching successful JSON responses in serialized processing order, and survive snapshot/replay.",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "surface": {
+                  "const": "model_response"
+                }
+              },
+              "required": [
+                "surface"
+              ]
+            },
+            "then": {
+              "properties": {
+                "mode": {
+                  "const": "simulation"
+                },
+                "scope": {
+                  "enum": [
+                    "once",
+                    "standing"
+                  ]
+                },
+                "selector": {
+                  "required": [
+                    "model_codec",
+                    "call_ordinal"
+                  ]
+                }
+              }
+            }
+          }
         ]
       },
       "injection.Placement": {
@@ -2386,14 +2442,25 @@
           },
           "turn_id": {
             "type": "string"
+          },
+          "model_codec": {
+            "type": "string",
+            "enum": [
+              "anthropic_messages",
+              "aws_bedrock_converse",
+              "google_generate_content",
+              "openai_chat_completions",
+              "openai_responses"
+            ],
+            "description": "Required only for model_response; application-facing generation codec, independent of upstream provider."
           }
         },
         "required": [
-          "tool_name",
           "call_ordinal"
         ],
         "type": "object",
         "x-native-json-order": [
+          "model_codec",
           "tool_name",
           "call_ordinal",
           "arguments_pointer",
@@ -2414,6 +2481,7 @@
           "relative_path"
         ],
         "x-native-json-omitempty": [
+          "model_codec",
           "arguments_pointer",
           "arguments_equal",
           "arguments_contain",
@@ -2430,7 +2498,8 @@
           "request_body_contain",
           "file_namespace",
           "relative_path"
-        ]
+        ],
+        "description": "tool_name may be omitted at request admission for surfaces that do not select tools, including model_response. Serialized native state emits the empty field in the declared hash order."
       },
       "localapi.AttachRequest": {
         "additionalProperties": false,
@@ -5086,7 +5155,8 @@
             "type": "string"
           },
           "outcome": {
-            "type": "string"
+            "type": "string",
+            "description": "model_response yields RESPONSE_WRITTEN after a completed write without a causal success oracle, DELIVERY_UNKNOWN after failed/partial writes, or DELIVERED_SUCCEEDED with independent causal oracle evidence. It must not infer resisted or successful execution from mutation alone."
           }
         },
         "required": [
@@ -5232,7 +5302,8 @@
             "type": "boolean"
           },
           "delivery": {
-            "type": "string"
+            "type": "string",
+            "description": "not_confirmed or confirmed for model delivery. model_response uses response_written for a completed application-facing write and write_failed for a failed/partial write; neither proves SDK acceptance or tool execution."
           },
           "delivery_observable": {
             "type": "boolean"
@@ -5392,7 +5463,7 @@
           },
           "semantic": {
             "type": "object",
-            "description": "Event-kind-specific observation data, including application/service-defined content. Preserve it in hash verification; it is not a trusted application outcome by itself."
+            "description": "Kind-specific JSON. For model_exchange, response_ref and provider_response_ref retain original bytes. Applied model_response adds delivered_response_ref, delivered_response_digest, model_response_injection_ids and response_injection_direction=model_to_application. References use the existing content-addressed blob digest format. injection_applied carries surface, direction, codec, applied/error; model_response_write carries write_state (response_written or write_failed), bytes_written and expected_bytes. Event attempt/payload/injection and observed turn bindings apply. Required storage failures prevent sending modified bytes; failures after a write latch incomplete evidence."
           },
           "seq": {
             "type": "integer",
@@ -5451,7 +5522,85 @@
           "prefix": "sha256:",
           "empty_field": "hash",
           "encoding": "go-json-marshal"
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "model_response_write"
+                },
+                "semantic": {}
+              },
+              "required": [
+                "kind",
+                "semantic"
+              ]
+            },
+            "then": {
+              "properties": {
+                "semantic": {
+                  "$ref": "#/components/schemas/ModelResponseWrite"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "injection_applied"
+                },
+                "semantic": {
+                  "properties": {
+                    "surface": {
+                      "const": "model_response"
+                    }
+                  },
+                  "required": [
+                    "surface"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "semantic"
+              ]
+            },
+            "then": {
+              "properties": {
+                "semantic": {
+                  "$ref": "#/components/schemas/ModelResponseMutation"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "model_exchange"
+                },
+                "semantic": {
+                  "required": [
+                    "model_response_injection_ids"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "semantic"
+              ]
+            },
+            "then": {
+              "properties": {
+                "semantic": {
+                  "$ref": "#/components/schemas/ModelResponseExchange"
+                }
+              }
+            }
+          }
+        ]
       },
       "snapshot.Entry": {
         "additionalProperties": false,
@@ -6356,6 +6505,164 @@
       "EvidenceFailureMarker": {
         "type": "object",
         "description": "Host diagnostic record. Presence marks partial evidence; fields are diagnostic and are not an execution authorization or a successful outcome."
+      },
+      "ModelResponseMutation": {
+        "type": "object",
+        "properties": {
+          "surface": {
+            "const": "model_response"
+          },
+          "direction": {
+            "const": "model_to_application"
+          },
+          "codec": {
+            "type": "string",
+            "enum": [
+              "anthropic_messages",
+              "aws_bedrock_converse",
+              "google_generate_content",
+              "openai_chat_completions",
+              "openai_responses"
+            ],
+            "description": "Required only for model_response; application-facing generation codec, independent of upstream provider."
+          },
+          "applied": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "surface",
+          "direction",
+          "codec",
+          "applied",
+          "error"
+        ],
+        "additionalProperties": false
+      },
+      "ModelResponseWrite": {
+        "type": "object",
+        "properties": {
+          "surface": {
+            "const": "model_response"
+          },
+          "direction": {
+            "const": "model_to_application"
+          },
+          "codec": {
+            "type": "string",
+            "enum": [
+              "anthropic_messages",
+              "aws_bedrock_converse",
+              "google_generate_content",
+              "openai_chat_completions",
+              "openai_responses"
+            ],
+            "description": "Required only for model_response; application-facing generation codec, independent of upstream provider."
+          },
+          "write_state": {
+            "enum": [
+              "response_written",
+              "write_failed"
+            ]
+          },
+          "bytes_written": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "expected_bytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "surface",
+          "direction",
+          "codec",
+          "write_state",
+          "bytes_written",
+          "expected_bytes"
+        ],
+        "additionalProperties": false
+      },
+      "ModelResponseExchange": {
+        "type": "object",
+        "properties": {
+          "response_ref": {
+            "type": "string"
+          },
+          "provider_response_ref": {
+            "type": "string"
+          },
+          "delivered_response_ref": {
+            "type": "string"
+          },
+          "delivered_response_digest": {
+            "type": "string"
+          },
+          "model_response_injection_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "response_injection_direction": {
+            "const": "model_to_application"
+          }
+        },
+        "required": [
+          "response_ref",
+          "provider_response_ref",
+          "delivered_response_ref",
+          "delivered_response_digest",
+          "model_response_injection_ids",
+          "response_injection_direction"
+        ],
+        "additionalProperties": true
+      },
+      "ModelResponseDeliveryFact": {
+        "type": "object",
+        "properties": {
+          "injection_id": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "applied",
+              "failed",
+              "response_written",
+              "write_failed"
+            ]
+          },
+          "scope": {
+            "enum": [
+              "attempt",
+              "turn"
+            ]
+          },
+          "event_seq": {
+            "type": "integer"
+          },
+          "surface": {
+            "const": "model_response"
+          },
+          "direction": {
+            "const": "model_to_application"
+          }
+        },
+        "required": [
+          "injection_id",
+          "state",
+          "scope",
+          "event_seq",
+          "surface",
+          "direction"
+        ],
+        "additionalProperties": false,
+        "description": "Decoded observation.content.read bytes for model_response injection_delivery entries. Available only to diagnostic/oracle-assisted profiles and permitted selection. A completed write proves neither SDK acceptance nor tool execution."
       }
     }
   }

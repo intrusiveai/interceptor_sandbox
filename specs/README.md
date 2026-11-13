@@ -53,6 +53,12 @@ attribution, terminal execution closure and campaign reporting. The
 `interceptor-improvements.md` describes the cross-project integration
 capabilities and AEF consumption rules without redefining these schemas.
 
+## Model-response injection
+
+[`model-response-injection.md`](model-response-injection.md) specifies controlled
+mutations of model responses before target application consumption, including
+malformed tool calls, native API integration and independent response evidence.
+
 ## Interceptor–Operator compatibility
 
 [`interceptor-operator-contract.md`](interceptor-operator-contract.md) defines

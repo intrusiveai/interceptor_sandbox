@@ -31,7 +31,9 @@ from publish_release import read_archive
 from build_release import ARCHIVE_ROOT
 
 
-def qualify(archive, version, source, base_image, output, client, adapter_language=None, embeddings=False, python_ca=False, state_snapshots=False, evidence_failure=False, postgresql=False, example_directory=None, customer_support=False, database_test=None, titan=False, public_ca_umask=None, https_seams=False, seam_debug=False, bridge_transport="spool"):
+def qualify(archive, version, source, base_image, output, client, adapter_language=None, embeddings=False, python_ca=False, state_snapshots=False, evidence_failure=False, postgresql=False, example_directory=None, customer_support=False, database_test=None, titan=False, public_ca_umask=None, https_seams=False, seam_debug=False, bridge_transport="spool", model_response=False):
+    if model_response and (adapter_language != "python" or any((https_seams, embeddings, python_ca, state_snapshots, postgresql, titan, public_ca_umask))):
+        raise ValueError("model response qualification requires standalone Python mode")
     if seam_debug and not https_seams:
         raise ValueError("--seam-debug requires --https-seams")
     if https_seams and (adapter_language != "python" or embeddings or python_ca or state_snapshots or postgresql or titan or public_ca_umask):
@@ -65,7 +67,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
     suffix = uuid.uuid4().hex
     target, wrapper = "interceptor-release-target:"+suffix, "interceptor-release-wrapper:"+suffix
     inspection = "interceptor-release-check-"+suffix
-    with (HTTPSSeamFixture() if https_seams else TitanFixture() if titan else EmbeddingFixture() if (embeddings or state_snapshots or postgresql) else nullcontext()) as fixture, tempfile.TemporaryDirectory(prefix="interceptor-release-qa-") as temporary:
+    with (HTTPSSeamFixture() if https_seams else TitanFixture() if titan else EmbeddingFixture(tool_calls=model_response) if (model_response or embeddings or state_snapshots or postgresql) else nullcontext()) as fixture, tempfile.TemporaryDirectory(prefix="interceptor-release-qa-") as temporary:
         work = Path(temporary).resolve()
         install, outside, bin_dir = (work / name for name in ("install", "outside", "bin"))
         for directory in (install, outside, bin_dir): directory.mkdir()
@@ -97,7 +99,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
         process = None
         try:
             target_id = base["Id"]
-            example = Path(__file__).resolve().parents[1] / ("examples/https-egress" if https_seams else "examples/titan-embeddings" if titan else "examples/postgresql" if postgresql else "examples/application-state-snapshots" if state_snapshots else "examples/python-ca" if python_ca else "examples/remote-embeddings" if embeddings else "examples/invocation-adapters") / (adapter_language or "")
+            example = Path(__file__).resolve().parents[1] / ("examples/model-response-injection" if model_response else "examples/https-egress" if https_seams else "examples/titan-embeddings" if titan else "examples/postgresql" if postgresql else "examples/application-state-snapshots" if state_snapshots else "examples/python-ca" if python_ca else "examples/remote-embeddings" if embeddings else "examples/invocation-adapters") / (adapter_language or "")
             if example_directory: example = Path(example_directory).resolve()
             if adapter_language:
                 context = work / "target"
@@ -233,7 +235,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
             provider_args += ["--bridge-transport", bridge_transport]
             with (output / "run.log").open("w") as log:
                 process = subprocess.Popen([cli, "run", "--environment", str(blueprint),
-                    *provider_args, *(["--feedback-profile", "oracle-assisted"] if postgresql and not customer_support else [])],
+                    *provider_args, *(["--feedback-profile", "diagnostic"] if model_response else ["--feedback-profile", "oracle-assisted"] if postgresql and not customer_support else [])],
                     cwd=outside, env=env, stdout=log, stderr=subprocess.STDOUT)
                 deadline = time.monotonic() + 60
                 session = None
@@ -281,7 +283,7 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                         run(docker, 'exec', '--user', '20000:20000', active[0], '/bin/sh', '-c',
                             'for path in /opt/interceptor/environment/environment.yaml /run/interceptor-tls/server-key.pem; do if head -c 1 "$path" >/dev/null 2>&1; then id; ls -ld /opt/interceptor/environment; echo "application can open $path"; exit 1; fi; done; if test -x /run/interceptor-session/pg/database/data; then echo "application can enter database data"; exit 1; fi; set -- /tmp/interceptor-pg-*; if test "$1" = "/tmp/interceptor-pg-*"; then echo "private socket directory missing"; ls -ld /tmp /tmp/*; exit 1; fi; for path do if test -x "$path"; then echo "application can enter $path"; exit 1; fi; done')
                         (output / 'database-isolation.json').write_text(json.dumps({'application_uid':20000,'private_blueprint':True,'private_database':True,'private_sockets':True,'private_tls_key':True})+'\n')
-                run(str(client), "--https-seams" if https_seams else "--customer-support" if customer_support else "--postgresql" if postgresql else "--state-snapshots" if state_snapshots else "--adapter-only" if adapter_language else "--command-only", "--output", str(output / "native"), *(["--evidence-failure", "--data-root", str(work / "data")] if evidence_failure else []))
+                run(str(client), "--model-response" if model_response else "--https-seams" if https_seams else "--customer-support" if customer_support else "--postgresql" if postgresql else "--state-snapshots" if state_snapshots else "--adapter-only" if adapter_language else "--command-only", "--output", str(output / "native"), *(["--evidence-failure", "--data-root", str(work / "data")] if evidence_failure else []))
                 native = json.loads((output / "native/result.json").read_text())
                 if not native["passed"] or native["session_id"] != session["id"]:
                     raise ValueError("native qualification did not pass for this session")
@@ -334,6 +336,9 @@ def qualify(archive, version, source, base_image, output, client, adapter_langua
                 result['observed_evidence'] = verify_observed_evidence(output, evidence_failure)
             elif https_seams:
                 result['https_seams'] = fixture.verify(output, work / 'data', seam_debug)
+            elif model_response:
+                from model_response_fixture import verify
+                result['model_response'] = verify(fixture, output)
             elif fixture:
                 result['embeddings'] = fixture.verify(output)
             (output / "result.json").write_text(json.dumps(result, indent=2)+"\n")
@@ -551,6 +556,7 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--client", type=Path, required=True, help="prebuilt examples/local-api-smoke qualification client")
     parser.add_argument("--adapter-language", choices=("python", "node"), help="qualify the separately installed adapter example using the supplied runtime image")
+    parser.add_argument("--model-response", action="store_true")
     parser.add_argument("--https-seams", action="store_true")
     parser.add_argument("--seam-debug", action="store_true")
     parser.add_argument("--bridge-transport", choices=("spool", "unix"), default="spool")
@@ -565,4 +571,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.database_test and not args.postgresql:
         parser.error('--database-test requires --postgresql')
-    qualify(args.archive.resolve(), args.version, args.source, args.image, args.output, args.client.resolve(), args.adapter_language, args.embeddings, args.python_ca, args.state_snapshots, args.evidence_failure, args.postgresql, database_test=args.database_test, titan=args.titan, public_ca_umask=args.public_ca_umask, https_seams=args.https_seams, seam_debug=args.seam_debug, bridge_transport=args.bridge_transport)
+    qualify(args.archive.resolve(), args.version, args.source, args.image, args.output, args.client.resolve(), args.adapter_language, args.embeddings, args.python_ca, args.state_snapshots, args.evidence_failure, args.postgresql, database_test=args.database_test, titan=args.titan, public_ca_umask=args.public_ca_umask, https_seams=args.https_seams, seam_debug=args.seam_debug, bridge_transport=args.bridge_transport, model_response=args.model_response)

@@ -1073,3 +1073,11 @@ from other oracles MAY remain in a partial collection. Retained receipts MUST
 remain immutable after later writes or restore. Public feedback MUST contain only
 normalized outcomes, never sealed SQL, private result rows or credentials.
 Other unsupported state-oracle kinds MUST retain their post-run restrictions.
+
+## Model-to-application response injection
+
+[Native model-response injection](model-response-injection.md) specifies the
+`model_response` simulation surface. It augments the existing injection API to
+test the target application's handling of malformed model-generated tool calls.
+It MUST remain distinct from `model_tool_result` request mutation and MUST retain
+original provider evidence and model-to-application delivery semantics.

@@ -135,3 +135,13 @@ names. These are selectable targets for the existing `injection.arm` operation,
 not new API routes. Keep generated manifests, runtime validation, OpenAPI types
 and native discovery-to-injection tests aligned. Operator must separately handle
 these forms before adopting the new version/hash pins.
+
+Contract `0.5.0` adds the Operator interactions for native model-response
+injection: discovery profile metadata, the `model_codec` arm selector, response-write
+feedback and original/modified evidence references. The OpenAPI includes typed
+model-response event payloads and decoded feedback facts. Persisted definitions
+include the optional selector in their declared JSON order. Qualification pins
+both the version and complete document hash. Keep model-to-application write
+confirmation separate from model-tool-result delivery to the model; neither
+mutation nor SDK failure proves tool execution. Recheck actual API/export traffic
+and the packaged SDK example when changing this boundary.
