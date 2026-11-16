@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/intrusive-ai/interceptor-sandbox/internal/blobstore"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/contracttest"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/environment"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/session"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/snapshot"
@@ -126,6 +127,11 @@ func TestExportDatabaseCheckpointBlobs(t *testing.T) {
 					f, err := os.Open(output)
 					must(err)
 					defer f.Close()
+					validator, err := contracttest.New()
+					must(err)
+					must(validator.EvidenceArchive(f))
+					_, err = f.Seek(0, io.SeekStart)
+					must(err)
 					archive := tar.NewReader(f)
 					expected := map[string][]byte{backup.Digest: content, file.Digest: fileContent}
 					found := map[string]bool{}

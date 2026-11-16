@@ -55,6 +55,13 @@ type Endpoint struct {
 	InjectionRoot       string    `json:"injection_root"`
 	OutputPointer       string    `json:"output_pointer,omitempty"`
 	MaximumRequestBytes int64     `json:"maximum_request_bytes"`
+	// http-route-set uses exact allowlists; empty means unrestricted except HEAD.
+	// Neither list contains templates or wildcard strings.
+	Methods []string `json:"methods,omitempty"`
+	Paths   []string `json:"paths,omitempty"`
+	// state-collection describes existing records, never a create permission.
+	Keys          []string `json:"keys,omitempty"`
+	MutableFields []string `json:"mutable_fields,omitempty"`
 }
 
 // Clone retains JSON numbers exactly while detaching map/slice storage.

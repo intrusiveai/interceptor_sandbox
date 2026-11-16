@@ -9,6 +9,9 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/delivery"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/digest"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/environment"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/identity"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/injection"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/services"
 )
 
 type FeedbackCapability struct {
@@ -55,6 +58,8 @@ type OperationCapability struct {
 	Path              string             `json:"path,omitempty"`
 }
 type InjectionProfile struct {
+	ModelCodecs    []string `json:"model_codecs,omitempty"`
+	PlacementRoot  string   `json:"placement_root,omitempty"`
 	Surface        string   `json:"surface"`
 	Scopes         []string `json:"scopes"`
 	Placements     []string `json:"placements"`
@@ -117,7 +122,7 @@ type CapabilityLimits struct {
 }
 
 func BuildCapabilityManifest(blueprint *environment.Blueprint, environmentDigest, applicationDigest string) (CapabilityManifest, error) {
-	m := CapabilityManifest{Feedback: FeedbackCapability{ViewVersion: ObservationViewVersion, SelectionModes: []string{"all-permitted", "selected"}, Kinds: append([]string(nil), FeedbackKinds...), MaximumChunkBytes: MaxFeedbackChunk, MaximumEntries: MaxFeedbackEntries}, APIVersion: CapabilityManifestVersion, Kind: "CapabilityManifest", InterceptorRelease: buildinfo.Version, EnvironmentDigest: environmentDigest, ApplicationDigest: applicationDigest, Target: TargetCapability{Name: blueprint.Metadata.Name, Version: blueprint.Metadata.Version, Interface: blueprint.Application.Interface.Adapter}, FeedbackProfiles: append([]string(nil), blueprint.Adaptive.FeedbackProfiles...), InjectionSurfaces: []string{"model_tool_result"}, SnapshotCapable: blueprint.Application.Persistence.SnapshotCapable, Limits: CapabilityLimits{MaximumAttempts: blueprint.Adaptive.MaxAttempts, MaximumArtifacts: blueprint.Adaptive.MaxArtifacts, MaximumArtifactBytes: blueprint.Limits.MaxBlobBytes, MaximumInvocations: blueprint.Limits.MaxTurns, MaximumSnapshots: blueprint.Limits.MaxSnapshots}}
+	m := CapabilityManifest{Feedback: FeedbackCapability{ViewVersion: ObservationViewVersion, SelectionModes: []string{"all-permitted", "selected"}, Kinds: append([]string(nil), FeedbackKinds...), MaximumChunkBytes: MaxFeedbackChunk, MaximumEntries: MaxFeedbackEntries}, APIVersion: CapabilityManifestVersion, Kind: "CapabilityManifest", InterceptorRelease: buildinfo.Version, EnvironmentDigest: environmentDigest, ApplicationDigest: applicationDigest, Target: TargetCapability{Name: blueprint.Metadata.Name, Version: blueprint.Metadata.Version, Interface: blueprint.Application.Interface.Adapter}, FeedbackProfiles: append([]string(nil), blueprint.Adaptive.FeedbackProfiles...), InjectionSurfaces: []string{"model_tool_result", "model_response"}, SnapshotCapable: blueprint.Application.Persistence.SnapshotCapable, Limits: CapabilityLimits{MaximumAttempts: blueprint.Adaptive.MaxAttempts, MaximumArtifacts: blueprint.Adaptive.MaxArtifacts, MaximumArtifactBytes: blueprint.Limits.MaxBlobBytes, MaximumInvocations: blueprint.Limits.MaxTurns, MaximumSnapshots: blueprint.Limits.MaxSnapshots}}
 	if blueprint.APIVersion == environment.DeliveryAPIVersion {
 		m.DeliverySchemaProfile = delivery.SchemaProfile
 	}
@@ -126,6 +131,7 @@ func BuildCapabilityManifest(blueprint *environment.Blueprint, environmentDigest
 		HTTP:  blueprint.Network.HTTP.Enabled,
 		HTTPS: TLSCapability{Enabled: blueprint.Network.TLS.Enabled, TrustMode: blueprint.Network.TLS.TrustMode},
 	}
+
 	if m.Network.DNS.Enabled {
 		m.Network.DNS.RecordTypes = []string{"A"}
 	}
@@ -213,7 +219,8 @@ func BuildCapabilityManifest(blueprint *environment.Blueprint, environmentDigest
 		m.Services = append(m.Services, capability)
 	}
 	for _, issuer := range blueprint.Identity.Issuers {
-		m.Services = append(m.Services, ServiceCapability{ID: issuer.ID, Kind: issuer.Kind, Role: "identity", Transports: serviceTransports(blueprint), InjectionSurfaces: []string{"environment_state"}})
+		m.DeliverySchemaProfile = delivery.SchemaProfile
+		m.Services = append(m.Services, ServiceCapability{ID: issuer.ID, Kind: issuer.Kind, Role: "identity", Transports: serviceTransports(blueprint), InjectionSurfaces: []string{"environment_state"}, Endpoints: identity.StateEndpoints(blueprint.Identity, issuer.ID)})
 		m.InjectionSurfaces = append(m.InjectionSurfaces, "environment_state")
 	}
 	for _, service := range blueprint.AttackerServices {
@@ -223,8 +230,16 @@ func BuildCapabilityManifest(blueprint *environment.Blueprint, environmentDigest
 		}
 		capability := ServiceCapability{ID: service.ID, Kind: service.Kind, Role: "attacker", ResponseMode: responseMode, Transports: serviceTransports(blueprint)}
 		if responseMode == "dynamic" {
-			capability.InjectionSurfaces = []string{"service_response"}
-			m.InjectionSurfaces = append(m.InjectionSurfaces, "service_response")
+			methods, paths, err := services.SinkAllowlists(service.Options)
+			if err != nil {
+				return CapabilityManifest{}, err
+			}
+			if endpoint := services.SinkEndpoint(methods, paths, services.SinkResponse{JSON: service.Response.JSON}, service.MaxCaptureBytes); endpoint != nil {
+				m.DeliverySchemaProfile = delivery.SchemaProfile
+				capability.Endpoints = []delivery.Endpoint{*endpoint}
+				capability.InjectionSurfaces = []string{"service_response"}
+				m.InjectionSurfaces = append(m.InjectionSurfaces, "service_response")
+			}
 		}
 		m.Services = append(m.Services, capability)
 	}
@@ -262,6 +277,13 @@ func injectionProfiles(surfaces []string) []InjectionProfile {
 	for _, surface := range surfaces {
 		profile := InjectionProfile{Surface: surface}
 		switch surface {
+		case "model_response":
+			profile.Scopes = []string{"once", "standing"}
+			profile.Placements = []string{"replace", "prepend", "append", "insert", "merge"}
+			profile.SelectorFields = []string{"model_codec", "call_ordinal", "turn_id", "request_body_json_pointer", "request_body_equal", "request_body_contain"}
+			profile.Carriers = []string{"model_client_response"}
+			profile.ModelCodecs = injection.GenerationCodecs()
+			profile.PlacementRoot = "response-body"
 		case "model_tool_result":
 			profile.Scopes = []string{"once", "next_turn", "standing"}
 			profile.Placements = []string{"replace", "prepend", "append", "insert", "merge"}

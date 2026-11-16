@@ -29,6 +29,7 @@ Reference and operational guides:
 - [Local API reference](api-reference.md)
 - [Injections and evaluation](injections-and-evaluation.md)
 - [Simulated MCP services](mcp-services.md)
+- [Declared HTTPS egress](https-egress.md)
 - [Snapshots and restore](snapshots-and-restore.md)
 - [Evidence and storage](evidence-and-storage.md)
 - [Spool file management and evidence purge](file-management.md)

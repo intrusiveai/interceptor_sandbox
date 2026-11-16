@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/intrusive-ai/interceptor-sandbox/internal/blobstore"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/digest"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/injection"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/recording"
 )
@@ -69,7 +70,13 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 		writeModelError(writer, codec, http.StatusBadRequest, "unsupported_model_feature", err.Error())
 		return
 	}
+	var modelSelection injection.ModelResponseSelection
 	if p.injections != nil && !isEmbeddingCodec(codec) {
+		modelSelection, err = p.injections.SelectModelResponse(codec, turnID, body)
+		if err != nil {
+			writeModelError(writer, codec, 400, "injection_failed", err.Error())
+			return
+		}
 		switch codec {
 		case CodecOpenAIChat:
 			rewritten, results, err = p.injections.RewriteOpenAI(body, turnID)
@@ -202,15 +209,64 @@ func (p *ModelProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request
 			}
 		}
 	}
+	deliveredBody := result.Body
+	var modelResults []injection.Result
+	if p.injections != nil && !isEmbeddingCodec(codec) && result.Status >= 200 && result.Status < 300 {
+		deliveredBody, modelResults, err = p.injections.RewriteModelResponse(request.Context(), modelSelection, result.Body, bodyLimit)
+		if err != nil {
+			p.recorder.Fail(err)
+			writeModelError(writer, codec, 507, "injection_state_error", err.Error())
+			return
+		}
+	}
+	modelIDs := []string{}
+	for _, item := range modelResults {
+		if item.Applied {
+			modelIDs = append(modelIDs, item.InjectionID)
+		}
+	}
+	if len(modelIDs) > 0 {
+		deliveredRef := p.store(request.Context(), deliveredBody)
+		if p.blobs != nil && deliveredRef == "" {
+			writeModelError(writer, codec, 507, "evidence_storage_error", "modified model response could not be stored")
+			return
+		}
+		exchange["delivered_response_ref"] = deliveredRef
+		exchange["delivered_response_digest"] = digest.Bytes(deliveredBody)
+		exchange["model_response_injection_ids"] = modelIDs
+		exchange["response_injection_direction"] = "model_to_application"
+		// Keep request-side attribution separate from response-side bindings, which
+		// are recorded on each injection event even for mixed attempts.
+		if attemptID == "" {
+			exchange["attempt_id"], exchange["payload_digest"] = p.injections.Attribution(modelIDs)
+		}
+	}
 	if err := p.record(request.Context(), "model_exchange", turnID, requestRef, exchange); err != nil {
 		writeModelError(writer, codec, http.StatusInsufficientStorage, "evidence_storage_error", "model exchange could not be recorded")
 		return
 	}
+	if p.recorder != nil {
+		if err := p.recorder.Flush(); err != nil {
+			writeModelError(writer, codec, 507, "evidence_storage_error", err.Error())
+			return
+		}
+	}
 	for name, value := range result.Headers {
+		if len(modelIDs) > 0 {
+			switch strings.ToLower(name) {
+			case "content-length", "content-md5", "digest", "etag", "content-encoding":
+				continue
+			}
+		}
 		writer.Header().Set(name, value)
 	}
 	writer.WriteHeader(result.Status)
-	_, _ = writer.Write(result.Body)
+	written, writeErr := writer.Write(deliveredBody)
+	if len(modelIDs) > 0 {
+		if err := p.injections.RecordModelResponseWrite(request.Context(), modelSelection, modelResults, written, len(deliveredBody), writeErr); err != nil {
+			p.recorder.Fail(err)
+		}
+	}
 }
 
 func validateNativeShape(codec string, body []byte, headers http.Header) error {

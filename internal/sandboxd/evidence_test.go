@@ -262,7 +262,7 @@ func TestEvidenceFailurePreventsWorkAndMarksSession(t *testing.T) {
 			if _, err := s.beginInvocation(context.Background(), applicationInvocation{TurnID: "blocked"}); err == nil {
 				t.Fatal("new invocation admitted")
 			}
-			if _, err := s.evaluate(); err == nil {
+			if _, err := s.evaluate(context.Background()); err == nil {
 				t.Fatal("evaluation reported success")
 			}
 			if _, err := s.createSnapshot(context.Background(), "bad", snapshot.ByteAllowance{}, snapshot.Metadata{}); err == nil {

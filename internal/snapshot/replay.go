@@ -102,7 +102,11 @@ func applyFilesystemOperation(ctx context.Context, roots []Root, blobs *blobstor
 	}
 	switch operation.Kind {
 	case "directory_ensure":
-		if err := ensureSafeParent(root, filepath.Dir(hostPath)); err != nil {
+		parent := filepath.Dir(hostPath)
+		if hostPath == root {
+			parent = root
+		}
+		if err := ensureSafeParent(root, parent); err != nil {
 			return err
 		}
 		if info, err := os.Lstat(hostPath); err == nil && (!info.IsDir() || info.Mode()&os.ModeSymlink != 0) {

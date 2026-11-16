@@ -168,7 +168,7 @@ func WatchSpools(ctx context.Context, roots []string, limit int64, fault func(er
 }
 
 func SpoolRoots(paths session.Paths) []string {
-	return []string{filepath.Join(paths.Sockets, "http-spool"), filepath.Join(paths.Sockets, "model-spool")}
+	return []string{filepath.Join(paths.Sockets, "http-spool"), filepath.Join(paths.Sockets, "model-spool"), filepath.Join(paths.Sockets, "https-seam-spool")}
 }
 
 // CleanupSpools requires confirmed Docker exit and exclusive access to host writers.
@@ -216,7 +216,7 @@ func CleanupSpools(ctx context.Context, root string, m session.Metadata, docker 
 	if !sockets.IsDir() {
 		return errors.New("session sockets path is not a directory")
 	}
-	for _, lane := range []string{"http-spool", "model-spool"} {
+	for _, lane := range []string{"http-spool", "model-spool", "https-seam-spool"} {
 		if err := group.RemoveAll(filepath.Join("sockets", lane)); err != nil {
 			return err
 		}

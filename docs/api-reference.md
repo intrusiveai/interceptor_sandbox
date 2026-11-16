@@ -67,7 +67,9 @@ Returns the deterministic, secret-free CapabilityManifest bound to the sealed
 Environment and Application. A ScenarioBundle or ExecutionLease must bind its
 exact `digest`. Service entries report role, supported injection surfaces,
 static/dynamic attacker response mode, available HTTP/HTTPS transports, and
-bounded creatable collections.
+bounded creatable collections. Dynamic sinks also export exact method/path sets;
+identity issuers export existing record keys and mutable fields. See
+[discovering injection targets](injections-and-evaluation.md#discovering-attacker-and-identity-targets).
 `file_namespaces` reports logical IDs and ceilings without revealing container
 paths. `cross_vm_operations` is the exact gateway operation vocabulary and
 `injection_profiles` declares each available surface's scopes, placements,
@@ -356,3 +358,16 @@ or every change made to the environment.
 See [PostgreSQL and pgvector](postgresql.md) for the managed database Blueprint,
 wrapper packaging, verified driver TLS, database injection surfaces, independent
 committed-state oracles, evidence and coordinated restore contract.
+
+## Native model-response injection
+
+`capabilities.read` advertises `model_response` with `model_codecs` and
+`placement_root: response-body`. `injection.arm` accepts its simulation
+definitions using `model_codec`, `call_ordinal`, optional observed `turn_id` and
+request-body predicates. Invalid codecs or unrelated selectors return the existing
+`invalid_injection` error. Attempt and artifact registration are unchanged.
+
+See [selectors, placement and response-write evidence](injections-and-evaluation.md#model-response-injection).
+`observation.read` / `observation.content.read` retain profile/selection restrictions;
+model-response delivery facts identify the surface and `model_to_application`
+direction. Exported exchanges retain both original and modified response blobs.

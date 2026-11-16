@@ -34,6 +34,7 @@ import (
 
 func DefaultFactories() map[string]BackendFactory {
 	return map[string]BackendFactory{
+		"onepassword":         newOnePasswordBackend,
 		"aws-secrets-manager": newAWSBackend,
 		"azure-key-vault":     newAzureBackend,
 		"gcp-secret-manager":  newGCPBackend,

@@ -44,3 +44,12 @@ Existing retained evidence MUST NOT be rewritten to claim the new schema.
 See [PostgreSQL and pgvector](postgresql.md) for the managed database Blueprint,
 wrapper packaging, verified driver TLS, database injection surfaces, independent
 committed-state oracles, evidence and coordinated restore contract.
+
+### Model-response injection discovery
+
+The global `model_response` profile advertises its generation `model_codecs`,
+`placement_root: response-body`, selectors, scopes and placements. These are
+implemented codecs, not a promise about the host's selected provider. Runtime
+provider compatibility remains authoritative. Rebuild wrappers for updated
+capability manifests; the digest includes these fields. This surface does not
+require a service endpoint or tool registry.

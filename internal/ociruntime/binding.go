@@ -20,11 +20,12 @@ const SessionLabel = "ai.intrusive.interceptor.session"
 // Binding is host-owned: its directory must never be mounted into the target.
 // ContainerID is empty only before create has returned and been persisted.
 type Binding struct {
-	Endpoint        string `json:"endpoint"`
-	DaemonID        string `json:"daemon_id"`
-	SessionID       string `json:"session_id"`
-	ContainerID     string `json:"container_id,omitempty"`
-	CreateAttempted bool   `json:"create_attempted"`
+	MutableVolumes  []string `json:"mutable_volumes,omitempty"`
+	Endpoint        string   `json:"endpoint"`
+	DaemonID        string   `json:"daemon_id"`
+	SessionID       string   `json:"session_id"`
+	ContainerID     string   `json:"container_id,omitempty"`
+	CreateAttempted bool     `json:"create_attempted"`
 }
 
 func BindingPath(root, sessionID string) string {
@@ -184,7 +185,12 @@ func (d Docker) ForSession(ctx context.Context, root, id string) (Docker, string
 }
 
 func (d Docker) saveBinding(id string, attempted bool) error {
-	return fsutil.WriteJSON(d.bindingPath, Binding{Endpoint: d.Endpoint, DaemonID: d.DaemonID, SessionID: d.SessionID, ContainerID: id, CreateAttempted: attempted}, 0600)
+	b, err := d.readBinding()
+	if err != nil {
+		return err
+	}
+	b.ContainerID, b.CreateAttempted = id, attempted
+	return fsutil.WriteJSON(d.bindingPath, b, 0600)
 }
 
 // Create leaves the container stopped until the caller persists session metadata.

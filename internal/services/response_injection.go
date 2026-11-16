@@ -57,7 +57,7 @@ func WithResponseInjection(serviceID, kind string, next http.Handler, manager *i
 			}
 		}
 		body := capture.body.Bytes()
-		if capture.status >= 200 && capture.status < 300 {
+		if capture.status >= 200 && capture.status < 300 && !(kind == "http_sink" && request.Method == http.MethodHead) {
 			surface, tool, args, candidate := "service_response", "", any(nil), any(nil)
 			var envelope map[string]any
 			if kind == "mcp_http" && json.Unmarshal(requestBody, &envelope) == nil && envelope["method"] == "tools/call" {

@@ -86,6 +86,7 @@ func Initialize(dataRoot string, metadata Metadata, baselineManifestDigest strin
 		"environment_digest":            metadata.EnvironmentDigest,
 		"application_digest":            metadata.AppDigest,
 		"baseline_file_manifest_digest": baselineManifestDigest,
+		"file_manifest_schema":          2,
 		"bridge_transport":              metadata.BridgeTransport,
 	})
 	if _, err := journal.Append("environment_materialized", []statejournal.Operation{{Kind: "environment_materialized", Value: value}}); err != nil {
@@ -154,6 +155,12 @@ func List(dataRoot string) ([]Metadata, error) {
 			continue
 		}
 		metadata, _, err := Load(dataRoot, entry.Name())
+		// The directory becomes visible before the first atomic metadata write,
+		// and may disappear during purge. Only published metadata is listable;
+		// malformed or unreadable metadata must still fail discovery.
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}

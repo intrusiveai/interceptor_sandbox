@@ -11,6 +11,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/environment"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/injection"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/services"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/snapshot"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/statejournal"
 )
 
@@ -61,6 +62,9 @@ func TestFidelityInjectionCreatesOnlyBlueprintAuthorizedTargets(t *testing.T) {
 	operations, apply, err = server.fidelityMutation(t.Context(), file)
 	if err != nil || len(operations) != 1 || operations[0].Path != filepath.Join(inbox, "message.txt") {
 		t.Fatalf("authorized file creation failed: operations=%#v err=%v", operations, err)
+	}
+	if operations[0].Owner != snapshot.SupervisorOwner {
+		t.Fatal("file injection must journal the replacement inode's supervisor owner")
 	}
 	if err := apply(); err != nil {
 		t.Fatal(err)

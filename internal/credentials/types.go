@@ -13,6 +13,7 @@ type Config struct {
 }
 
 type SecretStoreProfile struct {
+	OnePasswordAccount     string   `yaml:"onepassword_account,omitempty" json:"onepassword_account,omitempty"`
 	Authentication         string   `yaml:"authentication,omitempty" json:"authentication,omitempty"`
 	AWSProfile             string   `yaml:"aws_profile,omitempty" json:"aws_profile,omitempty"`
 	VaultProxy             bool     `yaml:"vault_proxy,omitempty" json:"vault_proxy,omitempty"`
@@ -42,17 +43,18 @@ type HostCredentialRef struct {
 }
 
 type Locator struct {
-	BackendKind  string `yaml:"backend_kind" json:"backend_kind"`
-	SecretID     string `yaml:"secret_id,omitempty" json:"secret_id,omitempty"`
-	Region       string `yaml:"region,omitempty" json:"region,omitempty"`
-	VersionID    string `yaml:"version_id,omitempty" json:"version_id,omitempty"`
-	VersionStage string `yaml:"version_stage,omitempty" json:"version_stage,omitempty"`
-	VaultURL     string `yaml:"vault_url,omitempty" json:"vault_url,omitempty"`
-	SecretName   string `yaml:"secret_name,omitempty" json:"secret_name,omitempty"`
-	Version      string `yaml:"version,omitempty" json:"version,omitempty"`
-	Project      string `yaml:"project,omitempty" json:"project,omitempty"`
-	Mount        string `yaml:"mount,omitempty" json:"mount,omitempty"`
-	Path         string `yaml:"path,omitempty" json:"path,omitempty"`
+	SecretReference string `yaml:"secret_reference,omitempty" json:"secret_reference,omitempty"`
+	BackendKind     string `yaml:"backend_kind" json:"backend_kind"`
+	SecretID        string `yaml:"secret_id,omitempty" json:"secret_id,omitempty"`
+	Region          string `yaml:"region,omitempty" json:"region,omitempty"`
+	VersionID       string `yaml:"version_id,omitempty" json:"version_id,omitempty"`
+	VersionStage    string `yaml:"version_stage,omitempty" json:"version_stage,omitempty"`
+	VaultURL        string `yaml:"vault_url,omitempty" json:"vault_url,omitempty"`
+	SecretName      string `yaml:"secret_name,omitempty" json:"secret_name,omitempty"`
+	Version         string `yaml:"version,omitempty" json:"version,omitempty"`
+	Project         string `yaml:"project,omitempty" json:"project,omitempty"`
+	Mount           string `yaml:"mount,omitempty" json:"mount,omitempty"`
+	Path            string `yaml:"path,omitempty" json:"path,omitempty"`
 }
 
 type ValueSelection struct {

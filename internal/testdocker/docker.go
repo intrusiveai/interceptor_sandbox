@@ -31,6 +31,25 @@ fi
 case "$1" in
 context) echo unix:///test/docker.sock;;
 info) if test -f "$root/daemon-id"; then cat "$root/daemon-id"; else echo test-daemon; fi;;
+volume)
+ action="$2"; shift 2
+ case "$action" in
+ ls)
+  for arg in "$@"; do
+   case "$arg" in name=*) name="${arg#name=^}"; name="${name%\$}"; test ! -f "$root/$name.volume" || echo "$name";; esac
+  done;;
+ create)
+  session=""
+  while test "$#" -gt 1; do
+   if test "$1" = "--label"; then session="${2#*=}"; shift; fi
+   shift
+  done
+  echo "{\"Name\":\"$1\",\"Driver\":\"local\",\"Labels\":{\"ai.intrusive.interceptor.session\":\"$session\"},\"Options\":{}}" > "$root/$1.volume"
+  echo "$1";;
+ inspect) for name in "$@"; do :; done; cat "$root/$name.volume";;
+ rm) rm "$root/$1.volume";;
+ *) exit 1;;
+ esac;;
 create)
  id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
  name=""; session=""

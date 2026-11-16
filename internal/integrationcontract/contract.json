@@ -1,0 +1,6669 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Interceptor API for Operator",
+    "version": "0.5.0",
+    "description": "Operator-facing API only. Administrative CLI commands and Interceptor-only configuration are excluded. Before attachment consumers require exact agreement with their independently reviewed contract version and complete-document SHA-256 pins. Source commits and product versions are not compatibility pins. All schema references are included in this document."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8080",
+      "description": "Existing trusted-host loopback API. Campaign identifiers scope access; they do not authenticate hostile local processes."
+    }
+  ],
+  "security": [],
+  "paths": {
+    "/v1/contract-version": {
+      "post": {
+        "operationId": "contractIdentity",
+        "description": "Read-only, no campaign or target access, no runtime reconciliation; Cache-Control: no-store Operator compares both the returned version and document SHA-256 with its independently pinned supported version and hash before attachment; mismatch or unreadable identity stops campaign execution The hash identifies the contract document, not an executable, release archive, capability manifest, API response or canonicalized subset; its value is not embedded in the document itself Both version and exact document hash must match, including after formatting-only edits; pins are never learned from the running service; no source-commit pin, Internet lookup or user-supplied document is required",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Empty"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful result in the GatewayResponse envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContractIdentityResponse"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Failure; inspect status and body.code or body.error.code. Unknown errors are not successful outcomes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/attach": {
+      "post": {
+        "operationId": "attachCampaign",
+        "description": "Campaign and stop policy persist for this process lifetime; same-campaign reattachment preserves the current session and policy Worker identity is caller attribution, not exclusive ownership; attachment does not reopen closed execution",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/localapi.AttachRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful result in the GatewayResponse envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Failure; inspect status and body.code or body.error.code. Unknown errors are not successful outcomes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/operations": {
+      "post": {
+        "operationId": "executeOperation",
+        "description": "Only native operations listed below are supported; there is no shell, host-path selection, remote provisioning or arbitrary forwarding API Mutations address the active session and compare its native revision; reads may address retained campaign sessions Exact retries reuse command identity and return recorded outcomes; changed command fields conflict; worker/run-revision attribution changes alone do not create a new effect Reconcile uncertain outcomes with operation.status rather than replaying with a fresh identity Closure is terminal; bounded injection cleanup and reads remain subject to campaign and integrity checks",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Native 200 results, or native 204 injection deletion wrapped in HTTP 200 with body null and status 204.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/NativeSuccessResponse"
+                    },
+                    {
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            200,
+                            204
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Failure; inspect status and body.code or body.error.code. Unknown errors are not successful outcomes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Successful result in the GatewayResponse envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/NativeSuccessResponse"
+                    },
+                    {
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            201
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Existing operation still in progress; reconcile or retry with identical command identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InProgressResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/lifecycle": {
+      "post": {
+        "operationId": "changeLifecycle",
+        "description": "Admitted operations survive caller disconnects; retry the same operation identity or query status Restore validates source state and checkpoint, closes and stops the old target, creates a fresh session, advances run_revision and rebinds the campaign Explicit campaign closure cannot be reopened by restore; failed restoration never reports a successful replacement Stop success requires host-confirmed termination; it is distinct from merely closing native execution admission",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/localapi.LifecycleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful result in the GatewayResponse envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Failure; inspect status and body.code or body.error.code. Unknown errors are not successful outcomes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Existing operation still in progress; reconcile or retry with identical command identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InProgressResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/status": {
+      "post": {
+        "operationId": "readStatus",
+        "description": "Reporting remains available after closure; unknown records do not prove that an operation had no effects Native operations use operation.status; this route reconciles the separate lifecycle ledger",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StatusRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful result in the GatewayResponse envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Failure; inspect status and body.code or body.error.code. Unknown errors are not successful outcomes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/snapshots/list": {
+      "post": {
+        "operationId": "listSnapshots",
+        "description": "Reads use retained host records and never restart or contact the target; inventory remains separate from snapshot creation and restoration",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/localapi.SnapshotListRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful result in the GatewayResponse envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotListResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Failure; inspect status and body.code or body.error.code. Unknown errors are not successful outcomes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/snapshots/inspect": {
+      "post": {
+        "operationId": "inspectSnapshot",
+        "description": "Reads use retained host records and never restart or contact the target; inventory remains separate from snapshot creation and restoration",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/localapi.SnapshotInspectRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful result in the GatewayResponse envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotInspectResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Failure; inspect status and body.code or body.error.code. Unknown errors are not successful outcomes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/evidence": {
+      "post": {
+        "operationId": "exportEvidence",
+        "description": "No caller-chosen export path; export does not restart a stopped target Consumers verify archive integrity and completeness rather than equating a successful download with a successful experiment Required evidence failures cannot be reported as complete success; agent-authored claims are not independent outcome proof",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvidenceRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Evidence tar archive, potentially containing explicitly partial evidence. Verify transfer integrity, member schemas, native hashes, identity bindings and completeness before accepting any outcome.",
+            "headers": {
+              "X-Content-SHA256": {
+                "schema": {
+                  "$ref": "#/components/schemas/Digest"
+                }
+              },
+              "X-Evidence-Max-Bytes": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/x-tar": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            },
+            "x-evidence-members": [
+              {
+                "pattern": "^manifest\\.json$",
+                "encoding": "json",
+                "required": true,
+                "schema": {
+                  "$ref": "#/components/schemas/EvidenceExportManifest"
+                }
+              },
+              {
+                "pattern": "^session\\.json$",
+                "encoding": "json",
+                "required": true,
+                "schema": {
+                  "$ref": "#/components/schemas/session.Metadata"
+                }
+              },
+              {
+                "pattern": "^evidence-bundle\\.json$",
+                "encoding": "json",
+                "required": true,
+                "schema": {
+                  "$ref": "#/components/schemas/adaptive.EvidenceBundle"
+                }
+              },
+              {
+                "pattern": "^file-manifest\\.json$",
+                "encoding": "json",
+                "required": true,
+                "schema": {
+                  "$ref": "#/components/schemas/snapshot.Manifest"
+                }
+              },
+              {
+                "pattern": "^events\\.jsonl$",
+                "encoding": "jsonl",
+                "required": true,
+                "schema": {
+                  "$ref": "#/components/schemas/recording.Event"
+                }
+              },
+              {
+                "pattern": "^state\\.jsonl$",
+                "encoding": "jsonl",
+                "required": true,
+                "schema": {
+                  "$ref": "#/components/schemas/statejournal.Transaction"
+                }
+              },
+              {
+                "pattern": "^final-evaluation\\.json$",
+                "encoding": "json",
+                "required": false,
+                "schema": {
+                  "$ref": "#/components/schemas/evaluation.Report"
+                },
+                "condition": "Required for complete final evaluation; absence makes the bundle partial."
+              },
+              {
+                "pattern": "^execution\\.json$",
+                "encoding": "json",
+                "required": false,
+                "schema": {
+                  "$ref": "#/components/schemas/adaptive.ExecutionState"
+                },
+                "condition": "Required when session.operation_api_version is set."
+              },
+              {
+                "pattern": "^artifacts\\.json$",
+                "encoding": "json",
+                "required": false,
+                "schema": {
+                  "$ref": "#/components/schemas/EvidenceArtifacts"
+                }
+              },
+              {
+                "pattern": "^attempts\\.json$",
+                "encoding": "json",
+                "required": false,
+                "schema": {
+                  "$ref": "#/components/schemas/EvidenceAttempts"
+                }
+              },
+              {
+                "pattern": "^checkpoints/[^/]+\\.json$",
+                "encoding": "json",
+                "required": false,
+                "schema": {
+                  "$ref": "#/components/schemas/snapshot.Checkpoint"
+                },
+                "condition": "All retained checkpoint files."
+              },
+              {
+                "pattern": "^restore-source/checkpoint\\.json$",
+                "encoding": "json",
+                "required": false,
+                "schema": {
+                  "$ref": "#/components/schemas/snapshot.Checkpoint"
+                },
+                "condition": "Required when session.parent_session_id is set."
+              },
+              {
+                "pattern": "^restore-source/state\\.jsonl$",
+                "encoding": "jsonl",
+                "required": false,
+                "schema": {
+                  "$ref": "#/components/schemas/statejournal.Transaction"
+                },
+                "condition": "Required when session.parent_session_id is set; verify the source chain and checkpoint prefix independently."
+              },
+              {
+                "pattern": "^(host-interruption|transport-failure|cleanup-pending)\\.json$",
+                "encoding": "json",
+                "required": false,
+                "schema": {
+                  "$ref": "#/components/schemas/EvidenceFailureMarker"
+                }
+              },
+              {
+                "pattern": "^blobs/sha256/[0-9a-f]{64}$",
+                "encoding": "bytes",
+                "required": false,
+                "condition": "Every referenced blob from events, both journals, the file manifest and artifact registries, including unchanged and empty seed files."
+              }
+            ],
+            "x-evidence-integrity": {
+              "archive": "Only regular tar members with unique clean relative paths; no traversal, links or extraction needed. Check Content-Length and X-Content-SHA256 against received bytes and enforce negotiated/local capacity. A valid tar checksum or HTTP 200 alone is not provenance verification.",
+              "native_json": "Hash UTF-8 encoding/json.Marshal output with the designated hash/digest field set to the empty string (not removed), no indentation or final newline. x-native-json-order gives struct member order; x-native-json-omitempty gives Go empty-value omission rules. Struct values (including zero attribution) are not empty; nil slices/maps encode null unless omitted; empty nonnil slices/maps encode []/{}. Map keys sort lexically; raw JSON retains member order while whitespace is compacted. Preserve Go HTML escaping (<, >, &, U+2028/U+2029), timestamp encoding, and exact integer values. These are not JCS or hashes of pretty-printed archive members. Unknown fields or unsupported schemas fail verification.",
+              "chains": "Verify event and transaction SHA-256 chains from sha256: plus 64 zeroes, contiguous sequences starting at 1, and matching session identities. Include every operation and owner field. Check checkpoint hash, source session, journal sequence/hash, file manifest digest and restore lineage. Source journal prefixes must remain independently verifiable.",
+              "files": "Require supported manifest schema, sorted unique clean absolute paths, valid types and permission bits. Schema 2 requires owner=application or supervisor on every entry; schema 1 forbids ownership and remains historical evidence only. Do not infer portable numeric UID/GID. Ownership-aware filesystem writes carry owner; absence in historical records is not authorization to restore them. Validate each file/database/artifact blob digest and recorded size.",
+              "bindings": "Cross-check campaign, session, environment, application and capability identities across metadata, bundle, checkpoints, registries and execution records. Verify the execution-state digest committed in the journal and the EvidenceBundle digest. Product/source provenance is not an Operator compatibility pin.",
+              "completeness": "Respect partial/truncated and failure markers, evaluation availability, coverage gaps and unknown operations. Oracle verdicts and application-authored assertions do not override failed provenance. Complete evidence means a complete record, not a successful attack."
+            }
+          },
+          "default": {
+            "description": "Failure; inspect status and body.code or body.error.code. Unknown errors are not successful outcomes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "adaptive.ArtifactDescriptor": {
+        "additionalProperties": false,
+        "properties": {
+          "canonicalization": {
+            "type": "string"
+          },
+          "digest": {
+            "type": "string"
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "digest",
+          "size_bytes",
+          "media_type"
+        ],
+        "type": "object",
+        "x-native-json-order": [
+          "digest",
+          "size_bytes",
+          "media_type",
+          "canonicalization"
+        ],
+        "x-native-json-omitempty": [
+          "canonicalization"
+        ]
+      },
+      "adaptive.AttemptContext": {
+        "additionalProperties": false,
+        "properties": {
+          "api_version": {
+            "type": "string",
+            "const": "interceptor.dev/attempt-context/v1alpha1"
+          },
+          "attempt_id": {
+            "type": "string"
+          },
+          "attempt_index": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "campaign_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "digest": {
+            "type": "string"
+          },
+          "feedback_profile": {
+            "type": "string"
+          },
+          "generation": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "generator": {
+            "$ref": "#/components/schemas/adaptive.Generator"
+          },
+          "observation_selection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/adaptive.ObservationSelection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "parent_attempt_id": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/adaptive.ArtifactDescriptor"
+          },
+          "strategy_provenance_ref": {
+            "type": "string"
+          },
+          "thread_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "api_version",
+          "campaign_id",
+          "thread_id",
+          "attempt_id",
+          "generation",
+          "attempt_index",
+          "payload",
+          "generator",
+          "feedback_profile",
+          "created_at"
+        ],
+        "type": "object",
+        "x-native-json-order": [
+          "observation_selection",
+          "api_version",
+          "campaign_id",
+          "thread_id",
+          "attempt_id",
+          "parent_attempt_id",
+          "generation",
+          "attempt_index",
+          "payload",
+          "generator",
+          "strategy_provenance_ref",
+          "feedback_profile",
+          "created_at",
+          "digest"
+        ],
+        "x-native-json-omitempty": [
+          "observation_selection",
+          "parent_attempt_id",
+          "strategy_provenance_ref",
+          "digest"
+        ]
+      },
+      "adaptive.CapabilityLimits": {
+        "additionalProperties": false,
+        "properties": {
+          "maximum_artifact_bytes": {
+            "type": "integer"
+          },
+          "maximum_artifacts": {
+            "type": "integer"
+          },
+          "maximum_attempts": {
+            "type": "integer"
+          },
+          "maximum_invocations": {
+            "type": "integer"
+          },
+          "maximum_snapshots": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "maximum_attempts",
+          "maximum_artifacts",
+          "maximum_artifact_bytes",
+          "maximum_invocations",
+          "maximum_snapshots"
+        ],
+        "type": "object"
+      },
+      "adaptive.CapabilityManifest": {
+        "additionalProperties": false,
+        "properties": {
+          "api_version": {
+            "type": "string",
+            "const": "interceptor.dev/capability-manifest/v1alpha3"
+          },
+          "application_digest": {
+            "type": "string"
+          },
+          "cross_vm_operations": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "delivery_schema_profile": {
+            "type": "string"
+          },
+          "digest": {
+            "type": "string"
+          },
+          "environment_digest": {
+            "type": "string"
+          },
+          "feedback": {
+            "$ref": "#/components/schemas/adaptive.FeedbackCapability"
+          },
+          "feedback_profiles": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "file_namespaces": {
+            "items": {
+              "$ref": "#/components/schemas/adaptive.FileNamespaceCapability"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "injection_profiles": {
+            "items": {
+              "$ref": "#/components/schemas/adaptive.InjectionProfile"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "injection_surfaces": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "interceptor_release": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "const": "CapabilityManifest"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/adaptive.CapabilityLimits"
+          },
+          "network": {
+            "$ref": "#/components/schemas/adaptive.NetworkCapability"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/adaptive.OperationCapability"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "oracle_types": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "services": {
+            "items": {
+              "$ref": "#/components/schemas/adaptive.ServiceCapability"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "snapshot_capable": {
+            "type": "boolean"
+          },
+          "target": {
+            "$ref": "#/components/schemas/adaptive.TargetCapability"
+          }
+        },
+        "required": [
+          "feedback",
+          "api_version",
+          "kind",
+          "interceptor_release",
+          "environment_digest",
+          "application_digest",
+          "target",
+          "feedback_profiles",
+          "operations",
+          "cross_vm_operations",
+          "injection_surfaces",
+          "injection_profiles",
+          "services",
+          "oracle_types",
+          "network",
+          "snapshot_capable",
+          "limits",
+          "digest"
+        ],
+        "type": "object",
+        "description": "Schema of the separate build-generated manifest returned by the API. Values and availability are environment-specific, not enumerated by this contract."
+      },
+      "adaptive.DNSCapability": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "maximum_queries": {
+            "type": "integer"
+          },
+          "record_types": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "unknown_policy": {
+            "type": "string"
+          },
+          "upstream_forwarding": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled",
+          "upstream_forwarding"
+        ],
+        "type": "object"
+      },
+      "adaptive.DatabaseTableCapability": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_create": {
+            "type": "boolean"
+          },
+          "fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "keys": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "max_records": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "keys",
+          "fields",
+          "allow_create"
+        ],
+        "type": "object"
+      },
+      "adaptive.ExecutionOwner": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_target_stop": {
+            "type": "boolean"
+          },
+          "bound_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "campaign_id": {
+            "type": "string"
+          },
+          "closed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "closure_reason": {
+            "type": "string"
+          },
+          "principal": {
+            "type": "string"
+          },
+          "run_revision": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "worker_instance_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "principal",
+          "campaign_id",
+          "worker_instance_id",
+          "run_revision",
+          "allow_target_stop",
+          "bound_at"
+        ],
+        "type": "object",
+        "x-native-json-order": [
+          "principal",
+          "campaign_id",
+          "worker_instance_id",
+          "run_revision",
+          "allow_target_stop",
+          "bound_at",
+          "closed_at",
+          "closure_reason"
+        ],
+        "x-native-json-omitempty": [
+          "closed_at",
+          "closure_reason"
+        ]
+      },
+      "adaptive.FeedbackCapability": {
+        "additionalProperties": false,
+        "properties": {
+          "kinds": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "maximum_chunk_bytes": {
+            "type": "integer"
+          },
+          "maximum_entries": {
+            "type": "integer"
+          },
+          "selection_modes": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "view_version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "view_version",
+          "selection_modes",
+          "kinds",
+          "maximum_chunk_bytes",
+          "maximum_entries"
+        ],
+        "type": "object"
+      },
+      "adaptive.FeedbackCategory": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "available",
+              "empty",
+              "withheld",
+              "not_requested",
+              "unavailable",
+              "partial"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "state"
+        ],
+        "type": "object"
+      },
+      "adaptive.FeedbackChunk": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "contentEncoding": "base64",
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Base64 bytes. For model_response injection_delivery entries the decoded JSON follows ModelResponseDeliveryFact."
+          },
+          "entry": {
+            "$ref": "#/components/schemas/adaptive.FeedbackEntry"
+          },
+          "eof": {
+            "type": "boolean"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "raw_length": {
+            "type": "integer"
+          },
+          "receipt_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_id",
+          "entry",
+          "offset",
+          "content",
+          "raw_length",
+          "eof"
+        ],
+        "type": "object"
+      },
+      "adaptive.FeedbackEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/adaptive.ArtifactDescriptor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "assurance": {
+            "type": "string"
+          },
+          "availability": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "original_size_bytes": {
+            "type": "integer"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "target_visible",
+              "harness_visible",
+              "operator_only",
+              "protected"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "visibility",
+          "source",
+          "assurance",
+          "availability",
+          "truncated",
+          "original_size_bytes"
+        ],
+        "type": "object"
+      },
+      "adaptive.FeedbackReadRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "entry_id": {
+            "type": "string"
+          },
+          "max_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 262144,
+            "description": "Existing feedback chunk transport bound."
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "receipt_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_id",
+          "entry_id",
+          "offset",
+          "max_bytes"
+        ],
+        "type": "object"
+      },
+      "adaptive.FileNamespaceCapability": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_create": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "max_file_bytes": {
+            "type": "integer"
+          },
+          "max_files": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "allow_create"
+        ],
+        "type": "object"
+      },
+      "adaptive.GatewayResponse": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/NativeSuccessResponse"
+          },
+          {
+            "$ref": "#/components/schemas/ErrorResponse"
+          },
+          {
+            "$ref": "#/components/schemas/InProgressResponse"
+          }
+        ],
+        "x-native-json-order": [
+          "status",
+          "body",
+          "session_revision"
+        ],
+        "x-native-json-omitempty": [
+          "body"
+        ]
+      },
+      "adaptive.Generator": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "release_digest": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object",
+        "x-native-json-order": [
+          "kind",
+          "release_digest"
+        ],
+        "x-native-json-omitempty": [
+          "release_digest"
+        ]
+      },
+      "adaptive.InjectionProfile": {
+        "additionalProperties": false,
+        "properties": {
+          "carriers": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "placements": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "selector_fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "surface": {
+            "type": "string"
+          },
+          "model_codecs": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "enum": [
+                "anthropic_messages",
+                "aws_bedrock_converse",
+                "google_generate_content",
+                "openai_chat_completions",
+                "openai_responses"
+              ]
+            }
+          },
+          "placement_root": {
+            "type": "string",
+            "description": "For model_response, response-body means the complete application-facing response JSON value."
+          }
+        },
+        "required": [
+          "surface",
+          "scopes",
+          "placements",
+          "selector_fields",
+          "carriers"
+        ],
+        "type": "object"
+      },
+      "adaptive.NetworkCapability": {
+        "additionalProperties": false,
+        "properties": {
+          "dns": {
+            "$ref": "#/components/schemas/adaptive.DNSCapability"
+          },
+          "http_frontdoor": {
+            "type": "boolean"
+          },
+          "https_frontdoor": {
+            "$ref": "#/components/schemas/adaptive.TLSCapability"
+          }
+        },
+        "required": [
+          "dns",
+          "http_frontdoor",
+          "https_frontdoor"
+        ],
+        "type": "object"
+      },
+      "adaptive.Observation": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "value": {
+            "description": "Application-defined JSON value; interpreted according to the selected delivery or observation kind."
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "target_visible",
+              "harness_visible",
+              "operator_only",
+              "protected"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "visibility"
+        ],
+        "type": "object"
+      },
+      "adaptive.ObservationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt_id": {
+            "type": "string"
+          },
+          "turn_id": {
+            "type": "string"
+          }
+        },
+        "type": "object",
+        "not": {
+          "required": [
+            "turn_id",
+            "receipt_id"
+          ],
+          "properties": {
+            "turn_id": {
+              "minLength": 1
+            },
+            "receipt_id": {
+              "minLength": 1
+            }
+          }
+        }
+      },
+      "adaptive.ObservationSelection": {
+        "additionalProperties": false,
+        "properties": {
+          "kinds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "target_output",
+                "operation_error",
+                "injection_delivery",
+                "oracle_outcome"
+              ]
+            },
+            "uniqueItems": true
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "all-permitted",
+              "selected"
+            ]
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "type": "object",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "selected"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "kinds"
+              ],
+              "properties": {
+                "kinds": {
+                  "minItems": 1
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "kinds": {
+                  "maxItems": 0
+                }
+              }
+            }
+          }
+        ],
+        "x-native-json-order": [
+          "mode",
+          "kinds"
+        ],
+        "x-native-json-omitempty": [
+          "kinds"
+        ]
+      },
+      "adaptive.ObservationView": {
+        "additionalProperties": false,
+        "properties": {
+          "api_version": {
+            "type": "string",
+            "const": "interceptor.dev/observation-view/v1alpha2"
+          },
+          "attempt_context_digest": {
+            "type": "string"
+          },
+          "attempt_id": {
+            "type": "string"
+          },
+          "campaign_id": {
+            "type": "string"
+          },
+          "captured_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "categories": {
+            "items": {
+              "$ref": "#/components/schemas/adaptive.FeedbackCategory"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "collection_state": {
+            "type": "string"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/adaptive.FeedbackEntry"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "feedback_profile": {
+            "type": "string"
+          },
+          "hash": {
+            "type": "string"
+          },
+          "observations": {
+            "items": {
+              "$ref": "#/components/schemas/adaptive.Observation"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "operation": {
+            "$ref": "#/components/schemas/adaptive.OperationView"
+          },
+          "receipt_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "session_revision": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "target_output": {
+            "$ref": "#/components/schemas/adaptive.TargetOutput"
+          },
+          "through_event_seq": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "turn_id": {
+            "type": "string"
+          },
+          "window_end": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "window_start": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "campaign_id",
+          "attempt_context_digest",
+          "captured_at",
+          "window_start",
+          "window_end",
+          "through_event_seq",
+          "collection_state",
+          "categories",
+          "entries",
+          "api_version",
+          "session_id",
+          "attempt_id",
+          "feedback_profile",
+          "operation",
+          "target_output",
+          "observations",
+          "session_revision"
+        ],
+        "type": "object"
+      },
+      "adaptive.OperationCapability": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/delivery.Contract"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "delivery_status": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "maximum_input_bytes": {
+            "type": "integer"
+          },
+          "method": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "adaptive.OperationRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "admitted_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "command_fingerprint": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request": {
+            "$ref": "#/components/schemas/adaptive.OperationRequest"
+          },
+          "response": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/adaptive.GatewayResponse"
+              },
+              {
+                "$ref": "#/components/schemas/PendingOperationResponse"
+              }
+            ]
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "request",
+          "fingerprint",
+          "state",
+          "response",
+          "admitted_at"
+        ],
+        "type": "object",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "running"
+                }
+              },
+              "required": [
+                "state"
+              ]
+            },
+            "else": {
+              "properties": {
+                "response": {
+                  "$ref": "#/components/schemas/adaptive.GatewayResponse"
+                }
+              }
+            }
+          }
+        ],
+        "description": "A successful operation.status lookup returns HTTP 200 even while the recorded operation is running. Only running records may contain the exact unassigned response {status: 0, session_revision: 0}; completed and unknown records require a normal recorded response. This does not make 0 an HTTP status.",
+        "x-native-json-order": [
+          "command_fingerprint",
+          "request",
+          "fingerprint",
+          "state",
+          "response",
+          "admitted_at",
+          "finished_at"
+        ],
+        "x-native-json-omitempty": [
+          "command_fingerprint",
+          "finished_at"
+        ]
+      },
+      "adaptive.OperationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "api_version": {
+            "type": "string",
+            "const": "interceptor.dev/operation-request/v1alpha2"
+          },
+          "attempt_context_digest": {
+            "type": "string"
+          },
+          "attempt_id": {
+            "type": "string"
+          },
+          "body_digest": {
+            "$ref": "#/components/schemas/Digest",
+            "description": "SHA-256 with sha256: prefix over the exact serialized body JSON bytes; reserialization can change identity."
+          },
+          "campaign_id": {
+            "type": "string"
+          },
+          "deadline": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "expected_session_revision": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "session.owner",
+              "session.status",
+              "operation.status",
+              "capabilities.read",
+              "artifact.register",
+              "artifact.read",
+              "attempt.register",
+              "injection.arm",
+              "injection.delete",
+              "application.invoke",
+              "observation.read",
+              "observation.content.read",
+              "snapshot.create"
+            ]
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "run_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "worker_instance_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "api_version",
+          "request_id",
+          "operation_id",
+          "operation",
+          "session_id",
+          "campaign_id",
+          "worker_instance_id",
+          "run_revision",
+          "body_digest",
+          "deadline"
+        ],
+        "type": "object",
+        "x-native-json-order": [
+          "api_version",
+          "request_id",
+          "operation_id",
+          "operation",
+          "session_id",
+          "campaign_id",
+          "worker_instance_id",
+          "run_revision",
+          "expected_session_revision",
+          "attempt_id",
+          "attempt_context_digest",
+          "body_digest",
+          "deadline"
+        ],
+        "x-native-json-omitempty": [
+          "expected_session_revision",
+          "attempt_id",
+          "attempt_context_digest"
+        ]
+      },
+      "adaptive.OperationView": {
+        "additionalProperties": false,
+        "properties": {
+          "error_code": {
+            "type": "string"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "receipt_id": {
+            "type": "string"
+          },
+          "response_code": {
+            "type": "integer"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object"
+      },
+      "adaptive.OwnerRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "const": "close_execution"
+          },
+          "allow_target_stop": {
+            "type": "boolean"
+          },
+          "campaign_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "worker_instance_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "session_id",
+          "campaign_id"
+        ],
+        "type": "object"
+      },
+      "adaptive.ResourceCreationCapability": {
+        "additionalProperties": false,
+        "properties": {
+          "collection": {
+            "type": "string"
+          },
+          "max_resources": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "collection",
+          "max_resources"
+        ],
+        "type": "object"
+      },
+      "adaptive.ServiceCapability": {
+        "additionalProperties": false,
+        "properties": {
+          "creatable_collections": {
+            "items": {
+              "$ref": "#/components/schemas/adaptive.ResourceCreationCapability"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "database_tables": {
+            "items": {
+              "$ref": "#/components/schemas/adaptive.DatabaseTableCapability"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "endpoints": {
+            "items": {
+              "$ref": "#/components/schemas/delivery.Endpoint"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "implementation": {
+            "type": "string"
+          },
+          "injection_surfaces": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": "string"
+          },
+          "mcp": {
+            "type": "boolean"
+          },
+          "response_mode": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "transports": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "role",
+          "transports"
+        ],
+        "type": "object"
+      },
+      "adaptive.TLSCapability": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "minimum_version": {
+            "type": "string"
+          },
+          "trust_mode": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "adaptive.TargetCapability": {
+        "additionalProperties": false,
+        "properties": {
+          "interface": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version",
+          "interface"
+        ],
+        "type": "object"
+      },
+      "adaptive.TargetOutput": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_digest": {
+            "type": "string"
+          },
+          "inline": {
+            "type": "string"
+          },
+          "media_type": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "delivery.Body": {
+        "additionalProperties": false,
+        "properties": {
+          "basis": {
+            "type": "string"
+          },
+          "encoding": {
+            "type": "string"
+          },
+          "max_bytes": {
+            "type": "integer"
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "schema": {
+            "additionalProperties": {
+              "description": "Application-defined JSON value; interpreted according to the selected delivery or observation kind."
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "media_type",
+          "encoding",
+          "max_bytes",
+          "basis"
+        ],
+        "type": "object"
+      },
+      "delivery.Contract": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "examples": {
+            "items": {
+              "$ref": "#/components/schemas/delivery.Example"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "input": {
+            "$ref": "#/components/schemas/delivery.Body"
+          },
+          "output": {
+            "$ref": "#/components/schemas/delivery.Body"
+          }
+        },
+        "required": [
+          "description",
+          "input",
+          "output"
+        ],
+        "type": "object"
+      },
+      "delivery.Endpoint": {
+        "additionalProperties": false,
+        "properties": {
+          "collection": {
+            "type": "string"
+          },
+          "delivery": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/delivery.Contract"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "injection_root": {
+            "type": "string",
+            "description": "response-body for HTTP responses; mcp-tool-result for MCP results; service-record for existing identity state. Discovery does not grant creation or bypass runtime authorization."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "http-route",
+              "mcp-tool",
+              "http-route-set",
+              "state-collection"
+            ]
+          },
+          "maximum_request_bytes": {
+            "type": "integer"
+          },
+          "method": {
+            "type": "string"
+          },
+          "output_pointer": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "methods": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "For http-route-set only: exact normalized HTTP method allowlist. Omitted/empty means unrestricted. No wildcard token; consumers choose a concrete method. HEAD is never injectable and is excluded from nonempty exported lists."
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "For http-route-set only: exact URL path allowlist, not templates. Omitted/empty means unrestricted. No wildcard token; consumers choose a concrete absolute path without query."
+          },
+          "keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "For state-collection only: sorted existing record keys scoped to this issuer. An empty or missing list never authorizes arbitrary keys or creation."
+          },
+          "mutable_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "For state-collection only: top-level record fields that may be changed using existing environment_state placement/JSON Pointer rules. Other fields are immutable. Delivery input/output describe the whole record, not an injection request."
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "injection_root",
+          "maximum_request_bytes"
+        ],
+        "type": "object",
+        "description": "Selectable interactions. http-route and mcp-tool retain existing semantics. http-route-set represents a dynamic attacker response using independent method/path allowlists; selectors still use concrete exact values. state-collection represents existing managed identity records, not an HTTP route. Only its advertised keys and mutable fields are selectable. No credential, record value or sink response value is disclosed. Static sinks have no injectable endpoints. Unrestricted method sets exclude HEAD; HEAD-only sinks expose no response-injection endpoint.",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "http-route-set"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "delivery"
+              ],
+              "properties": {
+                "injection_root": {
+                  "const": "response-body"
+                }
+              },
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "method"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "path"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "keys"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "mutable_fields"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "collection"
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "state-collection"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "collection",
+                "keys",
+                "mutable_fields",
+                "delivery"
+              ],
+              "properties": {
+                "keys": {
+                  "minItems": 1
+                },
+                "mutable_fields": {
+                  "minItems": 1
+                },
+                "injection_root": {
+                  "const": "service-record"
+                }
+              },
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "method"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "path"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "methods"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "paths"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "delivery.Example": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "input": {
+            "description": "Application-defined JSON value; interpreted according to the selected delivery or observation kind."
+          },
+          "output": {
+            "description": "Application-defined JSON value; interpreted according to the selected delivery or observation kind."
+          }
+        },
+        "required": [
+          "id",
+          "input",
+          "output"
+        ],
+        "type": "object"
+      },
+      "injection.Definition": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "simulation",
+              "fidelity"
+            ]
+          },
+          "payload": {
+            "description": "Application-defined JSON value; interpreted according to the selected delivery or observation kind."
+          },
+          "payload_digest": {
+            "type": "string"
+          },
+          "placement": {
+            "$ref": "#/components/schemas/injection.Placement"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "once",
+              "next_turn",
+              "standing"
+            ]
+          },
+          "selector": {
+            "$ref": "#/components/schemas/injection.Selector"
+          },
+          "surface": {
+            "type": "string",
+            "enum": [
+              "model_tool_result",
+              "environment_state",
+              "service_response",
+              "mcp_tool_result",
+              "database_response",
+              "model_response"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "surface",
+          "mode",
+          "scope",
+          "enabled",
+          "selector",
+          "placement",
+          "payload"
+        ],
+        "type": "object",
+        "x-native-json-order": [
+          "id",
+          "surface",
+          "mode",
+          "scope",
+          "enabled",
+          "selector",
+          "placement",
+          "payload",
+          "attempt_id",
+          "payload_digest"
+        ],
+        "x-native-json-omitempty": [
+          "attempt_id",
+          "payload_digest"
+        ],
+        "description": "model_response mutates successful non-streaming application-facing generation JSON after provider translation. It requires simulation mode, once or standing scope, model_codec and call_ordinal. Optional observed turn and request-body predicates inspect the original application request. Other surface selectors are rejected with invalid_injection. Placements operate on the complete native response, deliberately permitting schema-invalid but valid JSON, including malformed tool calls. Missing/type-incompatible placements are recorded unapplied and consume once; bounds or required storage failures fail closed. Eligible definitions freeze at request admission; deletion remains effective. Ordinals count matching successful JSON responses in serialized processing order, and survive snapshot/replay.",
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "surface": {
+                  "const": "model_response"
+                }
+              },
+              "required": [
+                "surface"
+              ]
+            },
+            "then": {
+              "properties": {
+                "mode": {
+                  "const": "simulation"
+                },
+                "scope": {
+                  "enum": [
+                    "once",
+                    "standing"
+                  ]
+                },
+                "selector": {
+                  "required": [
+                    "model_codec",
+                    "call_ordinal"
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      },
+      "injection.Placement": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "index": {
+            "type": "integer"
+          },
+          "operation": {
+            "type": "string"
+          },
+          "pointer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "pointer"
+        ],
+        "type": "object",
+        "x-native-json-order": [
+          "operation",
+          "pointer",
+          "index",
+          "allowed_fields"
+        ],
+        "x-native-json-omitempty": [
+          "index",
+          "allowed_fields"
+        ]
+      },
+      "injection.PublicState": {
+        "additionalProperties": false,
+        "properties": {
+          "definition": {
+            "$ref": "#/components/schemas/injection.Definition"
+          }
+        },
+        "required": [
+          "definition"
+        ],
+        "type": "object"
+      },
+      "injection.Selector": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments_contain": {
+            "type": "string"
+          },
+          "arguments_equal": {
+            "description": "Application-defined JSON value; interpreted according to the selected delivery or observation kind."
+          },
+          "arguments_pointer": {
+            "type": "string"
+          },
+          "call_ordinal": {
+            "type": "string"
+          },
+          "collection": {
+            "type": "string"
+          },
+          "file_namespace": {
+            "type": "string"
+          },
+          "headers_equal": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "key": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "query_equal": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "relative_path": {
+            "type": "string"
+          },
+          "request_body_contain": {
+            "type": "string"
+          },
+          "request_body_equal": {
+            "description": "Application-defined JSON value; interpreted according to the selected delivery or observation kind."
+          },
+          "request_body_pointer": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "tool_name": {
+            "type": "string"
+          },
+          "turn_id": {
+            "type": "string"
+          },
+          "model_codec": {
+            "type": "string",
+            "enum": [
+              "anthropic_messages",
+              "aws_bedrock_converse",
+              "google_generate_content",
+              "openai_chat_completions",
+              "openai_responses"
+            ],
+            "description": "Required only for model_response; application-facing generation codec, independent of upstream provider."
+          }
+        },
+        "required": [
+          "call_ordinal"
+        ],
+        "type": "object",
+        "x-native-json-order": [
+          "model_codec",
+          "tool_name",
+          "call_ordinal",
+          "arguments_pointer",
+          "arguments_equal",
+          "arguments_contain",
+          "turn_id",
+          "service",
+          "collection",
+          "key",
+          "path",
+          "method",
+          "query_equal",
+          "headers_equal",
+          "request_body_pointer",
+          "request_body_equal",
+          "request_body_contain",
+          "file_namespace",
+          "relative_path"
+        ],
+        "x-native-json-omitempty": [
+          "model_codec",
+          "arguments_pointer",
+          "arguments_equal",
+          "arguments_contain",
+          "turn_id",
+          "service",
+          "collection",
+          "key",
+          "path",
+          "method",
+          "query_equal",
+          "headers_equal",
+          "request_body_pointer",
+          "request_body_equal",
+          "request_body_contain",
+          "file_namespace",
+          "relative_path"
+        ],
+        "description": "tool_name may be omitted at request admission for surfaces that do not select tools, including model_response. Serialized native state emits the empty field in the declared hash order."
+      },
+      "localapi.AttachRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_target_stop": {
+            "type": "boolean"
+          },
+          "api_version": {
+            "type": "string",
+            "const": "interceptor.dev/local-lifecycle/v1alpha1"
+          },
+          "campaign_id": {
+            "$ref": "#/components/schemas/Identifier"
+          },
+          "worker_instance_id": {
+            "$ref": "#/components/schemas/Identifier"
+          }
+        },
+        "required": [
+          "worker_instance_id",
+          "api_version",
+          "campaign_id"
+        ],
+        "type": "object"
+      },
+      "localapi.Binding": {
+        "additionalProperties": false,
+        "properties": {
+          "run_revision": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "worker_instance_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "worker_instance_id",
+          "run_revision"
+        ],
+        "type": "object"
+      },
+      "localapi.ExecutionFailure": {
+        "additionalProperties": false,
+        "properties": {
+          "observed_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "reason",
+          "observed_at"
+        ],
+        "type": "object"
+      },
+      "localapi.LifecycleRequest": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/LifecycleStopRequest"
+          },
+          {
+            "$ref": "#/components/schemas/LifecycleRestoreRequest"
+          }
+        ]
+      },
+      "localapi.Record": {
+        "additionalProperties": false,
+        "properties": {
+          "fingerprint": {
+            "type": "string"
+          },
+          "request": {
+            "$ref": "#/components/schemas/localapi.LifecycleRequest"
+          },
+          "response": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LifecycleResponse"
+              },
+              {
+                "$ref": "#/components/schemas/ErrorResponse"
+              },
+              {
+                "$ref": "#/components/schemas/InProgressResponse"
+              }
+            ]
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "request",
+          "fingerprint",
+          "state",
+          "response"
+        ],
+        "type": "object"
+      },
+      "localapi.SnapshotInspectRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "api_version": {
+            "type": "string",
+            "const": "interceptor.dev/local-lifecycle/v1alpha1"
+          },
+          "campaign_id": {
+            "$ref": "#/components/schemas/Identifier"
+          },
+          "checkpoint_id": {
+            "type": "string"
+          },
+          "source_session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "api_version",
+          "campaign_id",
+          "source_session_id",
+          "checkpoint_id"
+        ],
+        "type": "object"
+      },
+      "localapi.SnapshotListRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "api_version": {
+            "type": "string",
+            "const": "interceptor.dev/local-lifecycle/v1alpha1"
+          },
+          "campaign_id": {
+            "$ref": "#/components/schemas/Identifier"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "source_session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "api_version",
+          "campaign_id"
+        ],
+        "type": "object"
+      },
+      "localapi.SnapshotListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "campaign_id": {
+            "type": "string"
+          },
+          "checkpoints": {
+            "items": {
+              "$ref": "#/components/schemas/snapshot.Checkpoint"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "next_offset": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "campaign_id",
+          "checkpoints",
+          "total"
+        ],
+        "type": "object"
+      },
+      "sandboxd.Turn": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "body": {
+            "contentEncoding": "base64",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "code": {
+            "type": "integer"
+          },
+          "error": {
+            "type": "string"
+          },
+          "evidence_partial": {
+            "type": "boolean"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "finished_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "operation": {
+            "type": "string"
+          },
+          "output_contract_status": {
+            "type": "string"
+          },
+          "output_digest": {
+            "type": "string"
+          },
+          "payload_digest": {
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "started_at"
+        ],
+        "type": "object"
+      },
+      "sandboxd.TurnRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_digest": {
+            "type": "string"
+          },
+          "attempt_id": {
+            "type": "string"
+          },
+          "body": {
+            "contentEncoding": "base64",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "caller_principal": {
+            "type": "string"
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "input": {
+            "contentEncoding": "base64",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "operation": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "payload_digest": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "session.Consumed": {
+        "additionalProperties": false,
+        "properties": {
+          "snapshot_attempts": {
+            "type": "integer"
+          },
+          "snapshot_bytes": {
+            "type": "integer"
+          },
+          "tokens": {
+            "type": "integer"
+          },
+          "turns": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "turns",
+          "tokens",
+          "snapshot_attempts",
+          "snapshot_bytes"
+        ],
+        "type": "object",
+        "x-native-json-order": [
+          "turns",
+          "tokens",
+          "snapshot_attempts",
+          "snapshot_bytes"
+        ],
+        "x-native-json-omitempty": []
+      },
+      "session.Limits": {
+        "additionalProperties": false,
+        "properties": {
+          "cpus": {
+            "type": "string"
+          },
+          "max_blob_bytes": {
+            "type": "integer"
+          },
+          "max_pids": {
+            "type": "integer"
+          },
+          "max_snapshots": {
+            "type": "integer"
+          },
+          "max_tokens": {
+            "type": "integer"
+          },
+          "max_turns": {
+            "type": "integer"
+          },
+          "max_wall_seconds": {
+            "type": "integer"
+          },
+          "memory_bytes": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_turns",
+          "max_tokens",
+          "max_wall_seconds",
+          "max_snapshots",
+          "max_blob_bytes",
+          "max_pids",
+          "memory_bytes",
+          "cpus"
+        ],
+        "type": "object",
+        "x-native-json-order": [
+          "max_turns",
+          "max_tokens",
+          "max_wall_seconds",
+          "max_snapshots",
+          "max_blob_bytes",
+          "max_pids",
+          "memory_bytes",
+          "cpus"
+        ],
+        "x-native-json-omitempty": []
+      },
+      "session.Metadata": {
+        "additionalProperties": false,
+        "properties": {
+          "app_digest": {
+            "type": "string"
+          },
+          "app_image": {
+            "type": "string"
+          },
+          "application_url": {
+            "type": "string"
+          },
+          "bridge_transport": {
+            "type": "string"
+          },
+          "campaign_id": {
+            "type": "string"
+          },
+          "capability_manifest_digest": {
+            "type": "string"
+          },
+          "consumed": {
+            "$ref": "#/components/schemas/session.Consumed"
+          },
+          "container_id": {
+            "type": "string"
+          },
+          "control_url": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "environment_digest": {
+            "type": "string"
+          },
+          "environment_path": {
+            "type": "string"
+          },
+          "feedback_profile": {
+            "type": "string"
+          },
+          "generation": {
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/session.Limits"
+          },
+          "operation_api_version": {
+            "type": "string"
+          },
+          "parent_checkpoint": {
+            "type": "string"
+          },
+          "parent_session_id": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "creating",
+              "starting",
+              "running",
+              "quiescing",
+              "stopping",
+              "stopped",
+              "error"
+            ]
+          },
+          "revision": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "schema_version": {
+            "type": "integer"
+          },
+          "spool_max_bytes": {
+            "type": "integer"
+          },
+          "taints": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "termination_reason": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "id",
+          "environment_path",
+          "environment_digest",
+          "app_image",
+          "app_digest",
+          "revision",
+          "phase",
+          "generation",
+          "created_at",
+          "updated_at",
+          "limits",
+          "consumed",
+          "bridge_transport",
+          "taints"
+        ],
+        "type": "object",
+        "x-native-json-order": [
+          "campaign_id",
+          "spool_max_bytes",
+          "operation_api_version",
+          "schema_version",
+          "id",
+          "parent_session_id",
+          "parent_checkpoint",
+          "environment_path",
+          "environment_digest",
+          "app_image",
+          "app_digest",
+          "capability_manifest_digest",
+          "feedback_profile",
+          "revision",
+          "phase",
+          "generation",
+          "created_at",
+          "updated_at",
+          "limits",
+          "consumed",
+          "bridge_transport",
+          "container_id",
+          "application_url",
+          "control_url",
+          "termination_reason",
+          "taints"
+        ],
+        "x-native-json-omitempty": [
+          "campaign_id",
+          "spool_max_bytes",
+          "operation_api_version",
+          "parent_session_id",
+          "parent_checkpoint",
+          "capability_manifest_digest",
+          "feedback_profile",
+          "container_id",
+          "application_url",
+          "control_url",
+          "termination_reason"
+        ]
+      },
+      "snapshot.Checkpoint": {
+        "additionalProperties": false,
+        "properties": {
+          "app_digest": {
+            "type": "string"
+          },
+          "campaign_id": {
+            "type": "string"
+          },
+          "canonical_size_bytes": {
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "environment_digest": {
+            "type": "string"
+          },
+          "event_seq": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "file_manifest_digest": {
+            "type": "string"
+          },
+          "hash": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "interceptor_version": {
+            "type": "string"
+          },
+          "journal_hash": {
+            "type": "string"
+          },
+          "journal_schema_version": {
+            "type": "integer"
+          },
+          "journal_seq": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "label": {
+            "type": "string"
+          },
+          "parent_checkpoint": {
+            "type": "string"
+          },
+          "schema_version": {
+            "type": "integer"
+          },
+          "source_session_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "id",
+          "source_session_id",
+          "environment_digest",
+          "app_digest",
+          "journal_seq",
+          "journal_hash",
+          "file_manifest_digest",
+          "canonical_size_bytes",
+          "event_seq",
+          "created_at",
+          "interceptor_version",
+          "journal_schema_version",
+          "status",
+          "hash"
+        ],
+        "type": "object",
+        "x-native-json-order": [
+          "campaign_id",
+          "description",
+          "schema_version",
+          "id",
+          "label",
+          "source_session_id",
+          "parent_checkpoint",
+          "environment_digest",
+          "app_digest",
+          "journal_seq",
+          "journal_hash",
+          "file_manifest_digest",
+          "canonical_size_bytes",
+          "event_seq",
+          "created_at",
+          "interceptor_version",
+          "journal_schema_version",
+          "status",
+          "hash"
+        ],
+        "x-native-json-omitempty": [
+          "campaign_id",
+          "description",
+          "label",
+          "parent_checkpoint"
+        ],
+        "x-native-hash": {
+          "algorithm": "sha256",
+          "prefix": "sha256:",
+          "empty_field": "hash",
+          "encoding": "go-json-marshal"
+        }
+      },
+      "Empty": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "ContractVersion": {
+        "type": "string",
+        "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+        "maxLength": 128
+      },
+      "ContractSHA256": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$",
+        "description": "SHA-256 of every UTF-8 byte of this complete document, including formatting and final newline. Not canonicalized JSON or an artifact checksum. The actual digest is not embedded here."
+      },
+      "Identifier": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+      },
+      "Digest": {
+        "type": "string",
+        "pattern": "^sha256:[0-9a-f]{64}$"
+      },
+      "ContractIdentity": {
+        "type": "object",
+        "properties": {
+          "interceptor_contract_version": {
+            "$ref": "#/components/schemas/ContractVersion"
+          },
+          "interceptor_contract_sha256": {
+            "$ref": "#/components/schemas/ContractSHA256"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "interceptor_contract_version",
+          "interceptor_contract_sha256"
+        ]
+      },
+      "ContractIdentityResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer",
+            "const": 200
+          },
+          "body": {
+            "$ref": "#/components/schemas/ContractIdentity"
+          },
+          "session_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "body",
+          "session_revision"
+        ]
+      },
+      "ErrorBody": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "minLength": 1
+              },
+              "maximum_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "evidence_retained": {
+                "type": "boolean"
+              },
+              "native_response": {
+                "description": "Original JSON result retained when a deadline leaves the operation outcome uncertain."
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "code"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "request_id": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "code",
+                  "message",
+                  "request_id"
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "error"
+            ]
+          }
+        ],
+        "description": "Errors may be direct body.code or a forwarded body.error object. Unknown codes are failures, never success. Outcome-unknown errors require operation.status reconciliation before retrying. Evidence-storage failures invalidate evidence-dependent outcomes."
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer",
+            "minimum": 400,
+            "maximum": 599
+          },
+          "body": {
+            "$ref": "#/components/schemas/ErrorBody"
+          },
+          "session_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "body",
+          "session_revision"
+        ]
+      },
+      "InProgressResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer",
+            "const": 202
+          },
+          "body": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "const": "operation_in_progress"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "code"
+            ]
+          },
+          "session_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "body",
+          "session_revision"
+        ]
+      },
+      "ArtifactRegister": {
+        "type": "object",
+        "properties": {
+          "descriptor": {
+            "$ref": "#/components/schemas/adaptive.ArtifactDescriptor"
+          },
+          "content": {
+            "type": "string",
+            "contentEncoding": "base64"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "descriptor",
+          "content"
+        ]
+      },
+      "ArtifactRead": {
+        "type": "object",
+        "properties": {
+          "digest": {
+            "$ref": "#/components/schemas/Digest"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "digest"
+        ]
+      },
+      "ArtifactContent": {
+        "type": "object",
+        "properties": {
+          "digest": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "content": {
+            "type": "string",
+            "contentEncoding": "base64"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "digest",
+          "content"
+        ]
+      },
+      "InjectionArm": {
+        "type": "object",
+        "properties": {
+          "definition": {
+            "$ref": "#/components/schemas/injection.Definition"
+          },
+          "eligible_turn": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "definition"
+        ]
+      },
+      "InjectionDelete": {
+        "type": "object",
+        "properties": {
+          "injection_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "injection_id"
+        ]
+      },
+      "SnapshotCreate": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "maximum_committed_bytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "description": "Omitted allowance uses native remaining capacity; zero means no allowance. Runtime budgets remain Interceptor-owned."
+      },
+      "OperationLookup": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "operation_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "receipt_id": {
+                "type": "string",
+                "const": ""
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "operation_id"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "receipt_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "operation_id": {
+                "type": "string",
+                "const": ""
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "receipt_id"
+            ]
+          }
+        ]
+      },
+      "SessionStatus": {
+        "type": "object",
+        "properties": {
+          "session": {
+            "$ref": "#/components/schemas/session.Metadata"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/adaptive.ExecutionOwner"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "execution_available": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "session",
+          "owner",
+          "execution_available"
+        ]
+      },
+      "AttachBody": {
+        "type": "object",
+        "properties": {
+          "api_version": {
+            "type": "string",
+            "const": "interceptor.dev/local-lifecycle/v1alpha1"
+          },
+          "campaign_id": {
+            "$ref": "#/components/schemas/Identifier"
+          },
+          "binding": {
+            "$ref": "#/components/schemas/localapi.Binding"
+          },
+          "session": {
+            "$ref": "#/components/schemas/session.Metadata"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/adaptive.CapabilityManifest"
+          },
+          "evidence_max_bytes": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "api_version",
+          "campaign_id",
+          "binding",
+          "session",
+          "capabilities",
+          "evidence_max_bytes"
+        ]
+      },
+      "AttachResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer",
+            "const": 200
+          },
+          "body": {
+            "$ref": "#/components/schemas/AttachBody"
+          },
+          "session_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "body",
+          "session_revision"
+        ]
+      },
+      "StopBody": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string",
+            "const": "stopped"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "session_id",
+          "phase"
+        ]
+      },
+      "RestoreBody": {
+        "type": "object",
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/localapi.Binding"
+          },
+          "session": {
+            "$ref": "#/components/schemas/session.Metadata"
+          },
+          "source_session_id": {
+            "type": "string"
+          },
+          "checkpoint_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "binding",
+          "session",
+          "source_session_id",
+          "checkpoint_id"
+        ]
+      },
+      "LifecycleResponse": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "integer",
+                "const": 200
+              },
+              "body": {
+                "$ref": "#/components/schemas/StopBody"
+              },
+              "session_revision": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "body",
+              "session_revision"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "integer",
+                "const": 200
+              },
+              "body": {
+                "$ref": "#/components/schemas/RestoreBody"
+              },
+              "session_revision": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "body",
+              "session_revision"
+            ]
+          }
+        ]
+      },
+      "LifecycleStopRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "api_version": {
+            "type": "string",
+            "const": "interceptor.dev/local-lifecycle/v1alpha1"
+          },
+          "campaign_id": {
+            "$ref": "#/components/schemas/Identifier"
+          },
+          "checkpoint_id": {
+            "type": "string",
+            "const": ""
+          },
+          "operation": {
+            "type": "string",
+            "const": "session.stop"
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "run_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "source_session_id": {
+            "type": "string",
+            "const": ""
+          },
+          "worker_instance_id": {
+            "$ref": "#/components/schemas/Identifier"
+          }
+        },
+        "required": [
+          "worker_instance_id",
+          "run_revision",
+          "api_version",
+          "campaign_id",
+          "session_id",
+          "operation_id",
+          "operation"
+        ],
+        "type": "object"
+      },
+      "LifecycleRestoreRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "api_version": {
+            "type": "string",
+            "const": "interceptor.dev/local-lifecycle/v1alpha1"
+          },
+          "campaign_id": {
+            "$ref": "#/components/schemas/Identifier"
+          },
+          "checkpoint_id": {
+            "$ref": "#/components/schemas/Identifier"
+          },
+          "operation": {
+            "type": "string",
+            "const": "snapshot.restore"
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "run_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "source_session_id": {
+            "type": "string"
+          },
+          "worker_instance_id": {
+            "$ref": "#/components/schemas/Identifier"
+          }
+        },
+        "required": [
+          "worker_instance_id",
+          "run_revision",
+          "api_version",
+          "campaign_id",
+          "session_id",
+          "operation_id",
+          "operation",
+          "checkpoint_id"
+        ],
+        "type": "object"
+      },
+      "StatusRequest": {
+        "type": "object",
+        "properties": {
+          "api_version": {
+            "type": "string",
+            "const": "interceptor.dev/local-lifecycle/v1alpha1"
+          },
+          "campaign_id": {
+            "$ref": "#/components/schemas/Identifier"
+          },
+          "operation_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "api_version",
+          "campaign_id"
+        ]
+      },
+      "StatusBody": {
+        "type": "object",
+        "properties": {
+          "instance_id": {
+            "type": "string"
+          },
+          "campaign_id": {
+            "type": "string"
+          },
+          "active": {
+            "$ref": "#/components/schemas/localapi.Binding"
+          },
+          "sessions": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/localapi.Binding"
+            }
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "transitioning",
+              "stopped",
+              "error"
+            ]
+          },
+          "closed": {
+            "type": "boolean"
+          },
+          "store_available": {
+            "type": "boolean"
+          },
+          "evidence_max_bytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/localapi.ExecutionFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "instance_id",
+          "campaign_id",
+          "active",
+          "sessions",
+          "phase",
+          "closed",
+          "store_available",
+          "evidence_max_bytes",
+          "failure"
+        ]
+      },
+      "StatusResponse": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "integer",
+                "const": 200
+              },
+              "body": {
+                "$ref": "#/components/schemas/StatusBody"
+              },
+              "session_revision": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "body",
+              "session_revision"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "integer",
+                "const": 200
+              },
+              "body": {
+                "$ref": "#/components/schemas/localapi.Record"
+              },
+              "session_revision": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "body",
+              "session_revision"
+            ]
+          }
+        ]
+      },
+      "EvidenceRequest": {
+        "type": "object",
+        "properties": {
+          "api_version": {
+            "type": "string",
+            "const": "interceptor.dev/local-lifecycle/v1alpha1"
+          },
+          "campaign_id": {
+            "$ref": "#/components/schemas/Identifier"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "api_version",
+          "campaign_id",
+          "session_id"
+        ]
+      },
+      "SnapshotListResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer",
+            "const": 200
+          },
+          "body": {
+            "$ref": "#/components/schemas/localapi.SnapshotListResponse"
+          },
+          "session_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "body",
+          "session_revision"
+        ]
+      },
+      "SnapshotInspectResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer",
+            "const": 200
+          },
+          "body": {
+            "$ref": "#/components/schemas/snapshot.Checkpoint"
+          },
+          "session_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "body",
+          "session_revision"
+        ]
+      },
+      "SessionOwnerRequest": {
+        "type": "object",
+        "properties": {
+          "request": {
+            "$ref": "#/components/schemas/adaptive.OperationRequest",
+            "properties": {
+              "operation": {
+                "type": "string",
+                "const": "session.owner"
+              }
+            }
+          },
+          "body": {
+            "$ref": "#/components/schemas/adaptive.OwnerRequest"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "request",
+          "body"
+        ],
+        "description": "Terminal campaign closure bypasses the mutation queue and revision race; already-dispatched work can finish and remains reportable No implicit target-stop permission, ownership transfer or reopening; healthy planned restore uses lifecycle instead of prior terminal closure",
+        "x-response-schema": {
+          "$ref": "#/components/schemas/SessionOwnerResponse"
+        }
+      },
+      "SessionOwnerResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer",
+            "const": 200
+          },
+          "body": {
+            "$ref": "#/components/schemas/adaptive.ExecutionOwner"
+          },
+          "session_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "body",
+          "session_revision"
+        ]
+      },
+      "SessionStatusRequest": {
+        "type": "object",
+        "properties": {
+          "request": {
+            "$ref": "#/components/schemas/adaptive.OperationRequest",
+            "properties": {
+              "operation": {
+                "type": "string",
+                "const": "session.status"
+              }
+            }
+          },
+          "body": {
+            "$ref": "#/components/schemas/Empty"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "request",
+          "body"
+        ],
+        "description": "A missing record or failed lookup never establishes non-execution; running includes queued work Retained reporting uses preserved campaign association without restarting the target",
+        "x-response-schema": {
+          "$ref": "#/components/schemas/SessionStatusResponse"
+        }
+      },
+      "SessionStatusResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer",
+            "const": 200
+          },
+          "body": {
+            "$ref": "#/components/schemas/SessionStatus"
+          },
+          "session_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "body",
+          "session_revision"
+        ]
+      },
+      "OperationStatusRequest": {
+        "type": "object",
+        "properties": {
+          "request": {
+            "$ref": "#/components/schemas/adaptive.OperationRequest",
+            "properties": {
+              "operation": {
+                "type": "string",
+                "const": "operation.status"
+              }
+            }
+          },
+          "body": {
+            "$ref": "#/components/schemas/OperationLookup"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "request",
+          "body"
+        ],
+        "description": "A missing record or failed lookup never establishes non-execution; running includes queued work Retained reporting uses preserved campaign association without restarting the target",
+        "x-response-schema": {
+          "$ref": "#/components/schemas/OperationStatusResponse"
+        }
+      },
+      "OperationStatusResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer",
+            "const": 200
+          },
+          "body": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/adaptive.OperationRecord"
+              },
+              {
+                "$ref": "#/components/schemas/sandboxd.Turn"
+              }
+            ]
+          },
+          "session_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "body",
+          "session_revision"
+        ]
+      },
+      "CapabilitiesReadRequest": {
+        "type": "object",
+        "properties": {
+          "request": {
+            "$ref": "#/components/schemas/adaptive.OperationRequest",
+            "properties": {
+              "operation": {
+                "type": "string",
+                "const": "capabilities.read"
+              }
+            }
+          },
+          "body": {
+            "$ref": "#/components/schemas/Empty"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "request",
+          "body"
+        ],
+        "description": "Operator reads this manifest before selecting campaign actions; matching contract versions does not imply every target supports every action The manifest is a separate build-derived resource; target configuration and available values are not enumerated in this contract; runtime policy still governs admission",
+        "x-response-schema": {
+          "$ref": "#/components/schemas/CapabilitiesReadResponse"
+        }
+      },
+      "CapabilitiesReadResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer",
+            "const": 200
+          },
+          "body": {
+            "$ref": "#/components/schemas/adaptive.CapabilityManifest"
+          },
+          "session_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "body",
+          "session_revision"
+        ]
+      },
+      "ArtifactRegisterRequest": {
+        "type": "object",
+        "properties": {
+          "request": {
+            "$ref": "#/components/schemas/adaptive.OperationRequest",
+            "properties": {
+              "operation": {
+                "type": "string",
+                "const": "artifact.register"
+              }
+            }
+          },
+          "body": {
+            "$ref": "#/components/schemas/ArtifactRegister"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "request",
+          "body"
+        ],
+        "description": "Artifacts and attempts are scoped to the campaign and integrity-checked before dependent actions; registration does not authorize arbitrary target operations",
+        "x-response-schema": {
+          "$ref": "#/components/schemas/ArtifactRegisterResponse"
+        }
+      },
+      "ArtifactRegisterResponse": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "integer",
+                "const": 200
+              },
+              "body": {
+                "$ref": "#/components/schemas/adaptive.ArtifactDescriptor"
+              },
+              "session_revision": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "body",
+              "session_revision"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "integer",
+                "const": 201
+              },
+              "body": {
+                "$ref": "#/components/schemas/adaptive.ArtifactDescriptor"
+              },
+              "session_revision": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "body",
+              "session_revision"
+            ]
+          }
+        ]
+      },
+      "ArtifactReadRequest": {
+        "type": "object",
+        "properties": {
+          "request": {
+            "$ref": "#/components/schemas/adaptive.OperationRequest",
+            "properties": {
+              "operation": {
+                "type": "string",
+                "const": "artifact.read"
+              }
+            }
+          },
+          "body": {
+            "$ref": "#/components/schemas/ArtifactRead"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "request",
+          "body"
+        ],
+        "description": "Artifacts and attempts are scoped to the campaign and integrity-checked before dependent actions; registration does not authorize arbitrary target operations",
+        "x-response-schema": {
+          "$ref": "#/components/schemas/ArtifactReadResponse"
+        }
+      },
+      "ArtifactReadResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer",
+            "const": 200
+          },
+          "body": {
+            "$ref": "#/components/schemas/ArtifactContent"
+          },
+          "session_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "body",
+          "session_revision"
+        ]
+      },
+      "AttemptRegisterRequest": {
+        "type": "object",
+        "properties": {
+          "request": {
+            "$ref": "#/components/schemas/adaptive.OperationRequest",
+            "properties": {
+              "operation": {
+                "type": "string",
+                "const": "attempt.register"
+              },
+              "attempt_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "attempt_context_digest": {
+                "$ref": "#/components/schemas/Digest"
+              }
+            },
+            "required": [
+              "attempt_id",
+              "attempt_context_digest"
+            ]
+          },
+          "body": {
+            "$ref": "#/components/schemas/adaptive.AttemptContext"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "request",
+          "body"
+        ],
+        "description": "Artifacts and attempts are scoped to the campaign and integrity-checked before dependent actions; registration does not authorize arbitrary target operations",
+        "x-response-schema": {
+          "$ref": "#/components/schemas/AttemptRegisterResponse"
+        }
+      },
+      "AttemptRegisterResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer",
+            "const": 201
+          },
+          "body": {
+            "$ref": "#/components/schemas/adaptive.AttemptContext"
+          },
+          "session_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "body",
+          "session_revision"
+        ]
+      },
+      "InjectionArmRequest": {
+        "type": "object",
+        "properties": {
+          "request": {
+            "$ref": "#/components/schemas/adaptive.OperationRequest",
+            "properties": {
+              "operation": {
+                "type": "string",
+                "const": "injection.arm"
+              },
+              "attempt_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "attempt_context_digest": {
+                "$ref": "#/components/schemas/Digest"
+              }
+            },
+            "required": [
+              "attempt_id",
+              "attempt_context_digest"
+            ]
+          },
+          "body": {
+            "$ref": "#/components/schemas/InjectionArm"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "request",
+          "body"
+        ],
+        "description": "Deleting an injection does not undo previous effects; restored injections remain eligible for campaign-scoped cleanup Response alteration is distinct from persisted state alteration and does not prove committed target changes No service implementation inventory is implied; Operator selects actions using the environment manifest",
+        "x-response-schema": {
+          "$ref": "#/components/schemas/InjectionArmResponse"
+        }
+      },
+      "InjectionArmResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer",
+            "const": 201
+          },
+          "body": {
+            "$ref": "#/components/schemas/injection.PublicState"
+          },
+          "session_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "body",
+          "session_revision"
+        ]
+      },
+      "InjectionDeleteRequest": {
+        "type": "object",
+        "properties": {
+          "request": {
+            "$ref": "#/components/schemas/adaptive.OperationRequest",
+            "properties": {
+              "operation": {
+                "type": "string",
+                "const": "injection.delete"
+              }
+            }
+          },
+          "body": {
+            "$ref": "#/components/schemas/InjectionDelete"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "request",
+          "body"
+        ],
+        "description": "Deleting an injection does not undo previous effects; restored injections remain eligible for campaign-scoped cleanup Response alteration is distinct from persisted state alteration and does not prove committed target changes No service implementation inventory is implied; Operator selects actions using the environment manifest",
+        "x-response-schema": {
+          "$ref": "#/components/schemas/InjectionDeleteResponse"
+        }
+      },
+      "InjectionDeleteResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer",
+            "const": 204
+          },
+          "body": {
+            "type": "null"
+          },
+          "session_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "body",
+          "session_revision"
+        ]
+      },
+      "ApplicationInvokeRequest": {
+        "type": "object",
+        "properties": {
+          "request": {
+            "$ref": "#/components/schemas/adaptive.OperationRequest",
+            "properties": {
+              "operation": {
+                "type": "string",
+                "const": "application.invoke"
+              },
+              "attempt_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "attempt_context_digest": {
+                "$ref": "#/components/schemas/Digest"
+              }
+            },
+            "required": [
+              "attempt_id",
+              "attempt_context_digest"
+            ]
+          },
+          "body": {
+            "$ref": "#/components/schemas/sandboxd.TurnRequest"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "request",
+          "body"
+        ],
+        "description": "Supervisor-observed activity is attributed to the active invocation window, never trusted from target-supplied attribution headers Runtime/provider configuration stays with Interceptor; this API does not select a model provider or alter application launch configuration",
+        "x-response-schema": {
+          "$ref": "#/components/schemas/ApplicationInvokeResponse"
+        }
+      },
+      "ApplicationInvokeResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer",
+            "const": 200
+          },
+          "body": {
+            "$ref": "#/components/schemas/sandboxd.Turn"
+          },
+          "session_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "body",
+          "session_revision"
+        ]
+      },
+      "ObservationReadRequest": {
+        "type": "object",
+        "properties": {
+          "request": {
+            "$ref": "#/components/schemas/adaptive.OperationRequest",
+            "properties": {
+              "operation": {
+                "type": "string",
+                "const": "observation.read"
+              },
+              "attempt_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "attempt_context_digest": {
+                "$ref": "#/components/schemas/Digest"
+              }
+            },
+            "required": [
+              "attempt_id",
+              "attempt_context_digest"
+            ]
+          },
+          "body": {
+            "$ref": "#/components/schemas/adaptive.ObservationRequest"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "request",
+          "body"
+        ],
+        "description": "Feedback profiles filter disclosure; fixed receipts prevent widening the view with later reads Observed attribution describes the invocation window; outcome verdicts come from independent observations/oracles, not agent-authored claims",
+        "x-response-schema": {
+          "$ref": "#/components/schemas/ObservationReadResponse"
+        }
+      },
+      "ObservationReadResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer",
+            "const": 200
+          },
+          "body": {
+            "$ref": "#/components/schemas/adaptive.ObservationView"
+          },
+          "session_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "body",
+          "session_revision"
+        ]
+      },
+      "ObservationContentReadRequest": {
+        "type": "object",
+        "properties": {
+          "request": {
+            "$ref": "#/components/schemas/adaptive.OperationRequest",
+            "properties": {
+              "operation": {
+                "type": "string",
+                "const": "observation.content.read"
+              },
+              "attempt_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "attempt_context_digest": {
+                "$ref": "#/components/schemas/Digest"
+              }
+            },
+            "required": [
+              "attempt_id",
+              "attempt_context_digest"
+            ]
+          },
+          "body": {
+            "$ref": "#/components/schemas/adaptive.FeedbackReadRequest"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "request",
+          "body"
+        ],
+        "description": "Feedback profiles filter disclosure; fixed receipts prevent widening the view with later reads Observed attribution describes the invocation window; outcome verdicts come from independent observations/oracles, not agent-authored claims",
+        "x-response-schema": {
+          "$ref": "#/components/schemas/ObservationContentReadResponse"
+        }
+      },
+      "ObservationContentReadResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer",
+            "const": 200
+          },
+          "body": {
+            "$ref": "#/components/schemas/adaptive.FeedbackChunk"
+          },
+          "session_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "body",
+          "session_revision"
+        ]
+      },
+      "SnapshotCreateRequest": {
+        "type": "object",
+        "properties": {
+          "request": {
+            "$ref": "#/components/schemas/adaptive.OperationRequest",
+            "properties": {
+              "operation": {
+                "type": "string",
+                "const": "snapshot.create"
+              }
+            }
+          },
+          "body": {
+            "$ref": "#/components/schemas/SnapshotCreate"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "request",
+          "body"
+        ],
+        "description": "Availability comes from the environment manifest; application memory is restorable only through the declared state contract, not process-memory capture Caller byte allowance can only tighten native limits; zero is exhausted; failed or oversized snapshots are not committed Creation, retained metadata lookup and lifecycle restoration are separate API operations",
+        "x-response-schema": {
+          "$ref": "#/components/schemas/SnapshotCreateResponse"
+        }
+      },
+      "SnapshotCreateResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer",
+            "const": 201
+          },
+          "body": {
+            "$ref": "#/components/schemas/snapshot.Checkpoint"
+          },
+          "session_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "body",
+          "session_revision"
+        ]
+      },
+      "NativeRequest": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SessionOwnerRequest"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStatusRequest"
+          },
+          {
+            "$ref": "#/components/schemas/OperationStatusRequest"
+          },
+          {
+            "$ref": "#/components/schemas/CapabilitiesReadRequest"
+          },
+          {
+            "$ref": "#/components/schemas/ArtifactRegisterRequest"
+          },
+          {
+            "$ref": "#/components/schemas/ArtifactReadRequest"
+          },
+          {
+            "$ref": "#/components/schemas/AttemptRegisterRequest"
+          },
+          {
+            "$ref": "#/components/schemas/InjectionArmRequest"
+          },
+          {
+            "$ref": "#/components/schemas/InjectionDeleteRequest"
+          },
+          {
+            "$ref": "#/components/schemas/ApplicationInvokeRequest"
+          },
+          {
+            "$ref": "#/components/schemas/ObservationReadRequest"
+          },
+          {
+            "$ref": "#/components/schemas/ObservationContentReadRequest"
+          },
+          {
+            "$ref": "#/components/schemas/SnapshotCreateRequest"
+          }
+        ],
+        "description": "Select by request.operation. Each variant constrains its body. x-response-schema links that variant to its success response component; all variants may return ErrorResponse or InProgressResponse. No artificial HTTP routes are introduced."
+      },
+      "NativeSuccessResponse": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/SessionOwnerResponse"
+          },
+          {
+            "$ref": "#/components/schemas/SessionStatusResponse"
+          },
+          {
+            "$ref": "#/components/schemas/OperationStatusResponse"
+          },
+          {
+            "$ref": "#/components/schemas/CapabilitiesReadResponse"
+          },
+          {
+            "$ref": "#/components/schemas/ArtifactRegisterResponse"
+          },
+          {
+            "$ref": "#/components/schemas/ArtifactReadResponse"
+          },
+          {
+            "$ref": "#/components/schemas/AttemptRegisterResponse"
+          },
+          {
+            "$ref": "#/components/schemas/InjectionArmResponse"
+          },
+          {
+            "$ref": "#/components/schemas/InjectionDeleteResponse"
+          },
+          {
+            "$ref": "#/components/schemas/ApplicationInvokeResponse"
+          },
+          {
+            "$ref": "#/components/schemas/ObservationReadResponse"
+          },
+          {
+            "$ref": "#/components/schemas/ObservationContentReadResponse"
+          },
+          {
+            "$ref": "#/components/schemas/SnapshotCreateResponse"
+          }
+        ]
+      },
+      "PendingOperationResponse": {
+        "type": "object",
+        "description": "Unassigned response stored in a running native operation record. It is not an HTTP response and is invalid outside that context. No body is present.",
+        "properties": {
+          "status": {
+            "type": "integer",
+            "const": 0
+          },
+          "session_revision": {
+            "type": "integer",
+            "const": 0
+          }
+        },
+        "required": [
+          "status",
+          "session_revision"
+        ],
+        "additionalProperties": false
+      },
+      "adaptive.AttemptEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "context_digest": {
+            "type": "string"
+          },
+          "event_sequences": {
+            "items": {
+              "type": "integer"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "parent_attempt_id": {
+            "type": "string"
+          },
+          "payload_digest": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "attempt_id",
+          "payload_digest",
+          "context_digest",
+          "event_sequences"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [
+          "parent_attempt_id"
+        ],
+        "x-native-json-order": [
+          "attempt_id",
+          "parent_attempt_id",
+          "payload_digest",
+          "context_digest",
+          "event_sequences"
+        ]
+      },
+      "adaptive.EvidenceBundle": {
+        "additionalProperties": false,
+        "properties": {
+          "api_version": {
+            "const": "interceptor.dev/evidence-bundle/v1alpha1",
+            "type": "string"
+          },
+          "application_digest": {
+            "type": "string"
+          },
+          "artifact_refs": {
+            "items": {
+              "$ref": "#/components/schemas/adaptive.ArtifactDescriptor"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "attempts": {
+            "items": {
+              "$ref": "#/components/schemas/adaptive.AttemptEvidence"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "campaign_id": {
+            "type": "string"
+          },
+          "capability_manifest_digest": {
+            "type": "string"
+          },
+          "completeness": {
+            "$ref": "#/components/schemas/adaptive.EvidenceCompleteness"
+          },
+          "coverage_gaps": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "digest": {
+            "type": "string"
+          },
+          "environment_digest": {
+            "type": "string"
+          },
+          "feedback_profile": {
+            "type": "string"
+          },
+          "injections": {
+            "items": {
+              "$ref": "#/components/schemas/evaluation.InjectionResult"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "interceptor_release_digest": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "EvidenceBundle",
+            "type": "string"
+          },
+          "oracles": {
+            "items": {
+              "$ref": "#/components/schemas/evaluation.OracleResult"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "restores": {
+            "items": {
+              "$ref": "#/components/schemas/adaptive.RestoreEvidence"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "snapshots": {
+            "items": {
+              "$ref": "#/components/schemas/adaptive.SnapshotEvidence"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "api_version",
+          "kind",
+          "session_id",
+          "environment_digest",
+          "application_digest",
+          "capability_manifest_digest",
+          "interceptor_release_digest",
+          "feedback_profile",
+          "completeness",
+          "attempts",
+          "snapshots",
+          "restores",
+          "artifact_refs",
+          "oracles",
+          "injections",
+          "coverage_gaps",
+          "created_at",
+          "digest"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [
+          "campaign_id"
+        ],
+        "x-native-json-order": [
+          "api_version",
+          "kind",
+          "campaign_id",
+          "session_id",
+          "environment_digest",
+          "application_digest",
+          "capability_manifest_digest",
+          "interceptor_release_digest",
+          "feedback_profile",
+          "completeness",
+          "attempts",
+          "snapshots",
+          "restores",
+          "artifact_refs",
+          "oracles",
+          "injections",
+          "coverage_gaps",
+          "created_at",
+          "digest"
+        ],
+        "x-native-hash": {
+          "algorithm": "sha256",
+          "prefix": "sha256:",
+          "empty_field": "digest",
+          "encoding": "go-json-marshal"
+        }
+      },
+      "adaptive.EvidenceCompleteness": {
+        "additionalProperties": false,
+        "properties": {
+          "end_sequence": {
+            "type": "integer"
+          },
+          "start_sequence": {
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "complete",
+              "partial"
+            ],
+            "type": "string"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "state",
+          "start_sequence",
+          "end_sequence",
+          "truncated"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [],
+        "x-native-json-order": [
+          "state",
+          "start_sequence",
+          "end_sequence",
+          "truncated"
+        ]
+      },
+      "adaptive.ExecutionState": {
+        "additionalProperties": false,
+        "properties": {
+          "api_version": {
+            "type": "string"
+          },
+          "closed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "closure_reason": {
+            "type": "string"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/adaptive.ExecutionOwner"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "records": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/adaptive.OperationRecord"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "api_version",
+          "session_id",
+          "records"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [
+          "closed_at",
+          "closure_reason",
+          "owner"
+        ],
+        "x-native-json-order": [
+          "closed_at",
+          "closure_reason",
+          "api_version",
+          "session_id",
+          "owner",
+          "records"
+        ]
+      },
+      "adaptive.RestoreEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "resulting_session_id": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "type": "string"
+          },
+          "source_session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_session_id",
+          "snapshot_id",
+          "resulting_session_id"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [],
+        "x-native-json-order": [
+          "source_session_id",
+          "snapshot_id",
+          "resulting_session_id"
+        ]
+      },
+      "adaptive.SnapshotEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "canonical_size_bytes": {
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "digest": {
+            "type": "string"
+          },
+          "event_sequence": {
+            "type": "integer"
+          },
+          "parent_snapshot": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "digest",
+          "canonical_size_bytes",
+          "event_sequence",
+          "created_at",
+          "status"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [
+          "parent_snapshot"
+        ],
+        "x-native-json-order": [
+          "snapshot_id",
+          "digest",
+          "parent_snapshot",
+          "canonical_size_bytes",
+          "event_sequence",
+          "created_at",
+          "status"
+        ]
+      },
+      "evaluation.InjectionResult": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string",
+            "description": "model_response yields RESPONSE_WRITTEN after a completed write without a causal success oracle, DELIVERY_UNKNOWN after failed/partial writes, or DELIVERED_SUCCEEDED with independent causal oracle evidence. It must not infer resisted or successful execution from mutation alone."
+          }
+        },
+        "required": [
+          "id",
+          "mode",
+          "delivery",
+          "outcome"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [],
+        "x-native-json-order": [
+          "id",
+          "mode",
+          "delivery",
+          "outcome"
+        ]
+      },
+      "evaluation.OracleResult": {
+        "additionalProperties": false,
+        "properties": {
+          "causal_injection_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "causality": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "evidence": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "fired": {
+            "type": "boolean"
+          },
+          "first_event_digest": {
+            "type": "string"
+          },
+          "first_event_seq": {
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "visibility": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "fired",
+          "evidence"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [
+          "first_event_seq",
+          "causal_injection_ids",
+          "count",
+          "first_event_digest",
+          "visibility",
+          "causality"
+        ],
+        "x-native-json-order": [
+          "id",
+          "kind",
+          "fired",
+          "first_event_seq",
+          "evidence",
+          "causal_injection_ids",
+          "count",
+          "first_event_digest",
+          "visibility",
+          "causality"
+        ]
+      },
+      "evaluation.Report": {
+        "additionalProperties": false,
+        "properties": {
+          "coverage_gaps": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "injections": {
+            "items": {
+              "$ref": "#/components/schemas/evaluation.InjectionResult"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "oracles": {
+            "items": {
+              "$ref": "#/components/schemas/evaluation.OracleResult"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "oracles",
+          "injections",
+          "coverage_gaps"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [],
+        "x-native-json-order": [
+          "oracles",
+          "injections",
+          "coverage_gaps"
+        ]
+      },
+      "injection.EvaluationState": {
+        "additionalProperties": false,
+        "properties": {
+          "armed": {
+            "type": "boolean"
+          },
+          "consumed": {
+            "type": "boolean"
+          },
+          "delivery": {
+            "type": "string",
+            "description": "not_confirmed or confirmed for model delivery. model_response uses response_written for a completed application-facing write and write_failed for a failed/partial write; neither proves SDK acceptance or tool execution."
+          },
+          "delivery_observable": {
+            "type": "boolean"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "fired": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "matched": {
+            "type": "boolean"
+          },
+          "response_candidates": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "armed",
+          "matched",
+          "fired",
+          "consumed",
+          "delivery",
+          "delivery_observable",
+          "fingerprint"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [
+          "response_candidates"
+        ],
+        "x-native-json-order": [
+          "id",
+          "armed",
+          "matched",
+          "fired",
+          "consumed",
+          "delivery",
+          "delivery_observable",
+          "fingerprint",
+          "response_candidates"
+        ]
+      },
+      "injection.OperatorState": {
+        "additionalProperties": false,
+        "properties": {
+          "definition": {
+            "$ref": "#/components/schemas/injection.Definition"
+          },
+          "evaluation": {
+            "$ref": "#/components/schemas/injection.EvaluationState"
+          }
+        },
+        "required": [
+          "definition",
+          "evaluation"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [],
+        "x-native-json-order": [
+          "definition",
+          "evaluation"
+        ]
+      },
+      "recording.Attribution": {
+        "additionalProperties": false,
+        "properties": {
+          "confidence": {
+            "type": "string"
+          },
+          "observed_attempt_id": {
+            "type": "string"
+          },
+          "observed_payload_digest": {
+            "type": "string"
+          },
+          "pid": {
+            "type": "integer"
+          },
+          "tool_call_id": {
+            "type": "string"
+          },
+          "window": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object",
+        "x-native-json-omitempty": [
+          "window",
+          "observed_attempt_id",
+          "observed_payload_digest",
+          "tool_call_id",
+          "pid",
+          "confidence"
+        ],
+        "x-native-json-order": [
+          "window",
+          "observed_attempt_id",
+          "observed_payload_digest",
+          "tool_call_id",
+          "pid",
+          "confidence"
+        ]
+      },
+      "recording.Event": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "attribution": {
+            "$ref": "#/components/schemas/recording.Attribution"
+          },
+          "channel": {
+            "enum": [
+              "attack",
+              "control",
+              "evaluation"
+            ],
+            "type": "string"
+          },
+          "hash": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "injection_id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "layer": {
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "payload_digest": {
+            "type": "string"
+          },
+          "previous_hash": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "provenance": {
+            "type": "string"
+          },
+          "raw_ref": {
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "semantic": {
+            "type": "object",
+            "description": "Kind-specific JSON. For model_exchange, response_ref and provider_response_ref retain original bytes. Applied model_response adds delivered_response_ref, delivered_response_digest, model_response_injection_ids and response_injection_direction=model_to_application. References use the existing content-addressed blob digest format. injection_applied carries surface, direction, codec, applied/error; model_response_write carries write_state (response_written or write_failed), bytes_written and expected_bytes. Event attempt/payload/injection and observed turn bindings apply. Required storage failures prevent sending modified bytes; failures after a write latch incomplete evidence."
+          },
+          "seq": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "turn_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "session_id",
+          "seq",
+          "observed_at",
+          "channel",
+          "layer",
+          "kind",
+          "provenance",
+          "semantic",
+          "previous_hash",
+          "hash"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [
+          "turn_id",
+          "injection_id",
+          "attempt_id",
+          "payload_digest",
+          "attribution",
+          "raw_ref"
+        ],
+        "x-native-json-order": [
+          "schema_version",
+          "session_id",
+          "seq",
+          "observed_at",
+          "channel",
+          "layer",
+          "kind",
+          "provenance",
+          "turn_id",
+          "injection_id",
+          "attempt_id",
+          "payload_digest",
+          "attribution",
+          "semantic",
+          "raw_ref",
+          "previous_hash",
+          "hash"
+        ],
+        "x-native-hash": {
+          "algorithm": "sha256",
+          "prefix": "sha256:",
+          "empty_field": "hash",
+          "encoding": "go-json-marshal"
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "model_response_write"
+                },
+                "semantic": {}
+              },
+              "required": [
+                "kind",
+                "semantic"
+              ]
+            },
+            "then": {
+              "properties": {
+                "semantic": {
+                  "$ref": "#/components/schemas/ModelResponseWrite"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "injection_applied"
+                },
+                "semantic": {
+                  "properties": {
+                    "surface": {
+                      "const": "model_response"
+                    }
+                  },
+                  "required": [
+                    "surface"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "semantic"
+              ]
+            },
+            "then": {
+              "properties": {
+                "semantic": {
+                  "$ref": "#/components/schemas/ModelResponseMutation"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "model_exchange"
+                },
+                "semantic": {
+                  "required": [
+                    "model_response_injection_ids"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "semantic"
+              ]
+            },
+            "then": {
+              "properties": {
+                "semantic": {
+                  "$ref": "#/components/schemas/ModelResponseExchange"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "snapshot.Entry": {
+        "additionalProperties": false,
+        "properties": {
+          "blob": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "mode": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 511
+          },
+          "owner": {
+            "type": "string",
+            "enum": [
+              "supervisor",
+              "application"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "pattern": "^/",
+            "description": "Clean absolute path; no dot segments. Entries are unique and sorted lexically by path."
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "target": {
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "file",
+              "directory",
+              "symlink"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "type",
+          "mode"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [
+          "owner",
+          "blob",
+          "size",
+          "target"
+        ],
+        "x-native-json-order": [
+          "path",
+          "owner",
+          "type",
+          "mode",
+          "blob",
+          "size",
+          "target"
+        ],
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "file"
+              }
+            },
+            "required": [
+              "blob"
+            ],
+            "not": {
+              "required": [
+                "target"
+              ]
+            }
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "directory"
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "blob"
+                  ]
+                },
+                {
+                  "required": [
+                    "target"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "symlink"
+              },
+              "target": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^/]"
+              }
+            },
+            "required": [
+              "target"
+            ],
+            "not": {
+              "required": [
+                "blob"
+              ]
+            }
+          }
+        ]
+      },
+      "snapshot.Manifest": {
+        "additionalProperties": false,
+        "properties": {
+          "digest": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/snapshot.Entry"
+            }
+          },
+          "schema_version": {
+            "enum": [
+              1,
+              2
+            ],
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema_version",
+          "entries",
+          "digest"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [],
+        "x-native-json-order": [
+          "schema_version",
+          "entries",
+          "digest"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "schema_version": {
+                  "const": 2
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "entries": {
+                  "items": {
+                    "required": [
+                      "owner"
+                    ]
+                  }
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "entries": {
+                  "items": {
+                    "not": {
+                      "required": [
+                        "owner"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "description": "New sessions emit schema 2 with logical application/supervisor ownership, including root directories. Schema 1 is readable historical evidence without ownership; never infer an owner. Legacy evidence readability does not imply native restore support. Digest covers ownership and permission bits. Missing/invalid ownership in schema 2 and unsupported versions are rejected.",
+        "x-native-hash": {
+          "algorithm": "sha256",
+          "prefix": "sha256:",
+          "empty_field": "digest",
+          "encoding": "go-json-marshal"
+        }
+      },
+      "statejournal.Operation": {
+        "additionalProperties": false,
+        "properties": {
+          "blob": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "collection": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "integer"
+          },
+          "owner": {
+            "type": "string",
+            "enum": [
+              "supervisor",
+              "application"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "target": {
+            "type": "string"
+          },
+          "value": {
+            "description": "JSON value; its kind-specific structure is defined by the containing record. Preserve member ordering when verifying native hashes."
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [
+          "path",
+          "owner",
+          "mode",
+          "blob",
+          "size",
+          "target",
+          "service",
+          "collection",
+          "key",
+          "value",
+          "id"
+        ],
+        "x-native-json-order": [
+          "kind",
+          "path",
+          "owner",
+          "mode",
+          "blob",
+          "size",
+          "target",
+          "service",
+          "collection",
+          "key",
+          "value",
+          "id"
+        ],
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "file_upsert"
+              },
+              "path": {
+                "type": "string"
+              },
+              "owner": {
+                "type": "string",
+                "enum": [
+                  "supervisor",
+                  "application"
+                ]
+              },
+              "mode": {
+                "type": "integer"
+              },
+              "blob": {
+                "$ref": "#/components/schemas/Digest"
+              },
+              "size": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "kind",
+              "path",
+              "blob"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "directory_ensure"
+              },
+              "path": {
+                "type": "string"
+              },
+              "owner": {
+                "type": "string",
+                "enum": [
+                  "supervisor",
+                  "application"
+                ]
+              },
+              "mode": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "path"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "symlink_set"
+              },
+              "path": {
+                "type": "string"
+              },
+              "owner": {
+                "type": "string",
+                "enum": [
+                  "supervisor",
+                  "application"
+                ]
+              },
+              "mode": {
+                "type": "integer"
+              },
+              "target": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "path",
+              "target"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "file_delete"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "path"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "directory_delete"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "path"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "database_checkpoint"
+              },
+              "service": {
+                "type": "string"
+              },
+              "blob": {
+                "$ref": "#/components/schemas/Digest"
+              },
+              "size": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "value": {
+                "$ref": "#/components/schemas/EvidenceDatabaseCheckpointValue"
+              }
+            },
+            "required": [
+              "kind",
+              "service",
+              "blob",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "service_put"
+              },
+              "service": {
+                "type": "string"
+              },
+              "collection": {
+                "type": "string"
+              },
+              "key": {
+                "type": "string"
+              },
+              "value": {
+                "description": "Application/service-defined JSON resource, retained without losing JSON member ordering for native hashes."
+              }
+            },
+            "required": [
+              "kind",
+              "service",
+              "collection",
+              "key",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "service_delete"
+              },
+              "service": {
+                "type": "string"
+              },
+              "collection": {
+                "type": "string"
+              },
+              "key": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "service",
+              "collection",
+              "key"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "injection_put"
+              },
+              "id": {
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/components/schemas/EvidenceInjectionValue"
+              }
+            },
+            "required": [
+              "kind",
+              "id",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "artifact_put"
+              },
+              "id": {
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/components/schemas/adaptive.ArtifactDescriptor"
+              }
+            },
+            "required": [
+              "kind",
+              "id",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "attempt_put"
+              },
+              "id": {
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/components/schemas/adaptive.AttemptContext"
+              }
+            },
+            "required": [
+              "kind",
+              "id",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "injection_delete"
+              },
+              "id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "id"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "clock_set"
+              },
+              "value": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "oracle_state_set"
+              },
+              "value": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/evaluation.OracleResult"
+                }
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "budget_set"
+              },
+              "value": {
+                "$ref": "#/components/schemas/session.Consumed"
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "idempotency_commit"
+              },
+              "value": {
+                "$ref": "#/components/schemas/EvidenceExecutionCommitValue"
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "restored_from"
+              },
+              "value": {
+                "$ref": "#/components/schemas/EvidenceRestoredValue"
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "environment_materialized"
+              },
+              "value": {
+                "$ref": "#/components/schemas/EvidenceMaterializedValue"
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "additionalProperties": false
+          }
+        ],
+        "description": "Discriminated journal operation. owner is permitted only for file_upsert, directory_ensure and symlink_set. Current ownership-aware writes include owner; historical writes may omit it. Omitted mode/size mean zero. Journal schema remains 1; file_manifest_schema in environment_materialized identifies ownership-aware state and is independent of transaction schema_version. Preserve owner in native hashing, never strip unknown fields to make verification succeed."
+      },
+      "statejournal.Transaction": {
+        "additionalProperties": false,
+        "properties": {
+          "committed_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "hash": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "operations": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/statejournal.Operation"
+            }
+          },
+          "previous_hash": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "seq": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "tx_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "session_id",
+          "seq",
+          "tx_id",
+          "committed_at",
+          "reason",
+          "operations",
+          "previous_hash",
+          "hash"
+        ],
+        "type": "object",
+        "x-native-json-omitempty": [],
+        "x-native-json-order": [
+          "schema_version",
+          "session_id",
+          "seq",
+          "tx_id",
+          "committed_at",
+          "reason",
+          "operations",
+          "previous_hash",
+          "hash"
+        ],
+        "x-native-hash": {
+          "algorithm": "sha256",
+          "prefix": "sha256:",
+          "empty_field": "hash",
+          "encoding": "go-json-marshal"
+        }
+      },
+      "EvidenceDatabaseCheckpointValue": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "oracle_baselines": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {}
+              }
+            }
+          }
+        },
+        "required": [
+          "version"
+        ],
+        "additionalProperties": false
+      },
+      "EvidenceMaterializedValue": {
+        "type": "object",
+        "properties": {
+          "environment_digest": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "application_digest": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "baseline_file_manifest_digest": {
+            "type": "string",
+            "description": "Empty for an unmaterialized baseline, otherwise a sha256 digest."
+          },
+          "bridge_transport": {
+            "type": "string"
+          },
+          "file_manifest_schema": {
+            "enum": [
+              1,
+              2
+            ]
+          }
+        },
+        "required": [
+          "environment_digest",
+          "application_digest",
+          "baseline_file_manifest_digest",
+          "bridge_transport"
+        ],
+        "additionalProperties": false
+      },
+      "EvidenceRestoredValue": {
+        "type": "object",
+        "properties": {
+          "checkpoint_id": {
+            "type": "string"
+          },
+          "source_session_id": {
+            "type": "string"
+          },
+          "journal_seq": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "journal_hash": {
+            "$ref": "#/components/schemas/Digest"
+          }
+        },
+        "required": [
+          "checkpoint_id",
+          "source_session_id",
+          "journal_seq",
+          "journal_hash"
+        ],
+        "additionalProperties": false
+      },
+      "EvidenceExecutionCommitValue": {
+        "type": "object",
+        "properties": {
+          "execution_state_digest": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "execution_state_digest",
+          "session_id"
+        ],
+        "additionalProperties": false
+      },
+      "EvidenceInjectionValue": {
+        "type": "object",
+        "properties": {
+          "definition": {
+            "$ref": "#/components/schemas/injection.Definition"
+          },
+          "eligible_turn": {
+            "type": "string"
+          },
+          "evaluation": {
+            "$ref": "#/components/schemas/injection.EvaluationState"
+          }
+        },
+        "required": [
+          "definition",
+          "evaluation"
+        ],
+        "additionalProperties": false
+      },
+      "EvidenceExportManifest": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "environment_digest": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "application_digest": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "interceptor_version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "session_id",
+          "environment_digest",
+          "application_digest",
+          "interceptor_version"
+        ],
+        "additionalProperties": false
+      },
+      "EvidenceArtifacts": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/adaptive.ArtifactDescriptor"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "artifacts"
+        ],
+        "additionalProperties": false
+      },
+      "EvidenceAttempts": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "attempts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/adaptive.AttemptContext"
+            }
+          }
+        },
+        "required": [
+          "schema_version",
+          "attempts"
+        ],
+        "additionalProperties": false
+      },
+      "EvidenceFailureMarker": {
+        "type": "object",
+        "description": "Host diagnostic record. Presence marks partial evidence; fields are diagnostic and are not an execution authorization or a successful outcome."
+      },
+      "ModelResponseMutation": {
+        "type": "object",
+        "properties": {
+          "surface": {
+            "const": "model_response"
+          },
+          "direction": {
+            "const": "model_to_application"
+          },
+          "codec": {
+            "type": "string",
+            "enum": [
+              "anthropic_messages",
+              "aws_bedrock_converse",
+              "google_generate_content",
+              "openai_chat_completions",
+              "openai_responses"
+            ],
+            "description": "Required only for model_response; application-facing generation codec, independent of upstream provider."
+          },
+          "applied": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "surface",
+          "direction",
+          "codec",
+          "applied",
+          "error"
+        ],
+        "additionalProperties": false
+      },
+      "ModelResponseWrite": {
+        "type": "object",
+        "properties": {
+          "surface": {
+            "const": "model_response"
+          },
+          "direction": {
+            "const": "model_to_application"
+          },
+          "codec": {
+            "type": "string",
+            "enum": [
+              "anthropic_messages",
+              "aws_bedrock_converse",
+              "google_generate_content",
+              "openai_chat_completions",
+              "openai_responses"
+            ],
+            "description": "Required only for model_response; application-facing generation codec, independent of upstream provider."
+          },
+          "write_state": {
+            "enum": [
+              "response_written",
+              "write_failed"
+            ]
+          },
+          "bytes_written": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "expected_bytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "surface",
+          "direction",
+          "codec",
+          "write_state",
+          "bytes_written",
+          "expected_bytes"
+        ],
+        "additionalProperties": false
+      },
+      "ModelResponseExchange": {
+        "type": "object",
+        "properties": {
+          "response_ref": {
+            "type": "string"
+          },
+          "provider_response_ref": {
+            "type": "string"
+          },
+          "delivered_response_ref": {
+            "type": "string"
+          },
+          "delivered_response_digest": {
+            "type": "string"
+          },
+          "model_response_injection_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "response_injection_direction": {
+            "const": "model_to_application"
+          }
+        },
+        "required": [
+          "response_ref",
+          "provider_response_ref",
+          "delivered_response_ref",
+          "delivered_response_digest",
+          "model_response_injection_ids",
+          "response_injection_direction"
+        ],
+        "additionalProperties": true
+      },
+      "ModelResponseDeliveryFact": {
+        "type": "object",
+        "properties": {
+          "injection_id": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "applied",
+              "failed",
+              "response_written",
+              "write_failed"
+            ]
+          },
+          "scope": {
+            "enum": [
+              "attempt",
+              "turn"
+            ]
+          },
+          "event_seq": {
+            "type": "integer"
+          },
+          "surface": {
+            "const": "model_response"
+          },
+          "direction": {
+            "const": "model_to_application"
+          }
+        },
+        "required": [
+          "injection_id",
+          "state",
+          "scope",
+          "event_seq",
+          "surface",
+          "direction"
+        ],
+        "additionalProperties": false,
+        "description": "Decoded observation.content.read bytes for model_response injection_delivery entries. Available only to diagnostic/oracle-assisted profiles and permitted selection. A completed write proves neither SDK acceptance nor tool execution."
+      }
+    }
+  }
+}

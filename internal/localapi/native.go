@@ -250,6 +250,9 @@ func (n *NativeRuntime) ValidateRestore(ctx context.Context, source, id string) 
 	if checkpoint.JournalSeq == 0 || checkpoint.JournalSeq > uint64(len(tx)) || tx[checkpoint.JournalSeq-1].Hash != checkpoint.JournalHash {
 		return errors.New("checkpoint journal unavailable")
 	}
+	if err := snapshot.RequireOwnership(tx[:checkpoint.JournalSeq]); err != nil {
+		return err
+	}
 	blobs, err := blobstore.Open(paths.Blobs, m.Limits.MaxBlobBytes)
 	if err != nil {
 		return err

@@ -34,6 +34,103 @@ than a version suffix. The tag remains on the candidate source commit. Merge,
 squash, and rebase merges are supported when their resulting tree is identical
 to that commit. Direct pushes to `main` verify code but never promote a release.
 
+## Interceptor integration contract
+
+The Interceptor-owned API contract version is independent of the product release
+version. `internal/integrationcontract/contract.json` is the
+self-contained OpenAPI 3.1 document. Its `info.version` is the
+single source for the Operator-facing API agreement's version, the local API's
+`POST /v1/contract-version`, and CLI reporting. Update the document and version
+together whenever supported integration capabilities, interfaces or guarantees
+change, including optional additions. Retain the version for changes that leave
+the agreement unchanged, such as documentation corrections. Update the independent
+version and hash pins in the repository-local consumer fixture deliberately when
+the contract changes. Validate OpenAPI structure, internal references, Go wire
+field coverage and representative requests/responses before qualification.
+Operator's implementation and release workflow are maintained separately.
+
+Operator's Interceptor compatibility pins are the contract version and complete
+document SHA-256. Do not
+require it to pin Interceptor's source commit or the commit that introduced or
+published the contract. Publishing another Interceptor release with the same
+contract version and exact document bytes does not require an Operator update or
+release. Contract edits, even formatting-only changes, require a reviewed hash-pin
+update in the consumer before it can execute. Never derive the expected pin from
+the service being checked. The source
+revisions and artifact checksums retained below establish Interceptor's build
+provenance and integrity; they are not additional Operator compatibility pins.
+
+Only Operator-facing API endpoints, operations, inputs, outputs, errors and
+guarantees belong in this document. Administrative CLI commands, target-specific
+capability values and general Interceptor feature inventories do not. See
+[contract scope](../../internal/integrationcontract/README.md).
+
+Contract `0.2.0` introduced `interceptor_contract_sha256` to the identity API. The hash
+covers the complete embedded UTF-8 document, including formatting and the final
+newline, and matches the exact `contract --json` output. It is distinct from
+archive/executable checksums. Documentation-only edits change the document hash
+without necessarily changing the API version; both version and hash must match
+the consumer's pins before campaign execution. Catalog fields and publication
+mechanisms remain unchanged.
+
+Contract `0.3.0` includes the structured evidence archive members Operator parses
+and verifies, including file-manifest schema 2 and logical ownership in filesystem
+journal operations. Treat changes to these records and their native hash encoding
+as API agreement changes even when the HTTP route is unchanged. Qualification
+checks downloaded archive contents and native hashes as well as transfer integrity.
+Operator must support the declared formats in its independent verifier before
+adopting the new version/hash pins; updating the pins alone is insufficient.
+
+Contract `0.4.0` adds selectable attacker-response and identity-state endpoint
+metadata. Validate native discovery-to-injection tests and rebuild wrappers so
+stored manifest digests include the new definitions. Operator must separately
+support `http-route-set` and `state-collection` before updating its pins.
+
+The build reads `info.version` from and embeds that OpenAPI contract, and records `interceptor_contract_version` in
+`release.json`. CI runs `contract --json`, `version --json` and plain `version`
+from every actual archived Linux/macOS CLI on a compatible native runner. Linux
+runners also execute the macOS archives' Linux companions. These checks use an
+empty executable search path and no Docker or target. Each report records the
+archive checksum, executable checksum, source revision and observed version.
+Publication requires all six reports to agree with the archived metadata; the
+reports are retained in `candidate.json`. The existing packaged runtime tests
+also check the contract over HTTP and compare its document hash with the installed
+CLI's full export before attaching and exercising a campaign. The smoke consumer
+validates its JSON exchanges against the OpenAPI schemas, including each native
+operation's specific response. No runtime schema download is required.
+
+Catalog entries contain `interceptor_contract_version` and omit
+`contract_package_version`. Promotion preserves the qualified archive bytes and
+contract version; changing a candidate contract requires changed artifacts and
+qualification again. The publisher verifies the release record against the
+checksummed candidate evidence before catalog generation or promotion. Never
+infer a contract version from a product version or an unrelated installation.
+After authorized publication, inspect the public catalog; after promotion, reload
+the releases page and check **Interceptor / Operator contract: 0.1.0** (or the
+version actually released). No site deployment is needed.
+
+The local publisher is a complete reviewed export pinned by
+`tools/release-publisher/publisher-source.json`. Upgrade it using a new reviewed
+export from the releases maintainers, replace the entire source set (including
+removed files), retain provenance, and run `make test-release-publisher`. Never
+patch individual vendored files, fetch private publisher code at runtime, or move
+an immutable old tag to retrofit a publisher. New publishing tags must contain
+the updated publisher. Interceptor publication does not wait for another
+repository's validation jobs; shared synthetic publisher tests remain local.
+
+For a local native archive check, use:
+
+```sh
+python3 scripts/verify_release_contract.py --archive /path/to/archive.tar.gz \
+  --version <product-version> --source <source-commit> \
+  --output ../maintainers/interceptor_sandbox/contract-check.json
+```
+
+Use `--companion` only on the corresponding native Linux runner to verify a
+macOS archive's companion. Local results do not replace the CI matrix or QA
+against the published candidate. Campaign compatibility uses the HTTP API, not
+these CLI inspection commands.
+
 ## GitHub release contents
 
 The managed release contains these immutable release files (v0.1.2 shown):
@@ -241,7 +338,11 @@ GitHub subject does not satisfy the new trust policy.
    ```
 
    This setting affects **every OIDC job in this repository**, not just releases.
-   All such jobs must declare an environment for the new subject to be issued.
+   Include GitHub-managed Dependabot and Dependency Graph jobs in that review;
+   they do not declare an environment. Use `context`, which expands to
+   `environment:production` for the publisher and the applicable ref/event context
+   for jobs without an environment. Requiring the `environment` claim directly
+   prevents those managed jobs from starting.
 2. Sign in to `gh` with repository administrator access. Run this read-only
    command and retain its output with your configuration change record:
 
@@ -249,25 +350,44 @@ GitHub subject does not satisfy the new trust policy.
    gh api repos/intrusiveai/interceptor_sandbox/actions/oidc/customization/sub
    ```
 
-3. After the administrator confirms the IAM migration in step 5, run:
+3. After the administrator confirms the IAM migration in step 5, run the
+   following with `gh` and `jq` installed. Preserve the current immutable-subject
+   setting; changing that format is a separate AWS trust migration.
 
    ```sh
-   gh api --method PUT \
-     repos/intrusiveai/interceptor_sandbox/actions/oidc/customization/sub \
-     --input - <<'JSON'
-   {"use_default":false,"include_claim_keys":["repository_id","repository_owner_id","environment","ref","workflow_ref"]}
-   JSON
+   set -o pipefail
+   gh api repos/intrusiveai/interceptor_sandbox/actions/oidc/customization/sub |
+     jq '{use_default:false,
+          include_claim_keys:["repository_id","repository_owner_id","context","ref","workflow_ref"]}
+         + (if has("use_immutable_subject") then
+              {use_immutable_subject:.use_immutable_subject} else {} end)' |
+     gh api --method PUT \
+       repos/intrusiveai/interceptor_sandbox/actions/oidc/customization/sub --input -
    ```
 
    Keep the exact key order. Use `workflow_ref`, not `job_workflow_ref`: the
    publisher is an ordinary job, not a reusable workflow.
 4. Repeat the GET command from step 2 and confirm `use_default` is `false` and
-   the five keys appear in the specified order. For tag `v0.0.1`, the subject
-   expected by the role is:
+   the five keys appear in the specified order, with the immutable-subject
+   setting unchanged. For tag `v0.0.1`, the custom claims must still include:
 
    ```text
    repository_id:1384022338:repository_owner_id:296295422:environment:production:ref:refs/tags/v0.0.1:workflow_ref:intrusiveai/interceptor_sandbox/.github/workflows/publish-catalog.yml@refs/tags/v0.0.1
    ```
+
+   Compare the complete subject, including any immutable repository prefix
+   reported by GitHub, with the deployed AWS trust policy. Retain its repository,
+   production environment, release-tag, workflow-path, and audience restrictions.
+   Validate role assumption without catalog publication before relying on the
+   next release. Confirm a fresh dependency job executes its steps. GitHub-managed
+   runs may reject `gh run rerun` with `This workflow run cannot be retried`.
+   For security updates, open **Security and quality → Dependabot**, select the
+   affected alert, and use **Try again** or **Create Dependabot security update**
+   if offered. If neither is available, validation remains pending until GitHub
+   starts a fresh job; do not report the configuration change as a passing run.
+   For version updates, use **Insights → Dependency graph → Dependabot → Recent update jobs →
+   Check for updates**. These controls start new jobs; the old failed runs remain
+   in history. See GitHub's [Dependabot retry instructions](https://docs.github.com/en/enterprise-cloud%40latest/code-security/how-tos/secure-your-supply-chain/manage-your-dependency-security/re-run-dependabot-jobs).
 
 The subject binds the workflow file and ref, not its contents. Protect release
 tags and review publisher/workflow changes before approving production jobs.
@@ -426,3 +546,32 @@ in the standard public documentation or release archives.
    Deliver them to both `main` and the next candidate before its tag is built.
    Confirm live OIDC and public delivery using step 7; local tests alone cannot
    establish deployment readiness.
+
+## Native release builds
+
+Candidate host binaries compile on matching runners: `ubuntu-24.04` (AMD64),
+`ubuntu-24.04-arm` (ARM64), `macos-15-intel` (AMD64) and `macos-15` (ARM64).
+The scripts select the native compiler, enable CGO for desktop SDK support and
+reject a different requested OS/architecture. macOS uses Xcode's installed SDK
+and deployment target 15.0. No Apple SDK URL or checksum repository setting is
+needed. Keep the pinned Go version in the workflow and build script aligned.
+
+Each job builds twice and compares bytes, verifies native library requirements,
+and checks SDK initialization offline without credentials. Existing archived
+contract checks and runtime qualification remain publication gates. Linux uses
+the Ubuntu 24.04 libc baseline; macOS links system libraries. The 1Password app
+supplies its desktop IPC library at runtime and is not included in the archive.
+
+For a local release build, use a clean committed checkout, the pinned Go version
+and a native C compiler. Select only the current host platform. Run the existing
+archive and installed-binary checks before publication. CI's four native runners
+are required to validate all four release outputs.
+
+Linux jobs also build a static `interceptor-linux` companion. Every archive includes
+it alongside `interceptor` and `release.json`; keep all three together. macOS jobs
+wait for the corresponding Linux job and import its checksum-verified archive
+using `--linux-companion-archive PATH`. The source revision, version, architecture
+and contract must match. To build a macOS release locally, first obtain that Linux
+archive plus its `-SHA256SUMS` file from the same source revision's native Linux
+build. Linux builds do not take this option. The static companion runs inside the
+sandbox; the CGO host executable stays on the host.

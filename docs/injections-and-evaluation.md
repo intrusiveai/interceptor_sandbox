@@ -15,6 +15,7 @@ success condition.
 
 | Surface | Required mode | Effect |
 | --- | --- | --- |
+| `model_response` | `simulation` | Changes native model response JSON before the target SDK/dispatcher receives it, including malformed tool calls. |
 | `model_tool_result` | `simulation` | Temporarily changes a matching tool result immediately before it is sent to the model. Stored environment data is unchanged. |
 | `service_response` | `simulation` | Rewrites a successful managed HTTP or Blueprint-enabled dynamic attacker response after real handling and before application consumption. |
 | `mcp_tool_result` | `simulation` | Rewrites a successful native MCP tool result after execution and before application consumption. |
@@ -107,6 +108,66 @@ Matching follows the application's native model protocol:
 The call and result must both be present in the submitted request so Interceptor
 can evaluate the tool name, arguments, and ordinal. Provider-stored predecessor
 state is rejected because it cannot be snapshotted or matched locally.
+
+### Model-response injection
+
+`model_response` tests how the target handles model output, including unknown tool
+names, malformed arguments and unexpected JSON envelopes. It does not change the
+model request or test the campaign harness. Select an application-facing
+`model_codec` from the capability profile and a `call_ordinal` (`first`, `every`,
+or a positive integer). Supported codecs are `openai_chat_completions`,
+`openai_responses`, `aws_bedrock_converse`, `anthropic_messages` and
+`google_generate_content`. Embeddings and streaming are excluded.
+
+For example, this definition replaces one Chat Completions tool name:
+
+```json
+{
+  "id": "bad-tool-name",
+  "surface": "model_response", "mode": "simulation", "scope": "once",
+  "enabled": true,
+  "selector": {"model_codec": "openai_chat_completions", "call_ordinal": "first"},
+  "placement": {"operation": "replace", "pointer": "/choices/0/message/tool_calls/0/function/name"},
+  "payload": "lookup_order("
+}
+```
+
+Campaign callers supply the usual registered `attempt_id` and `payload_digest`.
+Pointers address the complete native response. In Converse the corresponding
+pointer is `/output/message/content/0/toolUse/name`; Responses uses
+`/output/0/name`, Messages `/content/0/name`, and GenerateContent
+`/candidates/0/content/parts/0/functionCall/name`. Select the actual tool-call
+block, which may not be the first one. Root replacement can insert a complete
+fake response even when the original has no tool calls. All existing placements
+are available. Payloads must be valid outer JSON but may deliberately violate the
+model schema. For example, replacing a Chat Completions `arguments` value with
+`"{"` tests an invalid JSON string inside an otherwise valid response.
+
+Optional `request_body_pointer`, `request_body_equal`, `request_body_contain`
+match the original application request before any tool-result injection.
+Optional `turn_id` uses Interceptor's observed turn; application headers cannot
+supply it. Service, route, tool-name and tool-argument selectors are rejected.
+
+Use `once` or `standing`; `next_turn` is unsupported. Ordinals count matching
+successful JSON responses in response-processing order, not request-start order.
+Provider errors and nonmatches do not consume them. Definitions armed during a
+request cannot affect it, and deletion before mutation remains effective.
+Missing pointers/type errors leave that candidate unchanged and consume a
+matching once definition. Oversized output or required storage failures fail
+closed. Snapshot restore retains ordinal and consumed state.
+
+Original model/provider responses remain in `response_ref` and
+`provider_response_ref`. Modified bytes have a separate `delivered_response_ref`
+and digest; accounting and model-output oracles still use the original response.
+Injection facts distinguish `applied` from `response_written` or `write_failed`,
+with direction `model_to_application`. A completed write proves neither SDK
+acceptance nor tool execution. Independent oracles establish success; a partial
+write leaves delivery unknown. Diagnostic and oracle-assisted feedback expose
+these facts under existing visibility rules; black-box feedback does not.
+
+The [SDK example](../examples/model-response-injection/README.md) demonstrates a
+benign call followed by malformed-name and malformed-argument injections without
+changing the target between runs. Rebuild wrappers to refresh discovery metadata.
 
 ### Managed response and native MCP selectors
 
@@ -427,3 +488,35 @@ completeness of capture. Repair storage and start a new session to resume work.
 See [PostgreSQL and pgvector](postgresql.md) for the managed database Blueprint,
 wrapper packaging, verified driver TLS, database injection surfaces, independent
 committed-state oracles, evidence and coordinated restore contract.
+
+## Discovering attacker and identity targets
+
+The capability manifest includes built-in descriptions for dynamic attacker
+sinks and identity issuers. No extra blueprint flag is required; both supported
+blueprint versions export these descriptions. Rebuild existing wrappers to bind
+an updated manifest. Authored HTTP/MCP descriptions retain their existing
+`export_contracts` opt-in.
+
+For a dynamic attacker sink, select its `http-route-set` endpoint. `methods` and
+`paths` are independent exact allowlists: an omitted or empty list is unrestricted.
+They contain neither templates nor wildcard strings. Choose a concrete method
+and path, then use `service_response` with `selector.service`, `selector.method`
+and `selector.path`. For example, `methods: [POST]` and `paths: [/collect]`
+permit `POST /collect`; an unrestricted path list lets the consumer choose a
+concrete path used by the application. HEAD cannot deliver an injected body and
+is excluded. Static and HEAD-only sinks advertise no response injection.
+The existing ordinal and request predicates still narrow which response changes.
+Out-of-allowlist arming returns `invalid_injection`.
+
+For an identity issuer, select a `state-collection` endpoint and one of its
+`keys`. Use `environment_state`, `selector.service`, `selector.collection` and
+`selector.key`, with a placement pointer into a listed `mutable_fields` entry.
+For example, replace `/active` with `false` on a grant, or `/unavailable` with
+`true` on `faults/issuer`. The delivery input/output schemas describe complete
+records; they are not injection request schemas and do not expose current values.
+Scopes must pass the existing identity validator. Identifying fields remain
+immutable; these descriptions do not authorize creating or deleting records.
+
+Contract `0.4.0` describes these endpoint forms. Operator must support them before
+adopting that contract's version and document-hash pins; no new injection API is
+needed.

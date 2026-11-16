@@ -348,3 +348,20 @@ services:
 	}
 	return directory
 }
+
+func TestMalformedAttackerAllowlistRejectedBeforeBuild(t *testing.T) {
+	directory := testBlueprint(t, `attacker_services:
+  - id: sink
+    kind: http_sink
+    listen: 127.0.0.1:18200
+    response:
+      mode: dynamic
+      status: 200
+      body: idle
+    options:
+      methods: POST
+`)
+	if _, err := Validate(directory); err == nil {
+		t.Fatal("malformed allowlist accepted")
+	}
+}

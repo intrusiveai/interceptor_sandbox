@@ -25,6 +25,7 @@ type Root struct {
 
 type Entry struct {
 	Path   string `json:"path"`
+	Owner  string `json:"owner,omitempty"`
 	Type   string `json:"type"`
 	Mode   uint32 `json:"mode"`
 	Blob   string `json:"blob,omitempty"`
@@ -39,105 +40,20 @@ type Manifest struct {
 }
 
 func EmptyManifest() Manifest {
-	manifest := Manifest{SchemaVersion: 1, Entries: []Entry{}}
+	manifest := Manifest{SchemaVersion: 2, Entries: []Entry{}}
 	manifest.Digest, _ = manifestDigest(manifest)
 	return manifest
 }
 
 func Scan(ctx context.Context, roots []Root, blobs *blobstore.Store, maxFileBytes int64) (Manifest, error) {
-	if blobs == nil || maxFileBytes <= 0 {
-		return Manifest{}, errors.New("blob store and positive file limit are required")
-	}
-	if err := validateRoots(roots); err != nil {
-		return Manifest{}, err
-	}
-	entries := []Entry{}
-	for _, root := range roots {
-		hostRoot, err := filepath.Abs(root.HostPath)
-		if err != nil {
-			return Manifest{}, fmt.Errorf("resolve mutable root %s: %w", root.HostPath, err)
+	read := RootReader(roots)
+	return ScanWithReader(ctx, roots, blobs, 16<<40, Identities{SupervisorUID: os.Getuid(), SupervisorGID: os.Getgid(), ApplicationUID: -1, ApplicationGID: -1}, func(ctx context.Context, q ReadRequest) (ReadResponse, error) {
+		reply, err := read(ctx, q)
+		if err == nil && reply.Info != nil && os.FileMode(reply.Info.Mode).IsRegular() && reply.Info.Size > maxFileBytes {
+			return ReadResponse{}, errors.New("file exceeds snapshot blob limit")
 		}
-		info, err := os.Lstat(hostRoot)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return Manifest{}, fmt.Errorf("inspect mutable root %s: %w", root.ContainerPath, err)
-		}
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return Manifest{}, fmt.Errorf("mutable root %s must be a real directory", root.ContainerPath)
-		}
-		err = filepath.WalkDir(hostRoot, func(path string, item os.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-			if path == hostRoot {
-				return nil
-			}
-			relative, err := filepath.Rel(hostRoot, path)
-			if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-				return fmt.Errorf("path escapes mutable root")
-			}
-			containerPath := filepath.ToSlash(filepath.Join(root.ContainerPath, relative))
-			info, err := item.Info()
-			if err != nil {
-				return err
-			}
-			if info.Mode()&(os.ModeSetuid|os.ModeSetgid) != 0 {
-				return fmt.Errorf("%s has forbidden setuid/setgid bits", containerPath)
-			}
-			entry := Entry{Path: containerPath, Mode: uint32(info.Mode().Perm())}
-			switch {
-			case info.IsDir():
-				entry.Type = "directory"
-			case info.Mode().IsRegular():
-				if info.Size() > maxFileBytes {
-					return fmt.Errorf("%s exceeds %d-byte file limit", containerPath, maxFileBytes)
-				}
-				if linkCount(info) > 1 {
-					return fmt.Errorf("%s has ambiguous hard links", containerPath)
-				}
-				file, err := os.Open(path)
-				if err != nil {
-					return err
-				}
-				object, putErr := blobs.Put(ctx, file)
-				closeErr := file.Close()
-				if putErr != nil {
-					return putErr
-				}
-				if closeErr != nil {
-					return closeErr
-				}
-				entry.Type, entry.Blob, entry.Size = "file", object.Digest, object.Size
-			case info.Mode()&os.ModeSymlink != 0:
-				target, err := os.Readlink(path)
-				if err != nil {
-					return err
-				}
-				if err := validateSymlink(hostRoot, path, target); err != nil {
-					return fmt.Errorf("%s: %w", containerPath, err)
-				}
-				entry.Type, entry.Target = "symlink", filepath.ToSlash(target)
-			default:
-				return fmt.Errorf("%s has unsupported filesystem type %s", containerPath, info.Mode().Type())
-			}
-			entries = append(entries, entry)
-			return nil
-		})
-		if err != nil {
-			return Manifest{}, fmt.Errorf("scan mutable root %s: %w", root.ContainerPath, err)
-		}
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
-	manifest := Manifest{SchemaVersion: 1, Entries: entries}
-	manifest.Digest, _ = manifestDigest(manifest)
-	return manifest, nil
+		return reply, err
+	})
 }
 
 func LoadManifest(path string) (Manifest, error) {
@@ -168,7 +84,7 @@ func WriteManifest(path string, manifest Manifest) error {
 }
 
 func VerifyManifest(manifest Manifest) error {
-	if manifest.SchemaVersion != 1 {
+	if manifest.SchemaVersion != 1 && manifest.SchemaVersion != 2 {
 		return fmt.Errorf("unsupported file manifest schema %d", manifest.SchemaVersion)
 	}
 	previous := ""
@@ -177,6 +93,13 @@ func VerifyManifest(manifest Manifest) error {
 			return fmt.Errorf("file manifest entries are not uniquely sorted or path %q is invalid", entry.Path)
 		}
 		previous = entry.Path
+		if entry.Mode & ^uint32(0777) != 0 {
+			return fmt.Errorf("invalid file mode for %s", entry.Path)
+		}
+		if manifest.SchemaVersion == 2 && entry.Owner != SupervisorOwner && entry.Owner != ApplicationOwner || manifest.SchemaVersion == 1 && entry.Owner != "" {
+			return fmt.Errorf("invalid or missing ownership for %s", entry.Path)
+		}
+
 		switch entry.Type {
 		case "file":
 			if !digest.Valid(entry.Blob) || entry.Size < 0 || entry.Target != "" {
@@ -252,11 +175,11 @@ func Delta(previous, current Manifest) ([]statejournal.Operation, error) {
 	for _, entry := range creates {
 		switch entry.Type {
 		case "directory":
-			operations = append(operations, statejournal.Operation{Kind: "directory_ensure", Path: entry.Path, Mode: entry.Mode})
+			operations = append(operations, statejournal.Operation{Kind: "directory_ensure", Path: entry.Path, Mode: entry.Mode, Owner: entry.Owner})
 		case "file":
-			operations = append(operations, statejournal.Operation{Kind: "file_upsert", Path: entry.Path, Mode: entry.Mode, Blob: entry.Blob, Size: entry.Size})
+			operations = append(operations, statejournal.Operation{Kind: "file_upsert", Path: entry.Path, Mode: entry.Mode, Owner: entry.Owner, Blob: entry.Blob, Size: entry.Size})
 		case "symlink":
-			operations = append(operations, statejournal.Operation{Kind: "symlink_set", Path: entry.Path, Target: entry.Target})
+			operations = append(operations, statejournal.Operation{Kind: "symlink_set", Path: entry.Path, Target: entry.Target, Mode: entry.Mode, Owner: entry.Owner})
 		}
 	}
 	return operations, nil

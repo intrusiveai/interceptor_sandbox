@@ -5,6 +5,7 @@ package main
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"flag"
@@ -12,14 +13,18 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/intrusive-ai/interceptor-sandbox/internal/adaptive"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/contracttest"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/digest"
 	evidencepolicy "github.com/intrusive-ai/interceptor-sandbox/internal/evidence"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/localapi"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/ociruntime"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/session"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/snapshot"
 )
@@ -29,6 +34,7 @@ var client = &http.Client{Timeout: 6 * time.Minute}
 const campaign = "local-api-smoke"
 
 var sequence int
+var apiContract = func() *contracttest.Validator { v, err := contracttest.New(); must(err); return v }()
 
 func must(err error) {
 	if err != nil {
@@ -51,6 +57,7 @@ func postRaw(path string, raw []byte) adaptive.GatewayResponse {
 	defer response.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(response.Body, 5<<20))
 	must(err)
+	must(apiContract.Exchange(path, raw, response.StatusCode, data))
 	var result adaptive.GatewayResponse
 	if err = json.Unmarshal(data, &result); err != nil {
 		panic(fmt.Sprintf("%s HTTP %d: %s: %v", path, response.StatusCode, data, err))
@@ -115,13 +122,36 @@ func counter(root, id string, want int) {
 	if root == "" {
 		return
 	}
-	data, err := os.ReadFile(filepath.Join(root, "sessions", id, "generations", "1", "runtime", "state", "app", "turns.json"))
-	must(err)
+	data := readMutableFile(root, id, "/state/app/turns.json")
 	var count struct {
 		Count int `json:"count"`
 	}
 	must(json.Unmarshal(data, &count))
 	require(count.Count == want, fmt.Sprintf("%s counter=%d want=%d", id, count.Count, want))
+}
+
+// Host runtime folders are staging only. Qualification reads the actual target
+// through its verified Docker binding, using the existing application identity.
+func readMutableFile(root, id, path string) []byte {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	docker, container, err := (ociruntime.Docker{}).ForSession(ctx, root, id)
+	must(err)
+	running, err := docker.Running(ctx, container)
+	must(err)
+	require(running, "mutable-file qualification requires a running target")
+	command := exec.CommandContext(ctx, "docker", "--host", docker.Endpoint, "exec", "--user", "20000:"+strconv.Itoa(os.Getgid()), container, "cat", path)
+	for _, value := range os.Environ() {
+		key, _, _ := strings.Cut(value, "=")
+		switch key {
+		case "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_TLS", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH":
+			continue
+		}
+		command.Env = append(command.Env, value)
+	}
+	data, err := command.CombinedOutput()
+	require(err == nil, fmt.Sprintf("read live mutable state: %v: %s", err, data))
+	return data
 }
 func evidence(output, id string, maximum int64, partial ...bool) {
 	raw, _ := json.Marshal(map[string]string{"api_version": localapi.Version, "campaign_id": campaign, "session_id": id})
@@ -163,6 +193,9 @@ func evidence(output, id string, maximum int64, partial ...bool) {
 			must(json.NewDecoder(reader).Decode(&bundle))
 		}
 	}
+	_, err = file.Seek(0, io.SeekStart)
+	must(err)
+	must(apiContract.EvidenceArchive(file))
 	require(seen["execution.json"] && seen["state.jsonl"] && seen["events.jsonl"] && seen["manifest.json"], "missing protected evidence members")
 	require(bundle.SessionID == id && bundle.CampaignID == campaign, "evidence scope mismatch")
 	expectedState := "complete"
@@ -178,18 +211,27 @@ func evidence(output, id string, maximum int64, partial ...bool) {
 func main() {
 	output := flag.String("output", "", "directory for evidence and result JSON")
 	evidenceFailure := flag.Bool("evidence-failure", false, "test required evidence failure after state qualification; requires isolated --data-root")
+	privateFiles := flag.Bool("private-files", false, "qualify private mutable-file capture and restore")
+	privateOracles := flag.Bool("private-file-oracles", false, "qualify private-file oracles without snapshot support")
 	stateSnapshots := flag.Bool("state-snapshots", false, "qualify packaged application state snapshot and restore")
 	commandOnly := flag.Bool("command-only", false, "qualify a minimal command target's echo operation without snapshots or model calls")
+	modelResponse := flag.Bool("model-response", false, "qualify model-response injection with a real target SDK")
+	httpsSeams := flag.Bool("https-seams", false, "qualify declared HTTPS egress")
 	adapterOnly := flag.Bool("adapter-only", false, "qualify the stateful invocation-adapter example without snapshots or model calls")
 	maximumEvidence := flag.Int64("evidence-max-bytes", evidencepolicy.DefaultMaxBytes, "local evidence archive acceptance ceiling")
 	root := flag.String("data-root", "", "optional host data root to check reference application state rollback")
 	customerSupport := flag.Bool("customer-support", false, "qualify the customer-support application")
 	postgresql := flag.Bool("postgresql", false, "qualify managed PostgreSQL")
 	flag.Parse()
+	// No attach or target operation is sent until the API identity matches.
+	require(checkContract(client, "http://127.0.0.1:8080", "999.0.0", supportedContractSHA256) != nil, "contract mismatch was accepted")
+	require(checkContract(client, "http://127.0.0.1:8080", supportedContractVersion, strings.Repeat("0", 64)) != nil, "contract hash mismatch was accepted")
+	must(checkContract(client, "http://127.0.0.1:8080", supportedContractVersion, supportedContractSHA256))
 	_, limitErr := evidencepolicy.ParseLimit(strconv.FormatInt(*maximumEvidence, 10))
 	must(limitErr)
 	require(*output != "", "--output is required")
 	must(os.MkdirAll(*output, 0700))
+	must(os.WriteFile(filepath.Join(*output, "contract-check.json"), []byte(`{"transport":"http","interceptor_contract_version":"`+supportedContractVersion+`","interceptor_contract_sha256":"`+supportedContractSHA256+`","matched_before_attach":true,"mismatch_rejected":true,"hash_mismatch_rejected":true}`+"\n"), 0600))
 	attach := localapi.AttachRequest{WorkerInstanceID: "smoke-worker", APIVersion: localapi.Version, CampaignID: campaign, AllowTargetStop: true}
 	var attached struct {
 		Binding          localapi.Binding `json:"binding"`
@@ -200,6 +242,22 @@ func main() {
 	must(limitErr)
 	limit := min(*maximumEvidence, attached.EvidenceMaxBytes)
 	first := attached.Binding
+	if *privateOracles {
+		qualifyPrivateOracles(first, *output, limit)
+		return
+	}
+	if *privateFiles {
+		qualifyPrivateFiles(first, *output, limit, *root)
+		return
+	}
+	if *modelResponse {
+		qualifyModelResponse(first, *output, limit)
+		return
+	}
+	if *httpsSeams {
+		qualifyHTTPSSeams(first, *output, limit)
+		return
+	}
 	if *customerSupport {
 		qualifyCustomerSupport(first, *output, limit)
 		return

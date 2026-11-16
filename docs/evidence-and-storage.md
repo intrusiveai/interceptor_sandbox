@@ -38,12 +38,17 @@ The layout is conceptually:
     artifacts.json              verified payload descriptors
     attempts.json               immutable attempt contexts and ancestry
     checkpoints/*.json          logical restore points
-    generations/                session-specific writable roots
+    generations/                mutable-root staging (live files in Docker volumes)
     logs/
       application.stdout.log
       application.stderr.log
     sockets/                    protected spool or Unix bridge artifacts
 ```
+
+On Linux and macOS, live mutable roots reside in session-owned Docker volumes to preserve
+Linux ownership and permissions; the host runtime folders are staging data.
+Checkpoints and evidence still live under this data root. Session purge verifies
+and removes the associated volumes. See [snapshots and restore](snapshots-and-restore.md#private-application-files).
 
 Treat the entire root as sensitive test data. Configure it on a local filesystem
 owned by the operator; do not place it in a broadly shared or synchronized
@@ -188,6 +193,13 @@ state change references them; exporting only changed files would leave the archi
 incomplete. The same behavior applies to CLI and local API exports, within their
 configured archive-size limits.
 
+The archive's structured records are part of the Interceptor/Operator API
+contract. File manifests use schema 2 with logical ownership; historical schema 1
+has no ownership. Journal transactions retain schema 1, and their filesystem
+operations can carry ownership. Consumers must understand these formats and
+verify the native hashes, including ownership, before accepting evidence. A
+successful download with a valid archive checksum is only the transfer check.
+
 Application stdout/stderr and transient bridge artifacts are not included.
 Export first verifies the core chains and bindings. The archive is not encrypted
 or signed; protect it with normal evidence-handling controls and add an external
@@ -230,3 +242,11 @@ blobs from those journals. Each blob appears once. Export verifies its digest an
 recorded size; a missing or corrupt blob fails the export and leaves any previous
 output archive intact. Export uses retained bytes and never reconnects to a live
 database to reconstruct missing evidence.
+
+## HTTPS seam diagnostics
+
+Declared HTTPS seams create connection logs and optional bounded payload debug
+files under the session `logs/` directory. These files are not campaign evidence,
+are excluded from standard evidence exports and snapshots, and are removed by
+session purge. Debug capture is disabled by default; see
+[HTTPS egress troubleshooting](https-egress.md#logging-and-troubleshooting).

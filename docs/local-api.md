@@ -42,6 +42,7 @@ is the one binary response. Send `Content-Type: application/json`.
 
 | Route | Request | Purpose |
 |---|---|---|
+| `/v1/contract-version` | Empty JSON object (`{}`) | Read the running Interceptor's API contract version and complete-document SHA-256 before campaign attachment. |
 | `/v1/attach` | Lifecycle version, `campaign_id`, `worker_instance_id`, optional `allow_target_stop` | Bind the first campaign and return current session, native binding and capabilities. |
 | `/v1/operations` | Existing v1alpha2 `{request, body}` envelope | Native experiments, snapshot creation, status, observations and admission closure. |
 | `/v1/lifecycle` | Lifecycle request described below | Restore or confirmed target stop. |
@@ -53,6 +54,72 @@ is the one binary response. Send `Content-Type: application/json`.
 No `/v1/cross-vm`, lease endpoint, separate gateway listener or standalone
 `interceptor restore` launcher is supported. Existing administrator CLI commands
 remain host administration tools; Operator uses this API.
+
+## Automatic contract compatibility
+
+Before attaching a campaign, an integration calls `POST /v1/contract-version`
+with `{}` on the same Interceptor API instance it will use for execution:
+
+```json
+{"status":200,"body":{"interceptor_contract_version":"0.4.0","interceptor_contract_sha256":"<64 lowercase hexadecimal digits>"},"session_revision":0}
+```
+
+This endpoint returns the service's embedded API contract version and SHA-256. It
+requires no campaign ID, calls no target and changes no state. It uses the existing
+trusted-local-host boundary and remains available before attachment. Its request
+and response shape stay stable across contract updates.
+
+The consumer pins the contract version its integration implements and the SHA-256
+of that contract's complete bytes. Both must match exactly before attachment and
+normal environment capability and policy checks.
+A mismatch stops the campaign and reports expected and actual versions and hashes. A missing
+endpoint, failed request, or missing, malformed or unreadable version or hash also stops
+execution with a compatibility error. There is no CLI fallback, version range,
+negotiation or Internet lookup. Product release versions need not match.
+Operator pins the contract version and document hash, not Interceptor's source commit or the commit
+that introduced or published the contract. Interceptor updates retaining that
+contract version and exact document bytes do not require an Operator update. Source commits recorded in
+release metadata identify the built artifacts; they are not compatibility checks.
+The expected hash is recorded with the integration after review, never adopted
+from the running service. No document download is required at campaign startup.
+
+`interceptor_contract_sha256` covers every byte of the embedded UTF-8 contract,
+including formatting and its final newline. It is not the hash of the API response,
+release archive, executable, target capability manifest or a canonicalized subset.
+The digest value is not embedded in the document itself. Contract `0.2.0` introduced this
+API response field; an integration pinned to `0.1.0` will report a version mismatch.
+
+Users do not export or supply a contract to run campaigns. The optional
+`interceptor contract --json` command exports the exact document bytes for
+developers and release verification; it is not an Operator API operation or a
+startup requirement. The contract is a self-contained OpenAPI 3.1 JSON document. Its `info.version`
+is the contract version; `openapi` identifies the specification format. It defines
+only Operator-facing API routes,
+operations, requests, responses, prerequisites, errors and guarantees. It excludes
+administrative CLI commands and general Interceptor feature inventories. The environment
+capability manifest still determines what the particular sandbox offers.
+
+During integration development, use the document's request/response schemas to
+validate traffic. `/v1/operations` has typed `oneOf` requests selected by
+`request.operation`; each variant's `x-response-schema` reference links its
+success response. All definitions are included in the export, so validation can
+work offline. Descriptions and behavioral tests cover ordering, retries and
+evidence guarantees that schemas cannot establish. Campaign startup requires
+only the pinned version/hash check, not downloading or parsing this document.
+`interceptor run` retains its existing startup behavior; the compatibility check
+precedes campaign attachment and operations, not initial sandbox creation.
+
+For optional manual verification, save the export without reformatting it and
+compare its SHA-256 with the API field:
+
+```sh
+interceptor contract --json > contract.json
+shasum -a 256 contract.json
+```
+
+On Linux, `sha256sum contract.json` is also suitable. Documentation-only changes
+can change the digest while keeping the same API contract version. Such edits
+block an integration retaining the previous hash until its pin is updated.
 
 ## Attach and native experiments
 
@@ -157,6 +224,15 @@ fixed for an exact retry, including target, operation ID, request ID, deadline a
 expected native revision. A new worker can also query `operation.status` without
 copying the original request. Lifecycle duplicate comparison likewise excludes
 caller attribution while preserving the admitted request in its ledger.
+
+A native `operation.status` lookup by operation ID returns HTTP 200 when the
+record is found, independently of whether the operation has finished. While
+`state` is `running`, its nested `response` can be exactly
+`{"status":0,"session_revision":0}` with no `body`: no response has been assigned
+yet. This is a stored placeholder, not an HTTP status. `completed` and `unknown`
+records contain normal response data. Retrying a still-running command itself
+returns status 202 with `operation_in_progress`; lifecycle records also use that
+explicit pending response, not the native placeholder.
 
 ## Snapshot and restore
 
@@ -300,6 +376,13 @@ and streams the completed archive with its full `Content-Length`,
 `X-Content-SHA256: sha256:...` and `X-Evidence-Max-Bytes` headers. No caller chooses
 a host output path. Native evidence completeness/partial markers are retained.
 
+Contract `0.3.0` also describes the structured archive contents, including
+ownership-aware file manifests and journal operations. Consumers must implement
+those formats and native digest rules before adopting the new version/hash pins.
+A matching transport checksum does not replace native provenance verification.
+Historical schema-1 file manifests remain readable evidence; schema-2 manifests
+require logical ownership. Neither implies permission to restore legacy state.
+
 The per-session archive ceiling defaults to **4 GiB (4294967296 bytes)**.
 `interceptor run --evidence-max-bytes <bytes>` overrides
 `INTERCEPTOR_EVIDENCE_MAX_BYTES`, which overrides the default. Accept integer byte
@@ -434,7 +517,8 @@ go run ./examples/local-api-smoke --output /tmp/local-api-evidence \
 ```
 
 It creates its own test campaign, invokes the reference application before and
-after restore, verifies filesystem rollback when `--data-root` is supplied,
+after restore, verifies filesystem rollback in the bound Docker container when
+`--data-root` is supplied (host runtime folders contain staging data),
 rejects a stale mutation, stops the target and verifies complete protected exports
 for both sessions. It is a qualification client, not Operator implementation.
 

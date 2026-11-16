@@ -20,6 +20,7 @@ import (
 type Operation struct {
 	Kind       string          `json:"kind"`
 	Path       string          `json:"path,omitempty"`
+	Owner      string          `json:"owner,omitempty"`
 	Mode       uint32          `json:"mode,omitempty"`
 	Blob       string          `json:"blob,omitempty"`
 	Size       int64           `json:"size,omitempty"`
@@ -203,6 +204,9 @@ func VerifyFile(path string) ([]Transaction, error) {
 }
 
 func ValidateOperation(operation Operation) error {
+	if operation.Owner != "" && operation.Owner != "supervisor" && operation.Owner != "application" {
+		return errors.New("unsupported filesystem ownership role")
+	}
 	switch operation.Kind {
 	case "database_checkpoint":
 		if operation.Service == "" || !digest.Valid(operation.Blob) || operation.Size < 0 || !json.Valid(operation.Value) {
@@ -213,7 +217,7 @@ func ValidateOperation(operation Operation) error {
 		if err := validMutablePath(operation.Path); err != nil || !digest.Valid(operation.Blob) || operation.Size < 0 {
 			return errors.New("file_upsert requires a clean absolute path, blob digest, and nonnegative size")
 		}
-		return rejectFields(operation, "kind", "path", "mode", "blob", "size")
+		return rejectFields(operation, "kind", "path", "mode", "owner", "blob", "size")
 	case "file_delete":
 		if err := validMutablePath(operation.Path); err != nil {
 			return fmt.Errorf("%s requires a clean absolute path", operation.Kind)
@@ -223,7 +227,7 @@ func ValidateOperation(operation Operation) error {
 		if err := validMutablePath(operation.Path); err != nil {
 			return fmt.Errorf("%s requires a clean absolute path", operation.Kind)
 		}
-		return rejectFields(operation, "kind", "path", "mode")
+		return rejectFields(operation, "kind", "path", "mode", "owner")
 	case "directory_delete":
 		if err := validMutablePath(operation.Path); err != nil {
 			return fmt.Errorf("%s requires a clean absolute path", operation.Kind)
@@ -233,7 +237,7 @@ func ValidateOperation(operation Operation) error {
 		if err := validMutablePath(operation.Path); err != nil || operation.Target == "" || filepath.IsAbs(operation.Target) {
 			return errors.New("symlink_set requires a clean absolute path and relative target")
 		}
-		return rejectFields(operation, "kind", "path", "target")
+		return rejectFields(operation, "kind", "path", "target", "mode", "owner")
 	case "service_put":
 		if operation.Service == "" || operation.Collection == "" || operation.Key == "" || len(operation.Value) == 0 || !json.Valid(operation.Value) {
 			return errors.New("service_put requires service, collection, key, and JSON value")
@@ -275,7 +279,7 @@ func rejectFields(operation Operation, allowed ...string) error {
 		allowedSet[field] = true
 	}
 	present := map[string]bool{
-		"kind": operation.Kind != "", "path": operation.Path != "", "mode": operation.Mode != 0,
+		"owner": operation.Owner != "", "kind": operation.Kind != "", "path": operation.Path != "", "mode": operation.Mode != 0,
 		"blob": operation.Blob != "", "size": operation.Size != 0, "target": operation.Target != "",
 		"service": operation.Service != "", "collection": operation.Collection != "", "key": operation.Key != "",
 		"value": len(operation.Value) != 0, "id": operation.ID != "",

@@ -299,3 +299,11 @@ changes to identity grants, delegations, and issuer failure settings. Restore
 creates a new session from the approved starting point and reapplies only
 changes that were successfully recorded. See [Snapshots and
 restore](snapshots-and-restore.md).
+
+## Declared HTTPS egress
+
+An optional HTTPS seam routes a declared hostname from the sandbox TLS front door
+through a separate typed private bridge lane to a fixed HTTPS origin on the host.
+It reuses spool or Unix transport, cancellation, storage limits and lifecycle
+controls. It does not use model codecs, service response rewriting or campaign
+recording. See [Declared HTTPS egress](https-egress.md).

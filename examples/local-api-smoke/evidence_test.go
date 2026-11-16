@@ -4,12 +4,16 @@ import (
 	"archive/tar"
 	"bytes"
 	"encoding/json"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/evaluation"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/session"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/snapshot"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/intrusive-ai/interceptor-sandbox/internal/adaptive"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/digest"
@@ -22,11 +26,28 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 func TestEvidenceDownloadVerifiesBeforeCommit(t *testing.T) {
 	var source bytes.Buffer
 	archive := tar.NewWriter(&source)
-	bundle, _ := json.Marshal(adaptive.EvidenceBundle{SessionID: "session-test", CampaignID: campaign, Completeness: adaptive.EvidenceCompleteness{State: "complete"}})
-	for _, name := range []string{"execution.json", "state.jsonl", "events.jsonl", "manifest.json", "evidence-bundle.json"} {
-		data := []byte("{}")
-		if name == "evidence-bundle.json" {
-			data = bundle
+	metadata := session.Metadata{SchemaVersion: 1, ID: "session-test", CampaignID: campaign, Phase: session.Stopped, FeedbackProfile: "black-box", CreatedAt: time.Unix(0, 0).UTC(), UpdatedAt: time.Unix(0, 0).UTC()}
+	report := evaluation.Report{}
+	bundle, err := adaptive.BuildEvidenceBundle(metadata, nil, nil, nil, nil, report, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution := adaptive.ExecutionState{APIVersion: adaptive.ExecutionStateVersion, SessionID: metadata.ID, Owner: &adaptive.ExecutionOwner{CampaignID: campaign, Principal: "operator", WorkerInstanceID: "test-worker", RunRevision: 1, BoundAt: metadata.CreatedAt, ClosedAt: &metadata.UpdatedAt, ClosureReason: "session_stopped"}, Records: map[string]*adaptive.OperationRecord{}}
+	bundle, err = adaptive.BindExecutionEvidence(bundle, execution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	members := map[string]any{
+		"execution.json":     execution,
+		"session.json":       metadata,
+		"manifest.json":      map[string]any{"schema_version": 1, "session_id": metadata.ID, "environment_digest": digest.Bytes(nil), "application_digest": digest.Bytes(nil), "interceptor_version": "test"},
+		"file-manifest.json": snapshot.EmptyManifest(), "final-evaluation.json": report, "evidence-bundle.json": bundle,
+		"state.jsonl": nil, "events.jsonl": nil,
+	}
+	for name, value := range members {
+		var data []byte
+		if value != nil {
+			data, _ = json.Marshal(value)
 		}
 		if err := archive.WriteHeader(&tar.Header{Name: name, Size: int64(len(data)), Mode: 0600}); err != nil {
 			t.Fatal(err)

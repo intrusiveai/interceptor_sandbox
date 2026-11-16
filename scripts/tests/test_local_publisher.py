@@ -95,7 +95,7 @@ class LocalPublisherTest(unittest.TestCase):
         self.assertEqual(manifest["product"], "interceptor_sandbox")
         self.assertFalse(manifest["working_tree"])
         self.assertEqual(manifest["source_revision"],
-                         "c651c5fa47346f1ca02abe33791667f838b59e03")
+                         "50b76488b2db02fc07acc9c601b682a861a658f7")
         self.assertEqual(len(manifest["sha256"]), 11)
         for name, digest in manifest["sha256"].items():
             self.assertEqual(hashlib.sha256((PUBLISHER / name).read_bytes()).hexdigest(),

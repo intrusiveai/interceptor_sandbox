@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -60,6 +59,13 @@ func TestPackagedLinuxCompanion(t *testing.T) {
 			if err := copyLinuxBinary(link, destination, "darwin", arch, "0.1.0", strings.Repeat("a", 40)); err != nil {
 				t.Fatal(err)
 			}
+			metadata["platform"] = "linux/" + arch
+			writeMetadata(t, directory, metadata)
+			if err := copyLinuxBinary(link, destination+"-linux", "linux", arch, "0.1.0", strings.Repeat("a", 40)); err != nil {
+				t.Fatal(err)
+			}
+			metadata["platform"] = "darwin/" + arch
+			writeMetadata(t, directory, metadata)
 			copied, _ := os.ReadFile(destination)
 			if string(copied) != string(companion) {
 				t.Fatal("did not copy the packaged Linux bytes")
@@ -96,7 +102,7 @@ func TestPackagedLinuxCompanion(t *testing.T) {
 				_ = os.WriteFile(filepath.Join(directory, companionName), invalid, 0755)
 				metadata["linux_companion"].(map[string]any)["sha256"] = hexDigest(invalid)
 				writeMetadata(t, directory, metadata)
-				if _, err := packagedLinuxBinary(executable, arch, "0.1.0", strings.Repeat("a", 40)); err == nil {
+				if _, err := packagedLinuxBinary(executable, "darwin", arch, "0.1.0", strings.Repeat("a", 40)); err == nil {
 					t.Fatal("accepted invalid ELF")
 				}
 			}
@@ -104,22 +110,10 @@ func TestPackagedLinuxCompanion(t *testing.T) {
 	}
 }
 
-func TestLinuxCopiesRunningExecutableWithoutMetadata(t *testing.T) {
-	directory := t.TempDir()
-	executable, destination := filepath.Join(directory, "interceptor"), filepath.Join(directory, "copy")
-	data := []byte("existing Linux CLI")
-	if err := os.WriteFile(executable, data, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := copyLinuxBinary(executable, destination, "linux", "amd64", "0.1.0", ""); err != nil {
-		t.Fatal(err)
-	}
-	actual, _ := os.ReadFile(destination)
-	if string(actual) != string(data) {
-		t.Fatal("Linux self-copy changed bytes")
-	}
-	if err := copyLinuxBinary(executable+"-missing", destination, "linux", "amd64", "0.1.0", ""); err == nil {
-		t.Fatal("missing Linux executable accepted")
+func TestLinuxRequiresPackagedCompanion(t *testing.T) {
+	err := copyLinuxBinary("missing", filepath.Join(t.TempDir(), "copy"), "linux", "amd64", "0.1.0", "source")
+	if err == nil || !strings.Contains(err.Error(), "re-extract the complete linux-amd64") {
+		t.Fatalf("%v", err)
 	}
 }
 
@@ -128,14 +122,10 @@ func TestReleasedBuildNeverFallsBackToGo(t *testing.T) {
 	t.Cleanup(func() { buildinfo.Version, buildinfo.SourceCommit = oldVersion, oldSource })
 	buildinfo.Version, buildinfo.SourceCommit = "0.1.0", strings.Repeat("a", 40)
 	t.Setenv("PATH", t.TempDir())
-	// On Darwin the test executable has no release.json and must fail without
-	// searching the checkout; on Linux it must keep working without Go.
+	// Released CLIs on either host require their verified packaged companion.
 	err := buildLinuxBinary(context.Background(), filepath.Join(t.TempDir(), "interceptor"))
-	if runtime.GOOS == "darwin" && (err == nil || !strings.Contains(err.Error(), "re-extract the complete")) {
+	if err == nil || !strings.Contains(err.Error(), "re-extract the complete") {
 		t.Fatalf("expected release error without fallback: %v", err)
-	}
-	if runtime.GOOS == "linux" && err != nil {
-		t.Fatal(err)
 	}
 }
 

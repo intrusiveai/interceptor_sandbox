@@ -95,6 +95,7 @@
   "injection_surfaces": [
     "environment_state",
     "mcp_tool_result",
+    "model_response",
     "model_tool_result",
     "service_response"
   ],
@@ -151,6 +152,39 @@
       ],
       "carriers": [
         "mcp_tools_call_result"
+      ]
+    },
+    {
+      "model_codecs": [
+        "anthropic_messages",
+        "aws_bedrock_converse",
+        "google_generate_content",
+        "openai_chat_completions",
+        "openai_responses"
+      ],
+      "placement_root": "response-body",
+      "surface": "model_response",
+      "scopes": [
+        "once",
+        "standing"
+      ],
+      "placements": [
+        "replace",
+        "prepend",
+        "append",
+        "insert",
+        "merge"
+      ],
+      "selector_fields": [
+        "model_codec",
+        "call_ordinal",
+        "turn_id",
+        "request_body_json_pointer",
+        "request_body_equal",
+        "request_body_contain"
+      ],
+      "carriers": [
+        "model_client_response"
       ]
     },
     {
@@ -357,5 +391,5 @@
     "maximum_invocations": 200,
     "maximum_snapshots": 20
   },
-  "digest": "sha256:8116ad64a9ca5a1b9c98f3666737f93f858cc95a902f04dc1a1634fd6e2d146a"
+  "digest": "sha256:8f8549e8ce1f740b220364b02805e5ab94fdd5857c0d0ebad1c59f035568e77e"
 }

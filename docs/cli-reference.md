@@ -21,11 +21,25 @@ can supply the default provider URL for `run`; managed restore retains the origi
 
 ```sh
 interceptor version
+interceptor version --json
+interceptor contract --json
 interceptor help
 ```
 
 `--version` and `-version` are aliases for `version`; `-h` and `--help` are
 aliases for `help`.
+
+`version --json` reports `version`, `source_commit` and
+`interceptor_contract_version`. `contract --json` exports the exact bytes of the
+complete embedded OpenAPI 3.1 document for the Operator-facing API. Its independent
+contract version is `info.version`; `openapi` identifies the document format. Its
+SHA-256, including whitespace and the final newline, matches
+`interceptor_contract_sha256` returned by `/v1/contract-version`. The document
+describes API operations rather than administrative CLI commands or a target's
+capability manifest. Both commands work offline
+without Docker, a target, or runtime state. They are inspection and release tools;
+campaign compatibility uses the [local API](local-api.md#automatic-contract-compatibility)
+automatically, with no manual command required from the user.
 
 ## Environment commands
 
@@ -354,3 +368,10 @@ execution. See [host lifetime and recovery](host-lifetime.md).
 Host provider/store authentication, foreground execution, explicit environment keys
 and GitHub OIDC MUST follow [the common auth contract](cloud-authentication.md).
 Optional services run the same `run` command; see [host lifetime](host-lifetime.md).
+
+### HTTPS seam bindings
+
+`run --https-seam-config FILE` loads host-only fixed HTTPS destinations, optional
+private CA bundles, authentication references and per-seam debugging. Credentials
+use `--credential-config FILE`, which can be shared with model-provider references.
+Every Blueprint seam requires one binding. See [HTTPS egress](https-egress.md).

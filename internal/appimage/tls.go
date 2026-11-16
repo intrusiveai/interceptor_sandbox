@@ -59,6 +59,9 @@ func simulatedHostnames(blueprint *environment.Blueprint) []string {
 			seen[strings.ToLower(strings.TrimSuffix(hostname, "."))] = struct{}{}
 		}
 	}
+	for _, seam := range blueprint.Network.HTTPSSeams {
+		seen[strings.ToLower(strings.TrimSuffix(seam.Hostname, "."))] = struct{}{}
+	}
 	names := make([]string, 0, len(seen))
 	for name := range seen {
 		names = append(names, name)

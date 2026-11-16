@@ -56,6 +56,11 @@ func TestDeliveryExampleNativeFixtureAndVerification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if os.Getenv("INTERCEPTOR_UPDATE_CAPABILITY_FIXTURE") == "1" {
+		if err := os.WriteFile("testdata/capability-delivery.json", append(actual, '\n'), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	golden, err := os.ReadFile("testdata/capability-delivery.json")
 	if err != nil {
 		t.Fatal(err)

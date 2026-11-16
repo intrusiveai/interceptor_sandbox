@@ -55,6 +55,10 @@ class CatalogTests(unittest.TestCase):
 
     def entry(self, version="v1.0.0", tag="rc", digest="a"):
         result = {"version": version, "latest": True, "tags": [tag]}
+        if self.product != "interceptor_sandbox":
+            result["contract_package_version"] = "1.3.0"
+        if self.product != "attack_harness":
+            result["interceptor_contract_version"] = "2.0.0"
         if self.kind == "oci_image":
             result.update(image=f"ghcr.io/intrusiveai/attack_harness:{version}", digest="sha256:" + digest * 64)
         else:
@@ -94,6 +98,52 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual([e["version"] for e in entries], ["v1.0.0", "v0.9.0"])
         self.assertEqual([e["latest"] for e in entries], [True, False])
         self.assertEqual(entries[0]["tags"], ["release"])
+
+    def test_shared_contract_lifecycle(self):
+        if self.product == "interceptor_sandbox":
+            self.publish(dict(self.entry(), contract_package_version="1.3.0"), success=False)
+            return
+        missing = self.entry()
+        del missing["contract_package_version"]
+        self.publish(missing, success=False)
+        self.assertFalse((self.bucket / self.key).exists())
+        self.publish(self.entry())
+        candidate = self.get(self.key)
+        self.publish(dict(self.entry(tag="release"), contract_package_version="1.4.0"), success=False)
+        self.assertEqual(self.get(self.key), candidate)
+        rebuilt = dict(self.entry(digest="b"), contract_package_version="1.4.0")
+        self.publish(rebuilt)
+        self.publish(dict(rebuilt, tags=["release"]))
+        final = self.get(self.key)
+        self.assertEqual(json.loads(final)["releases"][0]["contract_package_version"], "1.4.0")
+        self.publish(dict(rebuilt, tags=["release"], contract_package_version="1.3.0"), success=False)
+        self.publish(rebuilt, success=False)
+        self.assertEqual(self.get(self.key), final)
+
+    def test_interceptor_contract_lifecycle(self):
+        if self.product == "attack_harness":
+            self.publish(dict(self.entry(), interceptor_contract_version="2.0.0"), success=False)
+            return
+        for invalid in [None, "", "2", "v2.0.0", "2.0.0-rc.1", "2.0.0\n"]:
+            self.publish(dict(self.entry(), interceptor_contract_version=invalid), success=False)
+        missing = self.entry()
+        del missing["interceptor_contract_version"]
+        self.publish(missing, success=False)
+        self.assertFalse((self.bucket / self.key).exists())
+        self.publish(self.entry())
+        candidate = self.get(self.key)
+        self.publish(dict(self.entry(tag="release"), interceptor_contract_version="2.1.0"), success=False)
+        self.assertEqual(self.get(self.key), candidate)
+        rebuilt = dict(self.entry(digest="b"), interceptor_contract_version="2.1.0")
+        self.publish(rebuilt)
+        self.publish(dict(rebuilt, tags=["release"]))
+        final = self.get(self.key)
+        published = json.loads(final)["releases"][0]
+        self.assertEqual(published["interceptor_contract_version"], "2.1.0")
+        self.assertEqual(published.get("contract_package_version"), self.entry().get("contract_package_version"))
+        self.publish(dict(rebuilt, tags=["release"], interceptor_contract_version="2.0.0"), success=False)
+        self.publish(rebuilt, success=False)
+        self.assertEqual(self.get(self.key), final)
 
     def test_conflicting_writer_is_merged_instead_of_lost(self):
         self.publish(self.entry())

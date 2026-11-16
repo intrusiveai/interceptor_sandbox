@@ -366,6 +366,9 @@ func Validate(directory string) (*ValidationReport, error) {
 		if service.Kind != "http_sink" {
 			add(fmt.Errorf("%s.kind %q is unsupported", prefix, service.Kind))
 		}
+		if _, _, err := services.SinkAllowlists(service.Options); err != nil {
+			add(fmt.Errorf("%s.options: %w", prefix, err))
+		}
 		add(validateListen(prefix+".listen", service.Listen, listens, service.ID))
 		add(validateHostnames(prefix, service.Hostnames, hostnames, service.ID))
 		if service.Response.Status < 100 || service.Response.Status > 599 {
@@ -379,6 +382,23 @@ func Validate(directory string) (*ValidationReport, error) {
 		}
 		if service.MaxCaptureBytes < 0 {
 			add(fmt.Errorf("%s.max_capture_bytes must not be negative", prefix))
+		}
+	}
+	seamIDs := map[string]struct{}{}
+	for i, seam := range blueprint.Network.HTTPSSeams {
+		prefix := fmt.Sprintf("network.https_seams[%d]", i)
+		add(validateID(prefix+".id", seam.ID, seamIDs))
+		_, attacker := attackerIDs[seam.ID]
+		_, issuer := identityResult.issuerIDs[seam.ID]
+		if _, exists := serviceIDs[seam.ID]; exists || attacker || issuer || seam.ID == "model-proxy" {
+			add(fmt.Errorf("%s.id conflicts with a service", prefix))
+		}
+		if seam.Hostname != strings.TrimSpace(seam.Hostname) {
+			add(fmt.Errorf("%s.hostname must not contain surrounding whitespace", prefix))
+		}
+		add(validateHostnames(prefix, []string{seam.Hostname}, hostnames, seam.ID))
+		if !blueprint.Network.DNS.Enabled || !blueprint.Network.TLS.Enabled {
+			add(errors.New("HTTPS seams require network DNS and TLS"))
 		}
 	}
 	if (blueprint.Network.DNS.Enabled || blueprint.Network.HTTP.Enabled || blueprint.Network.TLS.Enabled) && len(hostnames) == 0 {
@@ -441,7 +461,8 @@ func Validate(directory string) (*ValidationReport, error) {
 		if credential.Value == "" {
 			add(fmt.Errorf("%s.value is required", prefix))
 		}
-		if _, exists := serviceIDs[credential.AcceptedBy]; !exists && credential.AcceptedBy != "model-proxy" {
+		_, seam := seamIDs[credential.AcceptedBy]
+		if _, exists := serviceIDs[credential.AcceptedBy]; !exists && !seam && credential.AcceptedBy != "model-proxy" {
 			add(fmt.Errorf("%s.accepted_by references unknown service %q", prefix, credential.AcceptedBy))
 		}
 		if current, exists := blueprint.Application.Launch.Environment[credential.EnvironmentVariable]; exists && current != credential.Value {
@@ -449,14 +470,34 @@ func Validate(directory string) (*ValidationReport, error) {
 		}
 		credentialVariables[credential.EnvironmentVariable] = credential.Value
 	}
+	credentialNameExceptions := map[string]struct{}{}
+	for i, name := range blueprint.Application.Launch.CredentialNameExceptions {
+		prefix := fmt.Sprintf("application.launch.credential_name_exceptions[%d]", i)
+		if !environmentName.MatchString(name) {
+			add(fmt.Errorf("%s must be an exact valid environment variable name", prefix))
+		}
+		if _, exists := credentialNameExceptions[name]; exists {
+			add(fmt.Errorf("%s duplicates %q", prefix, name))
+		}
+		credentialNameExceptions[name] = struct{}{}
+		if _, exists := blueprint.Application.Launch.Environment[name]; !exists {
+			add(fmt.Errorf("%s references %q, which is not declared in application.launch.environment", prefix, name))
+		}
+		if _, exists := credentialVariables[name]; exists {
+			add(fmt.Errorf("%s cannot exempt %q because it is also declared as a synthetic credential", prefix, name))
+		}
+	}
 	for name, value := range blueprint.Application.Launch.Environment {
 		upper := strings.ToUpper(name)
 		looksCredential := strings.Contains(upper, "TOKEN") || strings.Contains(upper, "SECRET") || strings.Contains(upper, "PASSWORD") || strings.HasSuffix(upper, "_KEY")
 		if !looksCredential {
 			continue
 		}
+		if _, exempt := credentialNameExceptions[name]; exempt {
+			continue
+		}
 		if declared, exists := credentialVariables[name]; !exists || declared != value {
-			add(fmt.Errorf("credential-like application environment variable %q must be declared as a synthetic credential", name))
+			add(fmt.Errorf("credential-like application environment variable %q must be declared as a synthetic credential with the same value, or, for ordinary non-secret configuration, listed by exact name in application.launch.credential_name_exceptions", name))
 		}
 	}
 

@@ -14,16 +14,22 @@ const TLSProbePath = "/.well-known/interceptor/tls-probe"
 // It routes only exact Blueprint hostnames and rejects ambiguous TLS Host/SNI
 // combinations before a service handler observes the request.
 type HostRouter struct {
-	routes   map[string]http.Handler
-	recorder *recording.Writer
+	Rejected   func(string, string)
+	routes     map[string]http.Handler
+	recorder   *recording.Writer
+	unobserved map[string]bool
 }
 
-func NewHostRouter(routes map[string]http.Handler, recorder *recording.Writer) *HostRouter {
+func NewHostRouter(routes map[string]http.Handler, recorder *recording.Writer, unobserved ...string) *HostRouter {
 	copy := make(map[string]http.Handler, len(routes))
 	for hostname, handler := range routes {
 		copy[normalizeHostname(hostname)] = handler
 	}
-	return &HostRouter{routes: copy, recorder: recorder}
+	quiet := map[string]bool{}
+	for _, name := range unobserved {
+		quiet[normalizeHostname(name)] = true
+	}
+	return &HostRouter{routes: copy, recorder: recorder, unobserved: quiet}
 }
 
 func (r *HostRouter) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -54,6 +60,16 @@ func (r *HostRouter) ServeHTTP(writer http.ResponseWriter, request *http.Request
 }
 
 func (r *HostRouter) gap(host string, request *http.Request, reason string) {
+	quietHost := host
+	if request.TLS != nil && r.unobserved[normalizeHostname(request.TLS.ServerName)] {
+		quietHost = normalizeHostname(request.TLS.ServerName)
+	}
+	if r.unobserved[quietHost] {
+		if r.Rejected != nil {
+			r.Rejected(quietHost, reason)
+		}
+		return
+	}
 	if r.recorder == nil {
 		return
 	}

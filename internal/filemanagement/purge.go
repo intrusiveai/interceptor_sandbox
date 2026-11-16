@@ -103,6 +103,13 @@ func Purge(ctx context.Context, root string, selection PurgeSelection, docker oc
 		if !selected[m.ID] {
 			continue
 		}
+		bound, _, err := docker.ForSession(ctx, root, m.ID)
+		if err != nil {
+			return err
+		}
+		if err := bound.PurgeMutableVolumes(ctx); err != nil {
+			return fmt.Errorf("purge mutable storage %s: %w", m.ID, err)
+		}
 		relative := filepath.Join("sessions", m.ID)
 		group, err := parent.OpenRoot(relative)
 		if err != nil {

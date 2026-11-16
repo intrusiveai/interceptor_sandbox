@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 	"os/exec"
 	pathpkg "path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,6 +34,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/environment"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/evaluation"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/httpsseam"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/identity"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/injection"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/postgresql"
@@ -50,6 +53,10 @@ const (
 )
 
 type Server struct {
+	snapshotHelper     *snapshotHelper
+	seamLog            *os.File
+	httpsSeams         *httpsseam.Client
+	applicationExited  chan struct{}
 	databases          map[string]*postgresql.Engine
 	databaseProxies    map[string]*postgresql.Proxy
 	databaseOracleMu   sync.Mutex
@@ -141,6 +148,12 @@ type Turn struct {
 }
 
 func Run(ctx context.Context) error {
+	if os.Getenv("INTERCEPTOR_INITIALIZE_FILES") == "1" {
+		if err := initializeMutablePermissions(ctx); err != nil {
+			return fmt.Errorf("initialize mutable ownership: %w", err)
+		}
+	}
+
 	if err := adoptSupervisorIdentity(envInt("INTERCEPTOR_HOST_UID", 0), envInt("INTERCEPTOR_HOST_GID", 0)); err != nil {
 		return fmt.Errorf("establish supervisor identity: %w", err)
 	}
@@ -213,13 +226,9 @@ func New() (*Server, error) {
 	}
 	journal.SetFailureHandler(recorder.Fail)
 	blobRoot := containerBlobs
-	for _, service := range report.Blueprint.Services {
-		if service.Kind == "postgresql" {
-			// Database wrappers put mounts beneath a native, private ancestor.
-			// Open its real directory; blobstore intentionally rejects aliases.
-			blobRoot = "/run/interceptor-private/interceptor-blobs"
-			break
-		}
+	if appimage.NeedsPrivateMounts(report.Blueprint) {
+		// Open the real native-protected mount; blobstore rejects aliases.
+		blobRoot = "/run/interceptor-private/interceptor-blobs"
 	}
 	blobs, err := blobstore.Open(blobRoot, report.Blueprint.Limits.MaxBlobBytes)
 	if err != nil {
@@ -278,14 +287,18 @@ func New() (*Server, error) {
 	return &Server{
 		execution: execution, blueprint: report.Blueprint, metadata: metadata, paths: paths, recorder: recorder, journal: journal, blobs: blobs, artifacts: artifacts, attempts: attempts,
 		injections: injection.NewManager(journal, recorder), identities: map[string]*identity.Authority{}, identityEnv: map[string]string{},
-		identityStop: make(chan struct{}),
-		services:     map[string]services.ManagedHandler{}, sinks: map[string]*services.SinkHandler{}, hostRoutes: map[string]http.Handler{},
+		identityStop: make(chan struct{}), applicationExited: make(chan struct{}),
+		services: map[string]services.ManagedHandler{}, sinks: map[string]*services.SinkHandler{}, hostRoutes: map[string]http.Handler{},
 		appUID: appUID, appGID: appGID, hostUID: envInt("INTERCEPTOR_HOST_UID", 0), hostGID: envInt("INTERCEPTOR_HOST_GID", 0),
 		turns: map[string]Turn{}, oracleState: map[string]evaluation.OracleResult{}, virtualTime: report.Blueprint.Time.Base.UTC(), done: make(chan error, 1),
 	}, nil
 }
 
 func (s *Server) Start(ctx context.Context) error {
+	if err := s.startSnapshotHelper(); err != nil {
+		return fmt.Errorf("start snapshot reader: %w", err)
+	}
+
 	if err := s.prepareMutableRoots(); err != nil {
 		return err
 	}
@@ -403,7 +416,10 @@ func (s *Server) startSyntheticServices() error {
 		return err
 	}
 	for _, definition := range s.blueprint.AttackerServices {
-		methods, paths := optionStrings(definition.Options["methods"]), optionStrings(definition.Options["paths"])
+		methods, paths, err := services.SinkAllowlists(definition.Options)
+		if err != nil {
+			return fmt.Errorf("attacker service %s: %w", definition.ID, err)
+		}
 		limit := definition.MaxCaptureBytes
 		if limit == 0 {
 			limit = 1 << 20
@@ -463,20 +479,62 @@ func (s *Server) simulatedHostnames() []string {
 }
 
 func (s *Server) startNetworkSimulation() error {
+	quiet := []string{}
+	seamIDs := map[string]string{}
+	var diagnosticMu sync.Mutex
+	connectionFailure := func(id, category string) {
+		diagnosticMu.Lock()
+		defer diagnosticMu.Unlock()
+		if s.seamLog != nil {
+			_ = json.NewEncoder(s.seamLog).Encode(map[string]any{"time": time.Now().UTC(), "session": s.metadata.ID, "seam": id, "event": "failed", "category": category})
+		}
+	}
+	if len(s.blueprint.Network.HTTPSSeams) > 0 {
+		var stripped []string
+		data, err := os.ReadFile(filepath.Join(s.paths.Sockets, "https-seam-policy.json"))
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(data, &stripped); err != nil {
+			return err
+		}
+		transport := s.metadata.BridgeTransport
+		path := filepath.Join(s.paths.Sockets, "https-seam-spool")
+		if transport == "unix" {
+			path = filepath.Join(s.paths.Sockets, "https-seam.sock")
+		}
+		client, err := httpsseam.NewClient(s.metadata.ID, transport, path, s.blueprint.Limits.MaxBlobBytes, httpsseam.Timeout(s.blueprint), stripped)
+		if err != nil {
+			return err
+		}
+		s.seamLog, err = os.OpenFile(filepath.Join(s.paths.Logs, "https-seam-local.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			return err
+		}
+		client.ConnectionFailure = connectionFailure
+		s.httpsSeams = client
+		for _, seam := range s.blueprint.Network.HTTPSSeams {
+			quiet = append(quiet, seam.Hostname)
+			seamIDs[strings.ToLower(strings.TrimSuffix(seam.Hostname, "."))] = seam.ID
+			s.registerHostRoutes([]string{seam.Hostname}, client.Handler(seam.ID))
+		}
+	}
 	if s.blueprint.Network.DNS.Enabled {
-		server, err := simnet.StartDNS(s.blueprint.Network.DNS.Listen, s.simulatedHostnames(), s.blueprint.Network.DNS.UnknownPolicy, s.blueprint.Network.DNS.MaxQueries, s.recorder)
+		server, err := simnet.StartDNS(s.blueprint.Network.DNS.Listen, s.simulatedHostnames(), s.blueprint.Network.DNS.UnknownPolicy, s.blueprint.Network.DNS.MaxQueries, s.recorder, quiet...)
 		if err != nil {
 			return fmt.Errorf("start DNS simulation: %w", err)
 		}
 		s.dnsServer = server
 	}
+	router := simnet.NewHostRouter(s.hostRoutes, s.recorder, quiet...)
+	router.Rejected = func(host, reason string) { connectionFailure(seamIDs[host], reason) }
 	if s.blueprint.Network.HTTP.Enabled {
-		if err := s.serveTCP(s.blueprint.Network.HTTP.Listen, simnet.NewHostRouter(s.hostRoutes, s.recorder)); err != nil {
+		if err := s.serveTCP(s.blueprint.Network.HTTP.Listen, router); err != nil {
 			return fmt.Errorf("start HTTP simulation front door: %w", err)
 		}
 	}
 	if s.blueprint.Network.TLS.Enabled {
-		if err := s.serveTLS(s.blueprint.Network.TLS.Listen, simnet.NewHostRouter(s.hostRoutes, s.recorder)); err != nil {
+		if err := s.serveTLS(s.blueprint.Network.TLS.Listen, router); err != nil {
 			return fmt.Errorf("start HTTPS simulation front door: %w", err)
 		}
 	}
@@ -1184,7 +1242,7 @@ func (s *Server) fidelityMutation(ctx context.Context, definition injection.Defi
 		if err != nil {
 			return nil, nil, err
 		}
-		operation := statejournal.Operation{Kind: "file_upsert", Path: containerPath, Mode: 0o640, Blob: object.Digest, Size: object.Size}
+		operation := statejournal.Operation{Kind: "file_upsert", Owner: snapshot.SupervisorOwner, Path: containerPath, Mode: 0o640, Blob: object.Digest, Size: object.Size}
 		return []statejournal.Operation{operation}, func() error { return fsutil.WriteFile(hostPath, encoded, 0o640) }, nil
 	}
 	if err != nil || !info.Mode().IsRegular() {
@@ -1218,7 +1276,7 @@ func (s *Server) fidelityMutation(ctx context.Context, definition injection.Defi
 	if err != nil {
 		return nil, nil, err
 	}
-	operation := statejournal.Operation{Kind: "file_upsert", Path: containerPath, Mode: uint32(info.Mode().Perm()), Blob: object.Digest, Size: object.Size}
+	operation := statejournal.Operation{Kind: "file_upsert", Owner: snapshot.SupervisorOwner, Path: containerPath, Mode: uint32(info.Mode().Perm()), Blob: object.Digest, Size: object.Size}
 	return []statejournal.Operation{operation}, func() error {
 		if err := fsutil.WriteFile(hostPath, encoded, info.Mode().Perm()); err != nil {
 			return err
@@ -1232,7 +1290,7 @@ func (s *Server) validateInjectionTarget(definition injection.Definition) error 
 		return err
 	}
 	switch definition.Surface {
-	case "model_tool_result":
+	case "model_tool_result", "model_response":
 		return nil
 	case "database_response":
 		if s.databases[definition.Selector.Service] == nil {
@@ -1252,6 +1310,19 @@ func (s *Server) validateInjectionTarget(definition injection.Definition) error 
 			if service.ID == definition.Selector.Service {
 				if service.Response.Mode != "dynamic" {
 					return errors.New("attacker service response is static")
+				}
+				methods, paths, err := services.SinkAllowlists(service.Options)
+				if err != nil {
+					return err
+				}
+				if definition.Selector.Method == http.MethodHead || len(methods) == 1 && methods[0] == http.MethodHead {
+					return errors.New("attacker response injection requires a method with a response body")
+				}
+				if definition.Selector.Method != "" && len(methods) > 0 && !slices.Contains(methods, definition.Selector.Method) {
+					return errors.New("attacker response method is outside the declared allowlist")
+				}
+				if len(paths) > 0 && !slices.Contains(paths, definition.Selector.Path) {
+					return errors.New("attacker response path is outside the declared allowlist")
 				}
 				return nil
 			}
@@ -1494,6 +1565,13 @@ func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommit
 	if err := s.quiesce(ctx); err != nil {
 		return snapshot.Checkpoint{}, err
 	}
+	// Drain external calls before capturing application-owned state as well.
+	if s.httpsSeams != nil {
+		defer s.httpsSeams.Resume()
+		if err := s.httpsSeams.Pause(ctx); err != nil {
+			return snapshot.Checkpoint{}, err
+		}
+	}
 	if hasState {
 		if err := stateAdapter.saveState(ctx); err != nil {
 			return snapshot.Checkpoint{}, err
@@ -1510,12 +1588,12 @@ func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommit
 	}
 	defer releaseDatabases()
 	roots := s.containerRoots()
-	first, err := s.scanMutable(ctx, roots)
+	first, err := s.scanMutable(ctx, roots, allowance)
 	if err != nil {
 		return snapshot.Checkpoint{}, err
 	}
 	time.Sleep(100 * time.Millisecond)
-	second, err := s.scanMutable(ctx, roots)
+	second, err := s.scanMutable(ctx, roots, allowance)
 	if err != nil || second.Digest != first.Digest {
 		return snapshot.Checkpoint{}, errors.New("mutable filesystem did not reach a stable boundary")
 	}
@@ -1523,7 +1601,7 @@ func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommit
 		return snapshot.Checkpoint{}, fmt.Errorf("pause application: %w", err)
 	}
 	defer syscall.Kill(-s.app.Process.Pid, syscall.SIGCONT)
-	current, err := s.scanMutable(ctx, roots)
+	current, err := s.scanMutable(ctx, roots, allowance)
 	if err != nil {
 		return snapshot.Checkpoint{}, err
 	}
@@ -1564,7 +1642,7 @@ func (s *Server) createSnapshot(ctx context.Context, label string, maximumCommit
 	s.metadata.Consumed.SnapshotBytes += canonicalSize
 	budget, _ := json.Marshal(s.metadata.Consumed)
 	s.metadataMu.Unlock()
-	report, err := s.evaluate()
+	report, err := s.evaluate(ctx)
 	if err != nil {
 		return snapshot.Checkpoint{}, err
 	}
@@ -1651,8 +1729,8 @@ func (s *Server) eventsHandler(writer http.ResponseWriter, request *http.Request
 	writeJSON(writer, 200, map[string]any{"events": filtered})
 }
 
-func (s *Server) evaluationHandler(writer http.ResponseWriter, _ *http.Request) {
-	report, err := s.evaluate()
+func (s *Server) evaluationHandler(writer http.ResponseWriter, request *http.Request) {
+	report, err := s.evaluate(request.Context())
 	if err != nil {
 		writeError(writer, 500, "evaluation_failed", err.Error())
 		return
@@ -1762,8 +1840,25 @@ func (s *Server) quiesce(ctx context.Context) error {
 func (s *Server) Close(ctx context.Context) error {
 	var result error
 	s.closeOnce.Do(func() {
+		if s.snapshotHelper != nil {
+			defer s.snapshotHelper.close()
+		}
 		if s.execution != nil {
 			result = errors.Join(result, s.execution.Close("session_stopped"))
+		}
+		if s.httpsSeams != nil {
+			if adapter, ok := s.adapter.(*protocolApplicationAdapter); ok {
+				result = errors.Join(result, adapter.Close(ctx))
+			}
+			if s.app != nil && s.app.Process != nil {
+				_ = syscall.Kill(-s.app.Process.Pid, syscall.SIGTERM)
+				select {
+				case <-s.applicationExited:
+				case <-ctx.Done():
+				case <-time.After(5 * time.Second):
+				}
+			}
+			result = errors.Join(result, s.httpsSeams.Pause(ctx))
 		}
 		close(s.identityStop)
 		if s.dnsServer != nil {
@@ -1772,6 +1867,9 @@ func (s *Server) Close(ctx context.Context) error {
 		for _, server := range s.servers {
 			result = errors.Join(result, server.Shutdown(ctx))
 		}
+		if s.seamLog != nil {
+			result = errors.Join(result, s.seamLog.Close())
+		}
 		for _, listener := range s.listeners {
 			_ = listener.Close()
 		}
@@ -1779,7 +1877,7 @@ func (s *Server) Close(ctx context.Context) error {
 			_ = s.helperIn.Close()
 			s.helperIn = nil
 		}
-		if adapter, ok := s.adapter.(*protocolApplicationAdapter); ok {
+		if adapter, ok := s.adapter.(*protocolApplicationAdapter); ok && s.httpsSeams == nil {
 			result = errors.Join(result, adapter.Close(ctx))
 		}
 		if s.app != nil && s.app.Process != nil {
@@ -1797,7 +1895,7 @@ func (s *Server) Close(ctx context.Context) error {
 		if len(s.identityFiles) > 0 {
 			_ = os.Remove(filepath.Dir(s.identityFiles[0]))
 		}
-		if report, err := s.evaluate(); err != nil {
+		if report, err := s.evaluate(ctx); err != nil {
 			result = errors.Join(result, fmt.Errorf("persist final evaluation: %w", err))
 		} else if err := fsutil.WriteJSON(s.paths.Evaluation, report, 0o640); err != nil {
 			result = errors.Join(result, fmt.Errorf("persist final evaluation: %w", err))
@@ -1841,6 +1939,9 @@ func (s *Server) serveTLS(address string, handler http.Handler) error {
 		return err
 	}
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{certificate}}}
+	if s.seamLog != nil {
+		server.ErrorLog = log.New(seamTLSLog{file: s.seamLog, session: s.metadata.ID}, "", 0)
+	}
 	s.listeners = append(s.listeners, listener)
 	s.servers = append(s.servers, server)
 	go server.ServeTLS(listener, "", "")
@@ -1963,7 +2064,7 @@ func (s *Server) replayManagedState() error {
 	return nil
 }
 
-func (s *Server) evaluate() (evaluation.Report, error) {
+func (s *Server) evaluate(ctx context.Context) (evaluation.Report, error) {
 	if err := s.evidenceError(); err != nil {
 		return evaluation.Report{}, err
 	}
@@ -1975,9 +2076,18 @@ func (s *Server) evaluate() (evaluation.Report, error) {
 	for id, handler := range s.services {
 		serviceState[id] = handler.Snapshot()
 	}
+	roots := s.containerRoots()
+	if timeout := s.blueprint.Application.Interface.TurnTimeoutMS; timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(timeout)*time.Millisecond)
+		defer cancel()
+	}
 	report, err := evaluation.Evaluate(evaluation.Input{
+		Context: ctx, ReadMutable: func(ctx context.Context, q snapshot.ReadRequest) (snapshot.ReadResponse, error) {
+			return s.readMutable(ctx, roots, q)
+		},
 		Blueprint: s.blueprint, Events: events, Injections: s.injections.OperatorEvaluation(),
-		Blobs: s.blobs, Services: serviceState, MutableRoot: s.containerRoots(),
+		Blobs: s.blobs, Services: serviceState, MutableRoot: roots,
 	})
 	if err != nil {
 		return evaluation.Report{}, err
@@ -2034,6 +2144,11 @@ func (s *Server) serveUnix(path string, handler http.Handler) error {
 }
 
 func (s *Server) prepareMutableRoots() error {
+	// Restore bootstrap already applied the recorded modes and logical owners.
+	if s.metadata.ParentSessionID != "" {
+		return nil
+	}
+
 	for _, root := range s.blueprint.Application.Persistence.MutableRoots {
 		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
@@ -2095,6 +2210,9 @@ func (s *Server) startApplicationHelper(asApplication bool) error {
 		s.app = helper
 		go func() {
 			err := helper.Wait()
+			if s.applicationExited != nil {
+				close(s.applicationExited)
+			}
 			_ = stderr.Close()
 			select {
 			case s.done <- err:
@@ -2201,11 +2319,13 @@ func (s *Server) containerRoots() []snapshot.Root {
 	return result
 }
 
-func (s *Server) scanMutable(ctx context.Context, roots []snapshot.Root) (snapshot.Manifest, error) {
+func (s *Server) scanMutable(ctx context.Context, roots []snapshot.Root, allowance int64) (snapshot.Manifest, error) {
 	if len(roots) == 0 {
 		return snapshot.EmptyManifest(), nil
 	}
-	return snapshot.Scan(ctx, roots, s.blobs, s.blueprint.Limits.MaxBlobBytes)
+	return snapshot.ScanWithReader(ctx, roots, s.blobs, allowance, snapshot.Identities{SupervisorUID: os.Getuid(), SupervisorGID: os.Getgid(), ApplicationUID: int(s.appUID), ApplicationGID: int(s.appGID)}, func(ctx context.Context, q snapshot.ReadRequest) (snapshot.ReadResponse, error) {
+		return s.readMutable(ctx, roots, q)
+	})
 }
 
 func (s *Server) servedRoute(method, path string) bool {
@@ -2213,22 +2333,6 @@ func (s *Server) servedRoute(method, path string) bool {
 	return ok
 }
 
-func optionStrings(value any) []string {
-	raw, ok := value.([]any)
-	if !ok {
-		if typed, ok := value.([]string); ok {
-			return typed
-		}
-		return nil
-	}
-	result := []string{}
-	for _, item := range raw {
-		if text, ok := item.(string); ok {
-			result = append(result, text)
-		}
-	}
-	return result
-}
 func isLoopback(host string) bool {
 	if host == "localhost" {
 		return true

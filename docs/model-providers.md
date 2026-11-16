@@ -495,3 +495,11 @@ endpoint or local qualification fixture. HTTPS is required except for a loopback
 IP using HTTP. Redirects are refused. This host setting is independent of the
 similarly named variable in the sandbox Blueprint; guest settings cannot choose
 the host endpoint or credentials.
+
+## Testing model responses
+
+The [`model_response` injection surface](injections-and-evaluation.md#model-response-injection)
+alters non-streaming generation responses after provider translation into the
+application's codec. It permits malformed tool calls with valid outer JSON.
+Usage accounting and original response evidence remain unmodified. Embeddings,
+streaming, provider credentials and HTTP status/header injection are excluded.

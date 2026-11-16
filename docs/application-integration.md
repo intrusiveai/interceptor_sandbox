@@ -256,3 +256,11 @@ Before relying on an environment:
 See [PostgreSQL and pgvector](postgresql.md) for the managed database Blueprint,
 wrapper packaging, verified driver TLS, database injection surfaces, independent
 committed-state oracles, evidence and coordinated restore contract.
+
+## External tracing and guardrails
+
+Use a [declared HTTPS seam](https-egress.md) for an existing tracing or guardrail
+client. Configure its endpoint and synthetic SDK credentials normally; declare
+its Python trust environment when applicable. Real credentials stay on the host.
+Use normal SDK flush/close behavior during application shutdown. SDK failures
+before a request is sent are diagnosed through application logs.

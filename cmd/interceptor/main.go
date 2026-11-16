@@ -30,6 +30,8 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/hostlifetime"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/hostrun"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/httpsseam"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/integrationcontract"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/localapi"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/ociruntime"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/recording"
@@ -42,6 +44,9 @@ import (
 var version = buildinfo.Version
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == credentials.OnePasswordChildCommand {
+		os.Exit(credentials.ServeOnePasswordChild(context.Background(), os.Stdin, os.Stdout, "Interceptor Sandbox", version))
+	}
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -68,8 +73,21 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	}
 	switch arguments[0] {
 	case "version", "--version", "-version":
+		if len(arguments) == 2 && arguments[1] == "--json" {
+			return writeJSON(stdout, map[string]string{"version": version, "source_commit": buildinfo.SourceCommit, "interceptor_contract_version": integrationcontract.Version()})
+		}
+		if len(arguments) != 1 {
+			return errors.New("usage: interceptor version [--json]")
+		}
 		fmt.Fprintln(stdout, version)
 		return nil
+	case "contract":
+		if len(arguments) != 2 || arguments[1] != "--json" {
+			return errors.New("usage: interceptor contract --json")
+		}
+		// Export the exact bytes identified by the contract API digest.
+		_, err := stdout.Write(integrationcontract.JSON())
+		return err
 	case "environment":
 		return environmentCommand(arguments[1:], stdout)
 	case "credentials":
@@ -82,6 +100,11 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return sandboxdCommand(arguments[1:])
 	case "app-helper":
 		return sandboxd.RunHelper()
+	case "image-private-mounts":
+		if len(arguments) != 2 {
+			return errors.New("image-private-mounts requires UID")
+		}
+		return appimage.EnsurePrivateMounts(arguments[1])
 	case "image-postgresql-user":
 		if len(arguments) != 2 {
 			return errors.New("image-postgresql-user requires UID")
@@ -254,6 +277,7 @@ func runCommand(arguments []string, stdout io.Writer) error {
 	providerURL := flags.String("provider-base-url", os.Getenv("INTERCEPTOR_PROVIDER_BASE_URL"), "fixed provider base URL")
 	credentialEnvironment := flags.String("model-api-key-env", "", "host environment variable containing provider credential (defaults to OPENAI_API_KEY for OpenAI providers)")
 	credentialConfig := flags.String("credential-config", "", "host secret-store profile and credential-reference YAML")
+	seamConfig := flags.String("https-seam-config", "", "host HTTPS seam bindings and optional diagnostics YAML")
 	credentialID := flags.String("model-credential-id", "", "stable host credential ID used by the model provider")
 	production := flags.Bool("production", false, "enforce production credential policy")
 	feedbackProfile := flags.String("feedback-profile", "", "immutable adaptive feedback profile (default black-box)")
@@ -312,7 +336,11 @@ func runCommand(arguments []string, stdout io.Writer) error {
 	} else if *providerAuthMode == "aws-profile" {
 		return errors.New("aws-profile requires --aws-profile")
 	}
-	apiKey, err := resolveProviderOptions(ctx, *providerType, *providerURL, *credentialEnvironment, *credentialConfig, *credentialID, *providerAuthMode, *production)
+	modelCredentialConfig := *credentialConfig
+	if *seamConfig != "" && *credentialID == "" {
+		modelCredentialConfig = ""
+	}
+	apiKey, err := resolveProviderOptions(ctx, *providerType, *providerURL, *credentialEnvironment, modelCredentialConfig, *credentialID, *providerAuthMode, *production)
 	if err != nil {
 		return err
 	}
@@ -320,7 +348,21 @@ func runCommand(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	_, seamReport, err := environment.Verify(*directory)
+	if err != nil {
+		return err
+	}
+	seams, err := httpsseam.Load(ctx, *seamConfig, seamReport.Blueprint.Network.HTTPSSeams, func(ctx context.Context, id string) (string, error) {
+		if *credentialConfig == "" {
+			return "", errors.New("HTTPS seam credentials require --credential-config")
+		}
+		return resolveStoredCredential(ctx, *credentialConfig, id)
+	})
+	if err != nil {
+		return err
+	}
 	err = localapi.Run(ctx, hostrun.Config{
+		HTTPSSeams:             seams,
 		EmbeddingsProviderType: embeddings.provider, EmbeddingsURL: embeddings.baseURL,
 		EmbeddingsAPIKey: embeddingKey, AllowedEmbeddingModels: embeddings.models,
 		EmbeddingsAuth: embeddings.auth, EmbeddingsAWSRegion: embeddings.awsRegion, EmbeddingsAWSProfile: embeddings.awsProfile,
@@ -1325,5 +1367,6 @@ Commands:
   evaluate <session-id>
   coverage <session-id>
   logs verify|tail|export <session-id>
-  version`)
+  version [--json]
+  contract --json`)
 }

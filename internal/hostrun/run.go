@@ -32,6 +32,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/filemanagement"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/fsutil"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/hostlifetime"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/httpsseam"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/ociruntime"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/postgresql"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/session"
@@ -40,6 +41,7 @@ import (
 )
 
 type Config struct {
+	HTTPSSeams             *httpsseam.Prepared
 	EvidenceMaxBytes       int64
 	SpoolMaxBytes          int64
 	OnFault                func(string, error)
@@ -101,6 +103,9 @@ func Run(ctx context.Context, config Config) (session.Metadata, error) {
 	}
 	if err := appimage.Verify(ctx, applicationLock, lock, config.Docker); err != nil {
 		return session.Metadata{}, err
+	}
+	if len(report.Blueprint.Network.HTTPSSeams) > 0 && applicationLock.PrivateMountUID != os.Getuid() {
+		return session.Metadata{}, errors.New("HTTPS seam wrapper needs private supervisor mounts; rebuild with interceptor app build on this host")
 	}
 	if err := appimage.VerifyTLSMaterial(dataRoot, report.Blueprint, applicationLock); err != nil {
 		return session.Metadata{}, err
@@ -206,6 +211,9 @@ func Restore(ctx context.Context, config Config, sourceSessionID, checkpointID s
 	if err := appimage.Verify(ctx, applicationLock, environmentLock, config.Docker); err != nil {
 		return session.Metadata{}, err
 	}
+	if len(report.Blueprint.Network.HTTPSSeams) > 0 && applicationLock.PrivateMountUID != os.Getuid() {
+		return session.Metadata{}, errors.New("HTTPS seam wrapper needs private supervisor mounts; rebuild with interceptor app build on this host")
+	}
 	if err := appimage.VerifyTLSMaterial(dataRoot, report.Blueprint, applicationLock); err != nil {
 		return session.Metadata{}, err
 	}
@@ -231,6 +239,9 @@ func Restore(ctx context.Context, config Config, sourceSessionID, checkpointID s
 		if service.Kind == "postgresql" && !databaseCheckpoints[service.ID] {
 			return session.Metadata{}, fmt.Errorf("checkpoint lacks database %s", service.ID)
 		}
+	}
+	if err := snapshot.RequireOwnership(transactions[:checkpoint.JournalSeq]); err != nil {
+		return session.Metadata{}, err
 	}
 	blobs, err := blobstore.Open(sourcePaths.Blobs, report.Blueprint.Limits.MaxBlobBytes)
 	if err != nil {
@@ -319,23 +330,24 @@ func Restore(ctx context.Context, config Config, sourceSessionID, checkpointID s
 			}
 		}
 	}
+	restoredManifest := snapshot.EmptyManifest()
 	if len(roots) > 0 {
-		if err := snapshot.ReplayFilesystem(ctx, roots, blobs, transactions, checkpoint.JournalSeq); err != nil {
+		restoredManifest, err = snapshot.RestoreManifest(baseline, roots, transactions, checkpoint.JournalSeq)
+		if err != nil {
+			return metadata, err
+		}
+	}
+
+	if restoredManifest.Digest != checkpoint.FileManifestDigest {
+		return metadata, fmt.Errorf("restored file manifest mismatch: expected %s, got %s", checkpoint.FileManifestDigest, restoredManifest.Digest)
+	}
+	if len(roots) > 0 {
+		if err := snapshot.StageFilesystem(ctx, roots, blobs, restoredManifest); err != nil {
 			return metadata, err
 		}
 	}
 	if err := adaptive.RestoreRegistries(paths.Root, transactions[:checkpoint.JournalSeq]); err != nil {
 		return metadata, err
-	}
-	restoredManifest := snapshot.EmptyManifest()
-	if len(roots) > 0 {
-		restoredManifest, err = snapshot.Scan(ctx, roots, blobs, report.Blueprint.Limits.MaxBlobBytes)
-		if err != nil {
-			return metadata, err
-		}
-	}
-	if restoredManifest.Digest != checkpoint.FileManifestDigest {
-		return metadata, fmt.Errorf("restored file manifest mismatch: expected %s, got %s", checkpoint.FileManifestDigest, restoredManifest.Digest)
 	}
 	if err := snapshot.WriteManifest(paths.FileManifest, restoredManifest); err != nil {
 		return metadata, err
@@ -386,6 +398,8 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 	var workers sync.WaitGroup
 	var stopBridge context.CancelFunc = func() {}
 	var closeServers = func() {}
+	var stopSeams = func() {}
+	var closeSeamDiagnostics = func() {}
 	var quotaDone chan struct{}
 	var dockerWatchDone chan struct{}
 	sessionID := metadata.ID
@@ -449,10 +463,11 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		case <-cleanup.Done():
 			err = errors.Join(err, cleanup.Err())
 		}
+		stopSeams()
 		stopBridge()
 		closeServers()
 		done := make(chan struct{})
-		go func() { workers.Wait(); writer.Close(); close(done) }()
+		go func() { workers.Wait(); closeSeamDiagnostics(); writer.Close(); close(done) }()
 		select {
 		case <-done:
 			if cleanupErr := filemanagement.CleanupSpools(cleanup, dataRoot, metadata, config.Docker); cleanupErr != nil {
@@ -550,6 +565,9 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		metadata.ApplicationURL = "http://" + applicationListener.Addr().String()
 		metadata.ControlURL = "http://" + controlListener.Addr().String()
 	}
+	if err := bindHTTPSSeams(config.HTTPSSeams, blueprint, dataRoot, metadata, paths); err != nil {
+		return metadata, err
+	}
 	containerName := "interceptor-" + metadata.ID
 	if err := session.Transition(&metadata, session.Starting); err != nil {
 		return metadata, err
@@ -576,6 +594,41 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 	bridgeContext, bridgeCancel := context.WithCancel(ctx)
 	stopBridge = bridgeCancel
 	bridgeErrors := make(chan error, 1)
+	if len(blueprint.Network.HTTPSSeams) > 0 {
+		connector, err := httpsseam.NewConnector(config.HTTPSSeams, metadata.ID, paths.Logs, blueprint.Limits.MaxBlobBytes, httpsseam.Timeout(blueprint))
+		if err != nil {
+			return metadata, err
+		}
+		closeSeamDiagnostics = func() { _ = connector.Close() }
+		seamContext, seamCancel := context.WithCancel(context.WithoutCancel(ctx))
+		stopSeams = seamCancel
+		if config.BridgeTransport == "unix" {
+			server, listener, err := bridge.ListenUnix(filepath.Join(paths.Sockets, "https-seam.sock"), connector)
+			if err != nil {
+				return metadata, err
+			}
+			stopSeams = func() { seamCancel(); _ = server.Close(); _ = listener.Close() }
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				err := server.Serve(listener)
+				select {
+				case bridgeErrors <- err:
+				case <-bridgeContext.Done():
+				}
+			}()
+		} else {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				err := bridge.ServeHTTPSpool(seamContext, bridge.HTTPSpoolServerConfig{Root: filepath.Join(paths.Sockets, "https-seam-spool"), Seam: connector, MaxBytes: httpsseam.FrameLimit(blueprint.Limits.MaxBlobBytes)})
+				select {
+				case bridgeErrors <- err:
+				case <-bridgeContext.Done():
+				}
+			}()
+		}
+	}
 	if config.BridgeTransport == "unix" {
 		connectorServer, connectorListener, listenErr := bridge.ListenUnix(filepath.Join(paths.Sockets, "model.sock"), connector)
 		if listenErr != nil {
@@ -600,8 +653,12 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 	if blueprint.Network.TLS.Enabled {
 		mounts = append(mounts, ociruntime.Mount{Source: appimage.TLSMaterialDirectory(dataRoot, blueprint), Target: "/run/interceptor-tls", ReadOnly: true})
 	}
-	for _, root := range roots {
-		mounts = append(mounts, ociruntime.Mount{Source: root.HostPath, Target: root.ContainerPath})
+	for index, root := range roots {
+		name, err := config.Docker.CreateMutableVolume(ctx, index)
+		if err != nil {
+			return metadata, err
+		}
+		mounts = append(mounts, ociruntime.Mount{Source: name, Target: root.ContainerPath, Volume: true})
 	}
 	for _, seed := range blueprint.Filesystem.Seed {
 		if seed.ReadOnly {
@@ -616,6 +673,9 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 		for _, service := range blueprint.AttackerServices {
 			hostnames = append(hostnames, service.Hostnames...)
 		}
+		for _, seam := range blueprint.Network.HTTPSSeams {
+			hostnames = append(hostnames, seam.Hostname)
+		}
 		for _, issuer := range blueprint.Identity.Issuers {
 			hostnames = append(hostnames, issuer.Hostnames...)
 		}
@@ -627,16 +687,22 @@ func runPrepared(ctx context.Context, config Config, dataRoot string, blueprint 
 	if blueprint.Network.DNS.Enabled || blueprint.Network.HTTP.Enabled || blueprint.Network.TLS.Enabled {
 		sysctls["net.ipv4.ip_unprivileged_port_start"] = "53"
 	}
+	containerEnvironment := map[string]string{
+		"INTERCEPTOR_HOST_UID": strconv.Itoa(os.Getuid()), "INTERCEPTOR_HOST_GID": strconv.Itoa(os.Getgid()),
+		"INTERCEPTOR_APP_UID": "20000", "INTERCEPTOR_APP_GID": strconv.Itoa(os.Getgid()),
+		"INTERCEPTOR_BRIDGE_TRANSPORT": config.BridgeTransport,
+	}
+	caps := []string{"SETUID", "SETGID", "KILL"}
+	if len(roots) > 0 {
+		containerEnvironment["INTERCEPTOR_INITIALIZE_FILES"] = "1"
+		containerEnvironment["INTERCEPTOR_NATIVE_MUTABLE"] = "1"
+		caps = append(caps, "CHOWN", "FOWNER", "DAC_OVERRIDE")
+	}
 	containerID, err := config.Docker.Create(ctx, ociruntime.RunConfig{
-		Name: containerName, Image: applicationLock.WrapperImage, User: "0:0",
-		Environment: map[string]string{
-			"INTERCEPTOR_HOST_UID": strconv.Itoa(os.Getuid()), "INTERCEPTOR_HOST_GID": strconv.Itoa(os.Getgid()),
-			"INTERCEPTOR_APP_UID": "20000", "INTERCEPTOR_APP_GID": strconv.Itoa(os.Getgid()),
-			"INTERCEPTOR_BRIDGE_TRANSPORT": config.BridgeTransport,
-		},
+		Name: containerName, Image: applicationLock.WrapperImage, User: "0:0", Environment: containerEnvironment,
 		Mounts: mounts, Hostnames: hostnames, DNS: dns, Sysctls: sysctls, PIDs: metadata.Limits.MaxPIDs, MemoryBytes: metadata.Limits.MemoryBytes,
 		CPUs: metadata.Limits.CPUs, ReadOnly: true, NetworkNone: true, NoNewPrivileges: true, DropAllCaps: true,
-		AddCaps: []string{"SETUID", "SETGID", "KILL"}, TmpfsBytes: 64 << 20,
+		AddCaps: caps, TmpfsBytes: 64 << 20,
 	})
 	if containerID != "" {
 		launchedID.Store(&containerID)
@@ -1019,7 +1085,7 @@ func unixProxyServer(listener net.Listener, socket string, allowed func(*http.Re
 	target, _ := url.Parse("http://unix")
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Transport = &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		return bridge.DialUnix(ctx, socket)
 	}}
 	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if allowed != nil && !allowed(request) {
@@ -1036,7 +1102,7 @@ func callUnix(ctx context.Context, socket, method, path string, body []byte, max
 		return nil, errors.New("Unix control response limit must be positive")
 	}
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		return bridge.DialUnix(ctx, socket)
 	}}
 	client := &http.Client{Transport: transport}
 	request, err := http.NewRequestWithContext(ctx, method, "http://unix"+path, bytes.NewReader(body))
@@ -1165,4 +1231,26 @@ func embeddingsProvider(ctx context.Context, config Config) (bridge.ModelProvide
 		return nil, errors.New("unsupported embeddings provider")
 	}
 	return bridge.NewOpenAIEmbeddingsProvider(bridge.HTTPProviderConfig{BaseURL: config.EmbeddingsURL, APIKey: config.EmbeddingsAPIKey})
+}
+
+func bindHTTPSSeams(prepared *httpsseam.Prepared, blueprint *environment.Blueprint, dataRoot string, metadata session.Metadata, paths session.Paths) error {
+	if err := prepared.Check(blueprint.Network.HTTPSSeams); err != nil {
+		return err
+	}
+	if len(blueprint.Network.HTTPSSeams) > 0 {
+		binding := prepared.Digest()
+		if metadata.ParentSessionID != "" {
+			previous, err := os.ReadFile(filepath.Join(session.PathsFor(dataRoot, metadata.ParentSessionID).Root, "https-seam-binding"))
+			if err != nil || string(previous) != binding {
+				return errors.New("HTTPS seam bindings changed since snapshot; use the original origin, credential references and trust bundle")
+			}
+		}
+		if err := fsutil.WriteFile(filepath.Join(paths.Root, "https-seam-binding"), []byte(binding), 0600); err != nil {
+			return err
+		}
+		if err := fsutil.WriteJSON(filepath.Join(paths.Sockets, "https-seam-policy.json"), prepared.StrippedHeaders(), 0600); err != nil {
+			return err
+		}
+	}
+	return nil
 }

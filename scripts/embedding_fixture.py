@@ -15,7 +15,8 @@ import uuid
 
 
 class EmbeddingFixture(AbstractContextManager):
-    def __init__(self):
+    def __init__(self, tool_calls=False):
+        self.tool_calls = tool_calls
         self.calls = []
         self.failures = []
         self.servers = []
@@ -54,6 +55,10 @@ class EmbeddingFixture(AbstractContextManager):
                     response = {'id': 'fixture-chat', 'object': 'chat.completion', 'created': 0,
                                 'model': model, 'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': 'generation fixture OK'}, 'finish_reason': 'stop'}],
                                 'usage': {'prompt_tokens': 4, 'completion_tokens': 1, 'total_tokens': 5}}
+                    if fixture.tool_calls:
+                        response['choices'][0].update(finish_reason='tool_calls', message={
+                            'role': 'assistant', 'content': None, 'tool_calls': [{'id': 'call-1', 'type': 'function',
+                            'function': {'name': 'lookup_order', 'arguments': '{"order_id":"order-1"}'}}]})
                 elif model == 'embed-error':
                     status, response = 429, {'error': {'message': 'fixture rate limit', 'type': 'rate_limit_error'}}
                 else:

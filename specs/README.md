@@ -53,6 +53,24 @@ attribution, terminal execution closure and campaign reporting. The
 `interceptor-improvements.md` describes the cross-project integration
 capabilities and AEF consumption rules without redefining these schemas.
 
+## Model-response injection
+
+[`model-response-injection.md`](model-response-injection.md) specifies controlled
+mutations of model responses before target application consumption, including
+malformed tool calls, native API integration and independent response evidence.
+
+## Interceptor–Operator compatibility
+
+[`interceptor-operator-contract.md`](interceptor-operator-contract.md) defines
+the written capability contract, automatic API-based version compatibility check and
+release publishing requirements.
+
+## Declared HTTPS egress
+
+[`https-egress-seam.md`](https-egress-seam.md) defines declared HTTPS access to
+public and private external services, host-managed credentials, connection
+diagnostics and qualification with tracing and guardrail integrations.
+
 ## Application state snapshots
 
 [`application-state-snapshots.md`](application-state-snapshots.md) defines optional

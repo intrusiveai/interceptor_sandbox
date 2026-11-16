@@ -20,6 +20,7 @@ import (
 	"github.com/intrusive-ai/interceptor-sandbox/internal/adaptive"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/blobstore"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/bridge"
+	"github.com/intrusive-ai/interceptor-sandbox/internal/contracttest"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/digest"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/environment"
 	"github.com/intrusive-ai/interceptor-sandbox/internal/gatewayhost"
@@ -307,6 +308,34 @@ func (a *blockedOperationAdapter) Invoke(ctx context.Context, _ applicationInvoc
 	}
 }
 func TestSpoolClosureAndStatusBypassLongInvocation(t *testing.T) {
+	validator, err := contracttest.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateRecord := func(result adaptive.GatewayResponse, state string) {
+		t.Helper()
+		var record adaptive.OperationRecord
+		if err := json.Unmarshal(result.Body, &record); err != nil {
+			t.Fatal(err)
+		}
+		if result.Status != 200 || record.State != state {
+			t.Fatalf("unexpected operation record: %+v", result)
+		}
+		if state == "running" && (record.Response.Status != 0 || record.Response.SessionRevision != 0 || len(record.Response.Body) != 0) {
+			t.Fatalf("pending record no longer uses the empty placeholder: %+v", record.Response)
+		}
+		if state == "completed" && record.Response.Status != 200 {
+			t.Fatalf("completed record lacks its result: %+v", record.Response)
+		}
+		raw, err := json.Marshal(result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validator.Validate("#/components/schemas/OperationStatusResponse", raw); err != nil {
+			t.Fatalf("actual %s operation record violates contract: %v", state, err)
+		}
+	}
+
 	s, _ := nativeOperationServer(t, "spool")
 	s.blueprint.Application.Interface.TurnTimeoutMS = 10000
 	adapter := &blockedOperationAdapter{started: make(chan struct{}), release: make(chan struct{})}
@@ -347,9 +376,7 @@ func TestSpoolClosureAndStatusBypassLongInvocation(t *testing.T) {
 	}()
 	select {
 	case result := <-lookup:
-		if result.Status != 200 || !strings.Contains(string(result.Body), `"state":"running"`) {
-			t.Fatalf("lookup: %+v", result)
-		}
+		validateRecord(result, "running")
 	case <-time.After(time.Second):
 		t.Fatal("spool serialized status behind invocation")
 	}
@@ -368,6 +395,7 @@ func TestSpoolClosureAndStatusBypassLongInvocation(t *testing.T) {
 	if result := <-done; result.Status != 200 {
 		t.Fatalf("admitted operation lost result: %+v", result)
 	}
+	validateRecord(nativeCall(t, replacement, s, "finished-status", "operation.status", operationLookup{OperationID: "active"}, nil), "completed")
 	if result := nativeCall(t, replacement, s, "post-close", "artifact.register", artifactRegistration{Descriptor: artifact, Content: payload}, nil); result.Status != 409 {
 		t.Fatal("closed spool admitted mutation")
 	}
