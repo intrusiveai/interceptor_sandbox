@@ -338,7 +338,11 @@ GitHub subject does not satisfy the new trust policy.
    ```
 
    This setting affects **every OIDC job in this repository**, not just releases.
-   All such jobs must declare an environment for the new subject to be issued.
+   Include GitHub-managed Dependabot and Dependency Graph jobs in that review;
+   they do not declare an environment. Use `context`, which expands to
+   `environment:production` for the publisher and the applicable ref/event context
+   for jobs without an environment. Requiring the `environment` claim directly
+   prevents those managed jobs from starting.
 2. Sign in to `gh` with repository administrator access. Run this read-only
    command and retain its output with your configuration change record:
 
@@ -346,25 +350,44 @@ GitHub subject does not satisfy the new trust policy.
    gh api repos/intrusiveai/interceptor_sandbox/actions/oidc/customization/sub
    ```
 
-3. After the administrator confirms the IAM migration in step 5, run:
+3. After the administrator confirms the IAM migration in step 5, run the
+   following with `gh` and `jq` installed. Preserve the current immutable-subject
+   setting; changing that format is a separate AWS trust migration.
 
    ```sh
-   gh api --method PUT \
-     repos/intrusiveai/interceptor_sandbox/actions/oidc/customization/sub \
-     --input - <<'JSON'
-   {"use_default":false,"include_claim_keys":["repository_id","repository_owner_id","environment","ref","workflow_ref"]}
-   JSON
+   set -o pipefail
+   gh api repos/intrusiveai/interceptor_sandbox/actions/oidc/customization/sub |
+     jq '{use_default:false,
+          include_claim_keys:["repository_id","repository_owner_id","context","ref","workflow_ref"]}
+         + (if has("use_immutable_subject") then
+              {use_immutable_subject:.use_immutable_subject} else {} end)' |
+     gh api --method PUT \
+       repos/intrusiveai/interceptor_sandbox/actions/oidc/customization/sub --input -
    ```
 
    Keep the exact key order. Use `workflow_ref`, not `job_workflow_ref`: the
    publisher is an ordinary job, not a reusable workflow.
 4. Repeat the GET command from step 2 and confirm `use_default` is `false` and
-   the five keys appear in the specified order. For tag `v0.0.1`, the subject
-   expected by the role is:
+   the five keys appear in the specified order, with the immutable-subject
+   setting unchanged. For tag `v0.0.1`, the custom claims must still include:
 
    ```text
    repository_id:1384022338:repository_owner_id:296295422:environment:production:ref:refs/tags/v0.0.1:workflow_ref:intrusiveai/interceptor_sandbox/.github/workflows/publish-catalog.yml@refs/tags/v0.0.1
    ```
+
+   Compare the complete subject, including any immutable repository prefix
+   reported by GitHub, with the deployed AWS trust policy. Retain its repository,
+   production environment, release-tag, workflow-path, and audience restrictions.
+   Validate role assumption without catalog publication before relying on the
+   next release. Confirm a fresh dependency job executes its steps. GitHub-managed
+   runs may reject `gh run rerun` with `This workflow run cannot be retried`.
+   For security updates, open **Security and quality → Dependabot**, select the
+   affected alert, and use **Try again** or **Create Dependabot security update**
+   if offered. If neither is available, validation remains pending until GitHub
+   starts a fresh job; do not report the configuration change as a passing run.
+   For version updates, use **Insights → Dependency graph → Dependabot → Recent update jobs →
+   Check for updates**. These controls start new jobs; the old failed runs remain
+   in history. See GitHub's [Dependabot retry instructions](https://docs.github.com/en/enterprise-cloud%40latest/code-security/how-tos/secure-your-supply-chain/manage-your-dependency-security/re-run-dependabot-jobs).
 
 The subject binds the workflow file and ref, not its contents. Protect release
 tags and review publisher/workflow changes before approving production jobs.
